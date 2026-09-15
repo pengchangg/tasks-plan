@@ -13,16 +13,16 @@ import (
 	"time"
 )
 
-// Auth throttling. Credentials are guessable by design (a 4 digit child PIN,
-// a shared family code), and every verification allocates 64 MiB, so the
-// public auth endpoints need a request brake and a bound on hashing.
+// Auth throttling. The parent password is the only credential the app has,
+// and every verification allocates 64 MiB, so the public auth endpoints need a
+// request brake and a bound on hashing.
 //
 // Two independent budgets:
 //   - authIP bounds requests per client address, which is what actually
 //     protects the process and the argon2 gate from being hammered.
-//   - authFail bounds credential *failures* per family actor, which is what
-//     protects the secret. Successful logins never consume it, so a busy
-//     household cannot lock itself out.
+//   - authFail bounds credential *failures* per family, which is what protects
+//     the password. A correct password never consumes it, so a busy household
+//     cannot lock itself out and a guessing child cannot deny the parent end.
 const (
 	authIPBurst    = 60       // requests per client address
 	authIPRefill   = 1.0      // tokens per second
@@ -118,9 +118,8 @@ func (s *Server) authLimit(next http.Handler) http.Handler {
 	})
 }
 
-// authFailureKey names the credential budget for one actor: a parent username
-// or a child id within a family. Keys only ever cover rows that were found, so
-// client input cannot mint unbounded buckets.
+// authFailureKey names the credential budget for one actor of a family: the
+// resolved family row, so client input cannot mint unbounded buckets.
 func authFailureKey(familyCode, actor string) string {
 	return strings.ToUpper(strings.TrimSpace(familyCode)) + ":" + actor
 }

@@ -58,11 +58,34 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body any, cookie 
 }
 func parentCookie(t *testing.T, h http.Handler) *http.Cookie {
 	t.Helper()
-	w := doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"FamilyCode": "DEMO", "Username": "parent", "Password": "growjoy2468"}, nil, "")
+	w := doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "growjoy2468"}, nil, "")
 	if w.Code != 200 {
-		t.Fatalf("login: %d %s", w.Code, w.Body.String())
+		t.Fatalf("parent unlock: %d %s", w.Code, w.Body.String())
 	}
 	return w.Result().Cookies()[0]
+}
+func childCookie(t *testing.T, h http.Handler, childID string) *http.Cookie {
+	t.Helper()
+	w := doJSON(t, h, "POST", "/api/v1/auth/child", nil, nil, "")
+	if w.Code != 200 {
+		t.Fatalf("child end: %d %s", w.Code, w.Body.String())
+	}
+	cookie := w.Result().Cookies()[0]
+	if childID == "" {
+		return cookie
+	}
+	if w = doJSON(t, h, "PATCH", "/api/v1/session/child", map[string]string{"childId": childID}, cookie, ""); w.Code != 204 {
+		t.Fatalf("select child: %d %s", w.Code, w.Body.String())
+	}
+	return cookie
+}
+func sessionFor(t *testing.T, s *Server, family, actorType, actor, child string) *http.Cookie {
+	t.Helper()
+	raw := "test-" + actorType + "-" + actor
+	if _, err := s.db.Exec(`INSERT INTO sessions(id,token_hash,family_id,actor_type,actor_id,selected_child_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)`, id("ses"), tokenHash(raw), family, actorType, actor, nullString(child), nowText(s.now().Add(time.Hour)), nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	return &http.Cookie{Name: cookieName, Value: raw}
 }
 func getStateTest(t *testing.T, h http.Handler, c *http.Cookie) State {
 	t.Helper()
@@ -118,6 +141,8 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 		_, err = legacy.Exec(`INSERT INTO families(id,code,name,timezone,created_at) VALUES('family-legacy','LEGACY','Legacy','Asia/Shanghai','2025-01-01T00:00:00Z')`)
 	}
 	if err == nil {
+		// A pre-004 database: children still carry pin_hash, which the pending
+		// migration has to drop.
 		_, err = legacy.Exec(`INSERT INTO children(id,family_id,name,avatar,color,pin_hash,level,experience,created_at) VALUES('child-legacy','family-legacy','Legacy child','x','#000','hash',4,72,'2025-01-01T00:00:00Z')`)
 	}
 	if err != nil {
@@ -170,7 +195,7 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 
 func TestRejectsCrossOriginMutation(t *testing.T) {
 	s := testServer(t)
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/parent", bytes.NewBufferString(`{"familyCode":"DEMO","username":"parent","password":"growjoy2468"}`))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/parent", bytes.NewBufferString(`{"password":"growjoy2468"}`))
 	r.Host = "growjoy.example"
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Origin", "https://evil.example")
@@ -254,11 +279,7 @@ func TestUploadContentSniffingAndConcurrentSubmission(t *testing.T) {
 	if task.ID == "" {
 		t.Fatal("missing todo task")
 	}
-	login := doJSON(t, h, http.MethodPost, "/api/v1/auth/child", map[string]string{"familyCode": "DEMO", "childId": task.ChildID, "pin": "2468"}, nil, "")
-	if login.Code != http.StatusOK {
-		t.Fatalf("child login: %s", login.Body.String())
-	}
-	child := login.Result().Cookies()[0]
+	child := childCookie(t, h, task.ChildID)
 
 	bad := httptest.NewRecorder()
 	h.ServeHTTP(bad, multipartRequest(t, "/api/v1/tasks/"+task.ID+"/submit", child, "bad-upload", map[string][]byte{"fake.jpg": []byte("plain text")}))
@@ -363,11 +384,7 @@ func TestReviewCreditsExactlyOnceUsesMinimumGrowthAndRedemptionCannotOverdraw(t 
 	if expensive.ID == "" {
 		t.Fatal("missing expensive wish")
 	}
-	childLogin := doJSON(t, h, "POST", "/api/v1/auth/child", map[string]string{"FamilyCode": "DEMO", "ChildID": pending.ChildID, "PIN": "2468"}, nil, "")
-	if childLogin.Code != 200 {
-		t.Fatalf("child login: %s", childLogin.Body.String())
-	}
-	childCookie := childLogin.Result().Cookies()[0]
+	childCookie := childCookie(t, h, pending.ChildID)
 	w = doJSON(t, h, "POST", "/api/v1/wishes/"+expensive.ID+"/redeem", map[string]any{}, childCookie, "redeem-too-much")
 	if w.Code != 409 {
 		t.Fatalf("overdraw status %d", w.Code)
@@ -383,6 +400,13 @@ func TestReviewCreditsExactlyOnceUsesMinimumGrowthAndRedemptionCannotOverdraw(t 
 func TestFamilyIsolationAndLastChildProtection(t *testing.T) {
 	s := testServer(t)
 	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "anotherpass"}); err != nil {
+		t.Fatal(err)
+	}
+	var otherFamily string
+	if err := s.db.QueryRow(`SELECT id FROM families WHERE code='OTHER'`).Scan(&otherFamily); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES('child-other',?,'Other child','⭐','#ffb547',1,0,0,?)`, otherFamily, nowText(s.now())); err != nil {
 		t.Fatal(err)
 	}
 	h := s.Handler()
@@ -402,32 +426,23 @@ func TestFamilyIsolationAndLastChildProtection(t *testing.T) {
 	if w.Code != 409 {
 		t.Fatalf("last child status=%d", w.Code)
 	}
-	other := doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"FamilyCode": "OTHER", "Username": "parent", "Password": "anotherpass"}, nil, "")
-	if other.Code != 200 {
-		t.Fatalf("other login: %s", other.Body.String())
-	}
-	otherState := getStateTest(t, h, other.Result().Cookies()[0])
-	if len(otherState.Children) != 0 || len(otherState.Tasks) != 0 {
-		t.Fatal("family data leaked")
+	// The app only opens sessions for the family it serves, so a second family
+	// is reached through a session row the test writes itself.
+	other := getStateTest(t, h, sessionFor(t, s, otherFamily, "parent", "par-other", "child-other"))
+	if len(other.Children) != 1 || other.Children[0].ID != "child-other" || len(other.Tasks) != 0 || len(other.Ledger) != 0 {
+		t.Fatalf("other family state leaked: %d children, %d tasks, %d ledger", len(other.Children), len(other.Tasks), len(other.Ledger))
 	}
 }
 
-func TestAuthFailureBudgetThrottlesGuessingWithoutLockingOutTheFamily(t *testing.T) {
+func TestParentPasswordBudgetThrottlesGuessingWithoutLockingOutTheFamily(t *testing.T) {
 	s := testServer(t)
-	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "PACIFIC", Name: "Pacific", Username: "parent", Password: "anotherpass"}); err != nil {
-		t.Fatal(err)
-	}
-	var childID string
-	if err := s.db.QueryRow(`SELECT id FROM children WHERE family_id=(SELECT id FROM families WHERE code='DEMO') ORDER BY created_at LIMIT 1`).Scan(&childID); err != nil {
-		t.Fatal(err)
-	}
 	h := s.Handler()
-	attempt := func(code, id, pin string) *httptest.ResponseRecorder {
-		return doJSON(t, h, "POST", "/api/v1/auth/child", map[string]string{"FamilyCode": code, "ChildID": id, "PIN": pin}, nil, "")
+	attempt := func(password string) *httptest.ResponseRecorder {
+		return doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": password}, nil, "")
 	}
 	guesses := 0
 	for range authFailBurst + 5 {
-		w := attempt("DEMO", childID, "0000")
+		w := attempt("wrong-password")
 		if w.Code == 429 {
 			break
 		}
@@ -439,24 +454,82 @@ func TestAuthFailureBudgetThrottlesGuessingWithoutLockingOutTheFamily(t *testing
 	if guesses > authFailBurst {
 		t.Fatalf("guessing was never throttled after %d attempts", guesses)
 	}
-	w := attempt("DEMO", childID, "0000")
+	w := attempt("wrong-password")
 	if w.Code != 429 || !strings.Contains(w.Body.String(), "too_many_requests") {
 		t.Fatalf("throttled response: %d %s", w.Code, w.Body.String())
 	}
-	// The correct PIN is never charged, so guessing cannot lock a family out.
-	if ok := attempt("DEMO", childID, "2468"); ok.Code != 200 {
-		t.Fatalf("correct PIN blocked by the failure budget: %d %s", ok.Code, ok.Body.String())
+	// The correct password is never charged, so guessing cannot lock the
+	// family out of its own parent end.
+	if ok := attempt("growjoy2468"); ok.Code != 200 {
+		t.Fatalf("correct password blocked by the failure budget: %d %s", ok.Code, ok.Body.String())
 	}
-	// Budgets are per actor and per family: a child's typos must not lock the
-	// parent out, and one family must not throttle another.
-	wrongParent := func(code string) *httptest.ResponseRecorder {
-		return doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"FamilyCode": code, "Username": "parent", "Password": "wrongpass"}, nil, "")
+	// The child end carries no credential and is not part of that budget.
+	if child := doJSON(t, h, "POST", "/api/v1/auth/child", nil, nil, ""); child.Code != 200 {
+		t.Fatalf("child end blocked by the parent budget: %d %s", child.Code, child.Body.String())
 	}
-	if w := wrongParent("DEMO"); w.Code != 401 {
-		t.Fatalf("child and parent share a failure budget: %d %s", w.Code, w.Body.String())
+}
+
+func TestChildEndIsTheDefaultAndThePasswordGatesTheManagementApi(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	w := doJSON(t, h, "POST", "/api/v1/auth/child", nil, nil, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"role":"child"`) {
+		t.Fatalf("child end: %d %s", w.Code, w.Body.String())
 	}
-	if w := wrongParent("PACIFIC"); w.Code != 401 {
-		t.Fatalf("failure budget leaked across families: %d %s", w.Code, w.Body.String())
+	child := w.Result().Cookies()[0]
+	if state := getStateTest(t, h, child); state.Role != "child" || len(state.Children) != 2 {
+		t.Fatalf("child state: role=%s children=%d", state.Role, len(state.Children))
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "小安", "avatar": "⭐", "color": "#ffb547"}, child, ""); w.Code != 403 {
+		t.Fatalf("child end created a profile: %d %s", w.Code, w.Body.String())
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "wrong-password"}, child, ""); w.Code != 401 {
+		t.Fatalf("wrong password status=%d", w.Code)
+	}
+	w = doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "growjoy2468"}, child, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"role":"parent"`) {
+		t.Fatalf("parent unlock: %d %s", w.Code, w.Body.String())
+	}
+	parent := w.Result().Cookies()[0]
+	state := getStateTest(t, h, parent)
+	if state.Role != "parent" {
+		t.Fatalf("parent role=%s", state.Role)
+	}
+	// Entering the parent end spends the child session, so the password is
+	// needed again next time rather than being restorable from the cookie.
+	if replaced := doJSON(t, h, "GET", "/api/v1/state", nil, child, ""); replaced.Code != 401 {
+		t.Fatalf("replaced child session still works: %d", replaced.Code)
+	}
+	back := doJSON(t, h, "POST", "/api/v1/auth/child", nil, parent, "")
+	if back.Code != 200 {
+		t.Fatalf("back to the child end: %d %s", back.Code, back.Body.String())
+	}
+	demoted := back.Result().Cookies()[0]
+	if state = getStateTest(t, h, demoted); state.Role != "child" {
+		t.Fatalf("demoted role=%s", state.Role)
+	}
+	if w = doJSON(t, h, "DELETE", "/api/v1/children/"+state.Children[0].ID, nil, demoted, ""); w.Code != 403 {
+		t.Fatalf("demoted session kept parent access: %d %s", w.Code, w.Body.String())
+	}
+	var sessions int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Fatalf("sessions=%d, want 1", sessions)
+	}
+}
+
+func TestChildEndWithoutAFamilyIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(Config{DBPath: filepath.Join(dir, "empty.db"), MediaDir: filepath.Join(dir, "media")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	w := doJSON(t, s.Handler(), "POST", "/api/v1/auth/child", nil, nil, "")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "no_family") {
+		t.Fatalf("child end without a family: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -465,7 +538,7 @@ func TestSaturatedHashGateShedsLoad(t *testing.T) {
 	for range argon2Slots {
 		s.hashGate <- struct{}{}
 	}
-	r := httptest.NewRequest("POST", "/api/v1/auth/parent", strings.NewReader(`{"FamilyCode":"DEMO","Username":"parent","Password":"growjoy2468"}`))
+	r := httptest.NewRequest("POST", "/api/v1/auth/parent", strings.NewReader(`{"password":"growjoy2468"}`))
 	r.Header.Set("Content-Type", "application/json")
 	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
 	defer cancel()

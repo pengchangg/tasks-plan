@@ -72,7 +72,9 @@ function Shell() {
   const navigate = useNavigate();
   const isParent = location.pathname.startsWith("/parent");
   const [showMenu, setShowMenu] = useState(false);
-  const [showParentPin, setShowParentPin] = useState(false);
+  const [parentGate, setParentGate] = useState<{ returnTo: string } | null>(
+    null,
+  );
   const parentUnlocked = store.state.role === "parent";
   const [reward, setReward] = useState<PointLedger | null>(null);
   const latestEarned = store.state.ledger
@@ -106,39 +108,35 @@ function Shell() {
     return () => window.clearTimeout(timer);
   }, [isParent, latestEarned, store.activeChild.id]);
   useEffect(() => {
-    if (store.ready && isParent && !parentUnlocked) {
+    // The parent end is never restored by the session: a parent path always
+    // costs the password, so a device left with a child cannot wander in.
+    if (store.ready && isParent && !parentUnlocked && !parentGate) {
+      setParentGate({ returnTo: location.pathname });
       navigate("/child", { replace: true });
-      setShowParentPin(true);
     }
-  }, [store.ready, isParent, navigate, parentUnlocked]);
-  const goRole = async (role: "child" | "parent") => {
+  }, [
+    store.ready,
+    isParent,
+    parentUnlocked,
+    parentGate,
+    location.pathname,
+    navigate,
+  ]);
+  const goRole = (role: "child" | "parent") => {
     setShowMenu(false);
-    if (role === "parent" && !parentUnlocked) {
-      setShowParentPin(true);
+    if (role === "parent") {
+      setParentGate({ returnTo: "/parent" });
       return;
     }
-    if (role === "child") {
-      setShowParentPin(false);
-      navigate("/child");
-      await store.actions.setRole(role);
-      return;
-    }
-    await store.actions.setRole(role);
-    navigate("/parent");
+    setParentGate(null);
+    navigate("/child");
+    store.actions.enterChild();
   };
-  const unlockParent = async (
-    password: string,
-    familyCode: string,
-    username: string,
-  ) => {
-    const unlocked = await store.actions.loginParent(
-      password,
-      familyCode,
-      username,
-    );
-    if (!unlocked) return false;
-    setShowParentPin(false);
-    navigate("/parent");
+  const unlockParent = async (password: string) => {
+    if (!(await store.actions.unlockParent(password))) return false;
+    const returnTo = parentGate?.returnTo ?? "/parent";
+    setParentGate(null);
+    navigate(returnTo);
     return true;
   };
   if (!store.ready)
@@ -147,7 +145,23 @@ function Shell() {
         <p>正在连接成长空间...</p>
       </div>
     );
-  if (!store.authenticated) return <ChildLogin store={store} />;
+  if (!store.connected)
+    return (
+      <main className="login-screen">
+        <div className="login-panel">
+          <span className="brand-mark">✦</span>
+          <span className="eyebrow">GROWJOY FAMILY</span>
+          <h1>无法进入成长空间</h1>
+          <p>{store.message || "请确认服务已经启动。"}</p>
+          <button
+            className="wide-primary"
+            onClick={() => void store.actions.reconnect()}
+          >
+            重试
+          </button>
+        </div>
+      </main>
+    );
   return (
     <div className={`app-shell ${isParent ? "parent-shell" : "child-shell"}`}>
       <header className="topbar">
@@ -205,11 +219,19 @@ function Shell() {
           </div>
         )}
       </header>
-      {showParentPin && (
+      {parentGate && (
         <ParentPinModal
-          onClose={() => setShowParentPin(false)}
+          onClose={() => setParentGate(null)}
           onConfirm={unlockParent}
         />
+      )}
+      {store.message && (
+        <div className="app-toast" role="alert">
+          <span>{store.message}</span>
+          <button onClick={store.dismissMessage} aria-label="关闭提示">
+            <X size={15} />
+          </button>
+        </div>
       )}
       {reward && (
         <RewardCelebration reward={reward} onClose={() => setReward(null)} />
@@ -223,160 +245,14 @@ function Shell() {
   );
 }
 
-function ChildLogin({ store }: { store: ReturnType<typeof useAppStore> }) {
-  const navigate = useNavigate();
-  const [mode, setMode] = useState<"child" | "parent">("child");
-  const [familyCode, setFamilyCode] = useState("DEMO");
-  const [childId, setChildId] = useState(store.profiles[0]?.id ?? "");
-  const [username, setUsername] = useState("parent");
-  const [secret, setSecret] = useState("");
-  const profiles = store.profiles;
-  useEffect(() => {
-    if (!profiles.some((profile) => profile.id === childId))
-      setChildId(profiles[0]?.id ?? "");
-  }, [childId, profiles]);
-  return (
-    <main className="login-screen">
-      <form
-        className="login-panel"
-        onSubmit={async (event) => {
-          event.preventDefault();
-          const loggedIn =
-            mode === "child"
-              ? await store.actions.loginChild(familyCode, childId, secret)
-              : await store.actions.loginParent(secret, familyCode, username);
-          if (loggedIn) {
-            setSecret("");
-            if (mode === "parent") navigate("/parent");
-          }
-        }}
-      >
-        <span className="brand-mark">✦</span>
-        <span className="eyebrow">GROWJOY FAMILY</span>
-        <h1>回到成长空间</h1>
-        <div className="login-switch" role="group" aria-label="登录身份">
-          <button
-            type="button"
-            className={mode === "child" ? "active" : ""}
-            onClick={() => {
-              setMode("child");
-              setSecret("");
-            }}
-          >
-            孩子登录
-          </button>
-          <button
-            type="button"
-            className={mode === "parent" ? "active" : ""}
-            onClick={() => {
-              setMode("parent");
-              setSecret("");
-            }}
-          >
-            家长登录
-          </button>
-        </div>
-        <label>
-          家庭码
-          <input
-            value={familyCode}
-            onChange={(event) =>
-              setFamilyCode(event.target.value.toUpperCase())
-            }
-            onBlur={() => {
-              if (mode === "child") void store.actions.loadProfiles(familyCode);
-            }}
-          />
-        </label>
-        {mode === "child" ? (
-          <>
-            <label>
-              选择档案
-              <select
-                value={childId}
-                onChange={(event) => setChildId(event.target.value)}
-              >
-                {profiles.map((profile) => (
-                  <option key={profile.id} value={profile.id}>
-                    {profile.avatar} {profile.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              孩子 PIN
-              <input
-                aria-label="孩子 PIN"
-                inputMode="numeric"
-                pattern="[0-9]{4}"
-                maxLength={4}
-                type="password"
-                value={secret}
-                onChange={(event) =>
-                  setSecret(event.target.value.replace(/\D/g, ""))
-                }
-              />
-            </label>
-          </>
-        ) : (
-          <>
-            <label>
-              家长用户名
-              <input
-                value={username}
-                onChange={(event) => setUsername(event.target.value)}
-                autoComplete="username"
-              />
-            </label>
-            <label>
-              家长密码
-              <input
-                aria-label="家长密码"
-                type="password"
-                value={secret}
-                onChange={(event) => setSecret(event.target.value)}
-                autoComplete="current-password"
-              />
-            </label>
-          </>
-        )}
-        {store.message && (
-          <small className="pin-error-text">{store.message}</small>
-        )}
-        <button
-          className="wide-primary"
-          disabled={
-            mode === "child"
-              ? !childId || secret.length !== 4
-              : !username.trim() || !secret
-          }
-        >
-          {mode === "child" ? "进入成长空间" : "进入家长端"}
-        </button>
-        <small>
-          {mode === "child"
-            ? "演示家庭：DEMO · 孩子 PIN：2468"
-            : "演示账号：parent · 密码：growjoy2468"}
-        </small>
-      </form>
-    </main>
-  );
-}
-
 function ParentPinModal({
   onClose,
   onConfirm,
 }: {
   onClose: () => void;
-  onConfirm: (
-    password: string,
-    familyCode: string,
-    username: string,
-  ) => Promise<boolean>;
+  onConfirm: (password: string) => Promise<boolean>;
 }) {
   const [pin, setPin] = useState("");
-  const [familyCode, setFamilyCode] = useState("DEMO");
-  const [username, setUsername] = useState("parent");
   const [error, setError] = useState(false);
   return (
     <div className="modal-backdrop">
@@ -387,7 +263,7 @@ function ParentPinModal({
         aria-labelledby="parent-pin-title"
         onSubmit={async (event) => {
           event.preventDefault();
-          if (!(await onConfirm(pin, familyCode, username))) {
+          if (!(await onConfirm(pin))) {
             setError(true);
             setPin("");
           }
@@ -406,21 +282,7 @@ function ParentPinModal({
         </div>
         <span className="eyebrow">PARENT ACCESS</span>
         <h2 id="parent-pin-title">进入家长端</h2>
-        <p>请输入家庭码、用户名和家长密码，孩子无法直接进入管理页面。</p>
-        <label htmlFor="parent-family">家庭码</label>
-        <input
-          id="parent-family"
-          value={familyCode}
-          onChange={(event) => setFamilyCode(event.target.value.toUpperCase())}
-          autoComplete="organization"
-        />
-        <label htmlFor="parent-username">家长用户名</label>
-        <input
-          id="parent-username"
-          value={username}
-          onChange={(event) => setUsername(event.target.value)}
-          autoComplete="username"
-        />
+        <p>请输入家长密码，孩子无法直接进入管理页面。</p>
         <label htmlFor="parent-pin">家长密码</label>
         <input
           id="parent-pin"
@@ -1137,7 +999,7 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
           <Link
             className="text-button"
             to="/child"
-            onClick={() => store.actions.setRole("child")}
+            onClick={() => store.actions.enterChild()}
           >
             <Star size={16} /> 回到孩子端
           </Link>
@@ -1213,7 +1075,7 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
           <Link
             className="outline-button"
             to="/child"
-            onClick={() => store.actions.setRole("child")}
+            onClick={() => store.actions.enterChild()}
           >
             <Sparkles size={16} /> 看看孩子端
           </Link>
@@ -1442,9 +1304,7 @@ function ChildForm({
 }: {
   child: Child | null;
   onClose: () => void;
-  onSave: (
-    draft: Pick<Child, "name" | "avatar" | "color"> & { pin?: string },
-  ) => void;
+  onSave: (draft: Pick<Child, "name" | "avatar" | "color">) => void;
 }) {
   const avatars = ["🌻", "🚀", "🌈", "⭐", "🦕", "🐳"];
   const colors = [
@@ -1458,7 +1318,6 @@ function ChildForm({
   const [name, setName] = useState(child?.name ?? "");
   const [avatar, setAvatar] = useState(child?.avatar ?? avatars[0]);
   const [color, setColor] = useState(child?.color ?? colors[0]);
-  const [pin, setPin] = useState("2468");
   return (
     <div className="modal-backdrop">
       <form
@@ -1470,7 +1329,6 @@ function ChildForm({
               name: name.trim(),
               avatar,
               color,
-              pin: child ? undefined : pin,
             });
         }}
       >
@@ -1497,22 +1355,6 @@ function ChildForm({
             placeholder="请输入孩子姓名"
           />
         </label>
-        {!child && (
-          <label>
-            孩子 PIN
-            <input
-              aria-label="孩子 PIN"
-              required
-              inputMode="numeric"
-              pattern="[0-9]{4}"
-              maxLength={4}
-              value={pin}
-              onChange={(event) =>
-                setPin(event.target.value.replace(/\D/g, ""))
-              }
-            />
-          </label>
-        )}
         <fieldset>
           <legend>选择头像</legend>
           <div className="avatar-options">

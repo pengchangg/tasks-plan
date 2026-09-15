@@ -106,7 +106,7 @@ func admin(args []string) error {
 	fs := flag.NewFlagSet("create-family", flag.ContinueOnError)
 	code := fs.String("code", "", "family code")
 	name := fs.String("name", "", "family name")
-	user := fs.String("username", "parent", "parent username")
+	user := fs.String("username", "parent", "parent username (recorded only; sign-in uses the password)")
 	display := fs.String("display-name", "家长", "display name")
 	password := fs.String("password", "", "parent password")
 	tz := fs.String("timezone", "Asia/Shanghai", "IANA timezone")

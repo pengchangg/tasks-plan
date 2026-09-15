@@ -53,10 +53,6 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 	if err != nil {
 		return fmt.Errorf("family %q timezone: %w", code, err)
 	}
-	pinHash, err := hashSecret("2468")
-	if err != nil {
-		return err
-	}
 	now := s.now()
 	today := now.In(location).Format("2006-01-02")
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -64,6 +60,14 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 		return err
 	}
 	defer tx.Rollback()
+	// The app opens the family's oldest child and lists children, tasks and
+	// ledger entries in creation order, so every seeded row gets its own
+	// instant: identical stamps would leave the demo ordering to chance.
+	seeded := 0
+	seedStamp := func(base time.Time) string {
+		seeded++
+		return nowText(base.Add(time.Duration(seeded) * time.Millisecond))
+	}
 	upsertChild := func(name, avatar, color string, level int, exp float64, balance int) (string, error) {
 		var cid string
 		e := tx.QueryRowContext(ctx, `SELECT id FROM children WHERE family_id=? AND name=?`, family, name).Scan(&cid)
@@ -74,7 +78,7 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 			return "", e
 		}
 		cid = id("child")
-		_, e = tx.ExecContext(ctx, `INSERT INTO children(id,family_id,name,avatar,color,pin_hash,level,experience,points_balance,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, cid, family, name, avatar, color, pinHash, level, exp, balance, nowText(now))
+		_, e = tx.ExecContext(ctx, `INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, cid, family, name, avatar, color, level, exp, balance, seedStamp(now))
 		return cid, e
 	}
 	mia, err := upsertChild("米娅", "🌻", "#ffb547", 4, 372, 185)
@@ -96,7 +100,7 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 			continue
 		}
 		tid, iid := id("tpl"), id("task")
-		created := nowText(now.Add(-48 * time.Hour))
+		created := seedStamp(now.Add(-48 * time.Hour))
 		if _, err = tx.ExecContext(ctx, `INSERT INTO task_templates(id,family_id,child_id,title,description,category,points,repeat_rule,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, tid, family, v.child, v.title, v.desc, v.cat, v.points, v.rule, created, created); err != nil {
 			return err
 		}
@@ -109,7 +113,7 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 		}
 		if v.status == "pending_review" {
 			sid := id("sub")
-			if _, err = tx.ExecContext(ctx, `INSERT INTO task_submissions(id,family_id,task_instance_id,child_id,note,submitted_at) VALUES(?,?,?,?,?,?)`, sid, family, iid, mia, "我读完了《小王子》第三章！", nowText(now.Add(-time.Hour))); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO task_submissions(id,family_id,task_instance_id,child_id,note,submitted_at) VALUES(?,?,?,?,?,?)`, sid, family, iid, mia, "我读完了《小王子》第三章！", seedStamp(now.Add(-time.Hour))); err != nil {
 				return err
 			}
 		}
@@ -123,7 +127,8 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 		var n int
 		_ = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM wishes WHERE family_id=? AND title=?`, family, v.title).Scan(&n)
 		if n == 0 {
-			_, err = tx.ExecContext(ctx, `INSERT INTO wishes(id,family_id,title,description,points_cost,icon,color,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?)`, id("wish"), family, v.title, v.desc, v.cost, v.icon, v.color, nowText(now), nowText(now))
+			stamp := seedStamp(now)
+			_, err = tx.ExecContext(ctx, `INSERT INTO wishes(id,family_id,title,description,points_cost,icon,color,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?)`, id("wish"), family, v.title, v.desc, v.cost, v.icon, v.color, stamp, stamp)
 			if err != nil {
 				return err
 			}

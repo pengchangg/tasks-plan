@@ -1,8 +1,6 @@
 import type { AppState, Attachment, Child, Task, Wish } from "./types";
 
-export type ChildDraft = Pick<Child, "name" | "avatar" | "color"> & {
-  pin?: string;
-};
+export type ChildDraft = Pick<Child, "name" | "avatar" | "color">;
 export type TaskDraft = Pick<
   Task,
   "childId" | "title" | "description" | "category" | "points" | "repeatRule"

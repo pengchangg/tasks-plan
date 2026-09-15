@@ -40,6 +40,14 @@ const scenarios = [
   },
 ];
 
+const parentLinks = {
+  "/parent": null,
+  "/parent/children": "孩子管理",
+  "/parent/tasks": "任务管理",
+  "/parent/wishes": "愿望管理",
+  "/parent/stats": "成长统计",
+};
+
 await mkdir(outputDir, { recursive: true });
 const browser = await chromium.launch({ headless: true });
 let failed = false;
@@ -54,10 +62,10 @@ for (const scenario of scenarios) {
   });
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`${baseUrl}/child`, { waitUntil: "networkidle" });
-  await page.getByLabel("孩子 PIN").fill("2468");
-  await page.getByRole("button", { name: "进入成长空间" }).click();
+  // The child end is the default view; /parent is a password-gated detour.
   await page.locator(".bottom-nav").waitFor();
-  if (scenario.path.startsWith("/parent")) {
+  const parent = scenario.path.startsWith("/parent");
+  if (parent) {
     await page.locator(".profile-button").click();
     await page
       .locator(".role-menu")
@@ -67,12 +75,15 @@ for (const scenario of scenarios) {
     await modal.getByLabel("家长密码").fill("growjoy2468");
     await modal.getByRole("button", { name: "验证并进入" }).click();
     await page.waitForURL(/\/parent$/);
+    // Move inside the app: a reload would land back in the child end, which
+    // is exactly what the password gate is for.
+    const link = parentLinks[scenario.path];
+    if (link) await page.getByRole("link", { name: link }).click();
+    else if (scenario.path !== "/parent")
+      throw new Error(`no sidebar link for ${scenario.path}`);
   }
-  await page.goto(`${baseUrl}${scenario.path}`, { waitUntil: "networkidle" });
   await page
-    .locator(
-      scenario.path.startsWith("/parent") ? ".parent-layout" : ".bottom-nav",
-    )
+    .locator(parent ? ".parent-layout" : ".bottom-nav")
     .waitFor();
   const layout = await page.evaluate(() => ({
     title: document.title,

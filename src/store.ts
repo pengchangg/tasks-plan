@@ -3,7 +3,6 @@ import { seedState } from "./data";
 import type { ChildDraft, TaskDraft, WishDraft } from "./domain";
 import type { AppState, Attachment, Child, Wish } from "./types";
 
-const demo = { familyCode: "DEMO", username: "parent" };
 const emptyChild: Child = {
   id: "",
   name: "孩子",
@@ -14,24 +13,43 @@ const emptyChild: Child = {
   pointsBalance: 0,
   streakDays: 0,
 };
-type LoginProfile = Pick<Child, "id" | "name" | "avatar" | "color">;
 
 type APIError = { error?: { code?: string; message?: string } };
 
-async function request(path: string, init?: RequestInit) {
-  const response = await fetch(`/api/v1${path}`, {
-    credentials: "same-origin",
-    ...init,
-    headers:
-      init?.body instanceof FormData
-        ? init.headers
-        : { "Content-Type": "application/json", ...init?.headers },
-  });
-  if (!response.ok) {
-    const detail = (await response.json().catch(() => ({}))) as APIError;
-    throw new Error(detail.error?.message ?? `请求失败 (${response.status})`);
+// The server answers snake_case codes with English text; screens are Chinese,
+// so the codes they can actually hit are translated here.
+const messages: Record<string, string> = {
+  no_family: "还没有创建家庭：请先运行 serve --demo，或用 admin create-family 创建。",
+  invalid_credentials: "密码不正确",
+  too_many_requests: "尝试太频繁了，请稍后再试",
+  forbidden: "这个操作需要家长密码",
+  insufficient_points: "积分不足，无法兑换",
+  wish_unavailable: "这个愿望暂时无法兑换",
+  invalid_state: "当前状态不能完成这个操作，请刷新后再试",
+  not_found: "内容已经不存在了，请刷新后再试",
+  conflict: "操作冲突，请刷新后再试",
+  last_child: "至少要保留一个孩子",
+  upload_too_large: "文件太大了",
+  unsupported_media: "只支持 JPEG/PNG/WebP 图片和 MP4/WebM 视频",
+  too_many_files: "一次最多上传 6 个文件",
+  upload_failed: "上传失败了，请重试",
+  unavailable: "服务正忙，请稍后再试",
+  internal: "服务出错了，请稍后再试",
+};
+
+class RequestError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
   }
-  return response;
+}
+
+function describe(error: unknown, fallback: string) {
+  if (error instanceof RequestError && messages[error.code])
+    return messages[error.code];
+  return error instanceof Error && error.message ? error.message : fallback;
 }
 
 const json = (
@@ -44,11 +62,39 @@ const json = (
   headers: idempotent ? { "Idempotency-Key": crypto.randomUUID() } : undefined,
 });
 
+async function send(path: string, init?: RequestInit) {
+  return fetch(`/api/v1${path}`, {
+    credentials: "same-origin",
+    ...init,
+    headers:
+      init?.body instanceof FormData
+        ? init.headers
+        : { "Content-Type": "application/json", ...init?.headers },
+  });
+}
+
+async function request(path: string, init?: RequestInit) {
+  let response = await send(path, init);
+  if (response.status === 401 && !path.startsWith("/auth/")) {
+    // The session expired, or the profile it pointed at is gone. The child end
+    // is always available, so open a fresh one and replay the request once.
+    await send("/auth/child", { method: "POST" });
+    response = await send(path, init);
+  }
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => ({}))) as APIError;
+    throw new RequestError(
+      detail.error?.code ?? "",
+      detail.error?.message ?? `请求失败 (${response.status})`,
+    );
+  }
+  return response;
+}
+
 export function useAppStore() {
   const [state, setState] = useState<AppState>({ ...seedState, role: "child" });
   const [ready, setReady] = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [profiles, setProfiles] = useState<LoginProfile[]>([]);
+  const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState("");
   const [stats, setStats] = useState({
     totalTasks: 0,
@@ -64,12 +110,30 @@ export function useAppStore() {
       request("/state"),
       request("/stats"),
     ]);
-    const next = (await stateResponse.json()) as AppState;
-    setState(next);
+    setState((await stateResponse.json()) as AppState);
     setStats(await statsResponse.json());
-    setAuthenticated(true);
-    setReady(true);
   }, []);
+
+  // connect opens the child end, the app's default view. It runs on every page
+  // load: the parent end is a per-visit elevation, so a reload always lands
+  // back here and asks for the password again.
+  const connect = useCallback(async () => {
+    try {
+      await request("/auth/child", { method: "POST" });
+      await refresh();
+      setMessage("");
+      setConnected(true);
+    } catch (error) {
+      setConnected(false);
+      setMessage(describe(error, "无法连接服务"));
+    } finally {
+      setReady(true);
+    }
+  }, [refresh]);
+
+  useEffect(() => {
+    void connect();
+  }, [connect]);
 
   const run = useCallback(
     async (operation: () => Promise<unknown>) => {
@@ -78,53 +142,11 @@ export function useAppStore() {
         await operation();
         await refresh();
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : "操作失败，请重试");
+        setMessage(describe(error, "操作失败，请重试"));
       }
     },
     [refresh],
   );
-
-  const loadProfiles = useCallback(async (familyCode: string) => {
-    const response = await fetch(
-      `/api/v1/auth/profiles?familyCode=${encodeURIComponent(familyCode)}`,
-    );
-    if (!response.ok) throw new Error("家庭码不存在");
-    const result = (await response.json()) as LoginProfile[];
-    setProfiles(result);
-    return result;
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const status = (await fetch("/api/v1/auth/status").then((response) =>
-          response.json(),
-        )) as { authenticated: boolean };
-        if (status.authenticated) {
-          await refresh();
-          return;
-        }
-        try {
-          if (!cancelled) await loadProfiles(demo.familyCode);
-          if (!cancelled) setReady(true);
-        } catch (error) {
-          if (!cancelled) {
-            setMessage(error instanceof Error ? error.message : "无法连接服务");
-            setReady(true);
-          }
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setMessage(error instanceof Error ? error.message : "无法连接服务");
-          setReady(true);
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [loadProfiles, refresh]);
 
   const activeChild =
     state.children.find((child) => child.id === state.activeChildId) ??
@@ -136,64 +158,28 @@ export function useAppStore() {
   );
 
   const actions = {
-    loginChild: async (familyCode: string, childId: string, pin: string) => {
+    reconnect: connect,
+    unlockParent: async (password: string) => {
       try {
-        await request(
-          "/auth/child",
-          json("POST", { familyCode, childId, pin }),
-        );
+        await request("/auth/parent", json("POST", { password }));
         await refresh();
-        return true;
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : "登录失败");
-        return false;
-      }
-    },
-    loadProfiles: async (familyCode: string) => {
-      try {
         setMessage("");
-        return await loadProfiles(familyCode);
-      } catch (error) {
-        setMessage(error instanceof Error ? error.message : "家庭码不存在");
-        return [];
-      }
-    },
-    loginParent: async (
-      password: string,
-      familyCode = demo.familyCode,
-      username = demo.username,
-    ) => {
-      try {
-        await request(
-          "/auth/parent",
-          json("POST", {
-            familyCode,
-            username,
-            password,
-          }),
-        );
-        await refresh();
         return true;
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : "登录失败");
+        // The modal shows its own wrong-password text; anything else
+        // (throttling, a missing family) needs the shared banner.
+        if (
+          !(error instanceof RequestError) ||
+          error.code !== "invalid_credentials"
+        )
+          setMessage(describe(error, "无法进入家长端"));
         return false;
       }
     },
-    setRole: async (role: AppState["role"]) => {
-      if (role === "parent") return;
-      await run(() => request("/auth/switch-child", json("POST")));
-    },
-    setActiveChild: (childId: string) => {
-      if (state.role === "parent") {
-        void run(() => request("/session/child", json("PATCH", { childId })));
-      } else {
-        void (async () => {
-          await request("/auth/logout", json("POST"));
-          setAuthenticated(false);
-          setProfiles(await loadProfiles(demo.familyCode));
-        })();
-      }
-    },
+    enterChild: () =>
+      void run(() => request("/auth/child", { method: "POST" })),
+    setActiveChild: (childId: string) =>
+      void run(() => request("/session/child", json("PATCH", { childId }))),
     saveChild: (draft: ChildDraft, id?: string) =>
       void run(() =>
         request(`/children/${id ?? ""}`, json(id ? "PUT" : "POST", draft)),
@@ -256,9 +242,9 @@ export function useAppStore() {
     childTasks,
     actions,
     ready,
-    authenticated,
-    profiles,
+    connected,
     message,
     stats,
+    dismissMessage: () => setMessage(""),
   };
 }

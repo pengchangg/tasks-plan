@@ -14,16 +14,19 @@ page.on("console", (message) => {
 });
 page.on("pageerror", (error) => errors.push(error.message));
 
-async function loginChild(name = "米娅") {
-  const select = page.getByLabel("选择档案");
-  const value = await select
-    .locator("option")
-    .filter({ hasText: name })
-    .getAttribute("value");
-  await select.selectOption(value);
-  await page.getByLabel("孩子 PIN").fill("2468");
-  await page.getByRole("button", { name: "进入成长空间" }).click();
+async function openChildEnd() {
+  // The child end is the default view: no login screen, no credential.
   await page.locator(".bottom-nav").waitFor();
+}
+async function switchChild(name = "米娅") {
+  await page.locator(".profile-button").click();
+  await page
+    .locator(".role-menu")
+    .getByRole("button", { name: new RegExp(name) })
+    .click();
+  await waitForState(
+    (s) => s.children.find((c) => c.id === s.activeChildId)?.name === name,
+  );
 }
 async function getState() {
   return page.evaluate(async () => {
@@ -39,7 +42,7 @@ async function waitForState(predicate) {
   }
   throw new Error("Timed out waiting for server state");
 }
-async function unlockParent(checkError = false) {
+async function unlockParent(checkError = false, url = /\/parent$/) {
   const modal = page.locator(".pin-modal");
   await modal.waitFor();
   const input = modal.getByLabel("家长密码");
@@ -50,7 +53,7 @@ async function unlockParent(checkError = false) {
   }
   await input.fill("growjoy2468");
   await modal.getByRole("button", { name: "验证并进入" }).click();
-  await page.waitForURL(/\/parent$/);
+  await page.waitForURL(url);
 }
 async function enterParent(checkError = false) {
   await page.locator(".profile-button").click();
@@ -62,7 +65,7 @@ async function enterParent(checkError = false) {
 }
 
 await page.goto(`${baseUrl}/child/tasks`, { waitUntil: "networkidle" });
-await loginChild();
+await openChildEnd();
 await page.getByText("整理自己的书桌").waitFor();
 let state = await getState();
 const initialBalance = state.children.find(
@@ -95,10 +98,9 @@ assert.equal(
   state.children.find((c) => c.name === "米娅").pointsBalance,
   initialBalance,
 );
-
 await page.goto(`${baseUrl}/parent/tasks`, { waitUntil: "networkidle" });
 await page.waitForURL(/\/child$/);
-await unlockParent(true);
+await unlockParent(true, /\/parent\/tasks$/);
 await page.getByRole("link", { name: "任务管理" }).click();
 const parentTask = page
   .locator(".admin-task-item")
@@ -182,13 +184,7 @@ await waitForState(
     ).length === 2,
 );
 
-await page.locator(".profile-button").click();
-await page.locator(".role-menu").getByRole("button", { name: /乐乐/ }).click();
-await page.getByLabel("孩子 PIN").waitFor();
-await loginChild("乐乐");
-await waitForState(
-  (s) => s.children.find((c) => c.id === s.activeChildId)?.name === "乐乐",
-);
+await switchChild("乐乐");
 await page.getByText("收拾玩具箱").waitFor();
 await enterParent();
 await page.getByRole("link", { name: "孩子管理" }).click();

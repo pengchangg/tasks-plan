@@ -254,18 +254,13 @@ func (s *Server) Handler() http.Handler {
 	})
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(sameOrigin)
-		api.Get("/auth/status", s.authStatus)
 		api.Group(func(auth chi.Router) {
 			auth.Use(s.authLimit)
-			auth.Get("/auth/profiles", s.profiles)
-			auth.Post("/auth/parent", s.parentLogin)
-			auth.Post("/auth/child", s.childLogin)
+			auth.Post("/auth/child", s.childSession)
+			auth.Post("/auth/parent", s.parentSession)
 		})
 		api.Group(func(a chi.Router) {
 			a.Use(s.authenticate)
-			a.Post("/auth/logout", s.logout)
-			a.Post("/auth/switch-child", s.parentOnly(s.switchToChild))
-			a.Get("/session", s.getSession)
 			a.Get("/state", s.getState)
 			a.Patch("/session/child", s.selectChild)
 			a.Route("/children", func(c chi.Router) {
@@ -420,17 +415,26 @@ func nullString(v string) any {
 	}
 	return v
 }
+// lookupSession resolves the session cookie without failing the request: the
+// child end is open to the household, so a missing or expired cookie is a
+// normal state rather than an error.
+func (s *Server) lookupSession(r *http.Request) (session, bool) {
+	c, err := r.Cookie(cookieName)
+	if err != nil {
+		return session{}, false
+	}
+	var x session
+	err = s.db.QueryRow(`SELECT id,family_id,actor_type,actor_id,COALESCE(selected_child_id,'') FROM sessions WHERE token_hash=? AND expires_at>?`, tokenHash(c.Value), nowText(s.now())).Scan(&x.ID, &x.FamilyID, &x.ActorType, &x.ActorID, &x.SelectedChildID)
+	if err != nil {
+		return session{}, false
+	}
+	return x, true
+}
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := r.Cookie(cookieName)
-		if err != nil {
-			problem(w, 401, "unauthorized", "login required")
-			return
-		}
-		var x session
-		err = s.db.QueryRow(`SELECT id,family_id,actor_type,actor_id,COALESCE(selected_child_id,'') FROM sessions WHERE token_hash=? AND expires_at>?`, tokenHash(c.Value), nowText(s.now())).Scan(&x.ID, &x.FamilyID, &x.ActorType, &x.ActorID, &x.SelectedChildID)
-		if err != nil {
-			problem(w, 401, "unauthorized", "session expired")
+		x, ok := s.lookupSession(r)
+		if !ok {
+			problem(w, 401, "unauthorized", "session required")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, x)))
@@ -447,56 +451,72 @@ func (s *Server) parentOnly(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
-	c, err := r.Cookie(cookieName)
-	if err != nil {
-		writeJSON(w, 200, map[string]bool{"authenticated": false})
+// childSession is the default child end: it starts a child session whenever
+// the caller has none and demotes a parent session, so the app always boots
+// into the child end and switching to the parent end always costs the
+// password again.
+func (s *Server) childSession(w http.ResponseWriter, r *http.Request) {
+	current, had := s.lookupSession(r)
+	if had && current.ActorType == "child" {
+		writeJSON(w, 200, map[string]string{"role": "child", "activeChildId": current.SelectedChildID})
 		return
 	}
-	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE token_hash=? AND expires_at>?`, tokenHash(c.Value), nowText(s.now())).Scan(&n)
-	writeJSON(w, 200, map[string]bool{"authenticated": n == 1})
-}
-
-func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
-	code := r.URL.Query().Get("familyCode")
-	rows, err := s.db.Query(`SELECT c.id,c.name,c.avatar FROM children c JOIN families f ON f.id=c.family_id WHERE f.code=? ORDER BY c.created_at`, code)
+	family, _, err := s.resolvedFamily(r.Context())
 	if err != nil {
+		s.familyError(w, r, err)
+		return
+	}
+	child := s.firstChild(r.Context(), family)
+	if had {
+		// A demoted parent keeps the child it was looking at, and its spent
+		// session row is dropped rather than left to expire.
+		if kept := s.familyChild(r.Context(), family, current.SelectedChildID); kept != "" {
+			child = kept
+		}
+		_, _ = s.db.Exec(`DELETE FROM sessions WHERE id=? AND family_id=?`, current.ID, family)
+	}
+	if err = s.createSession(w, family, "child", child, child, 30*24*time.Hour); err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	defer rows.Close()
-	out := []map[string]string{}
-	for rows.Next() {
-		var cid, name, avatar string
-		if err = rows.Scan(&cid, &name, &avatar); err != nil {
-			s.internalError(w, r, err)
-			return
-		}
-		out = append(out, map[string]string{"id": cid, "name": name, "avatar": avatar})
-	}
-	writeJSON(w, 200, out)
+	writeJSON(w, 200, map[string]string{"role": "child", "activeChildId": child})
 }
 
-func (s *Server) parentLogin(w http.ResponseWriter, r *http.Request) {
-	var in struct{ FamilyCode, Username, Password string }
+// parentSession unlocks the management end; the family's parent password is
+// the only credential in the app.
+func (s *Server) parentSession(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Password string }
 	if decode(r, &in) != nil {
 		problem(w, 400, "invalid_request", "invalid JSON")
 		return
 	}
-	budget := authFailureKey(in.FamilyCode, "parent:"+strings.ToLower(in.Username))
-	var family, parent, hash string
-	err := s.db.QueryRow(`SELECT f.id,p.id,p.password_hash FROM parents p JOIN families f ON f.id=p.family_id WHERE f.code=? AND p.username=?`, in.FamilyCode, in.Username).Scan(&family, &parent, &hash)
+	family, code, err := s.resolvedFamily(r.Context())
 	if err != nil {
-		problem(w, 401, "invalid_credentials", "credentials are invalid")
+		s.familyError(w, r, err)
 		return
 	}
-	ok, verr := s.verifyPassword(r.Context(), hash, in.Password)
-	if verr != nil {
-		s.hashFailure(w, r, verr)
+	current, _ := s.lookupSession(r)
+	parents, err := s.parentSecrets(r.Context(), family)
+	if err != nil {
+		s.internalError(w, r, err)
 		return
 	}
-	if !ok {
+	parent := ""
+	for _, candidate := range parents {
+		ok, verr := s.verifyPassword(r.Context(), candidate.hash, in.Password)
+		if verr != nil {
+			s.hashFailure(w, r, verr)
+			return
+		}
+		if ok {
+			parent = candidate.id
+			break
+		}
+	}
+	if parent == "" {
+		// Only a wrong password charges the budget, so a guess cannot lock the
+		// family out of its own parent end.
+		budget := authFailureKey(code, "parent")
 		if !s.authBudgetLeft(budget) {
 			problem(w, 429, "too_many_requests", "too many requests; try again later")
 			return
@@ -505,84 +525,87 @@ func (s *Server) parentLogin(w http.ResponseWriter, r *http.Request) {
 		problem(w, 401, "invalid_credentials", "credentials are invalid")
 		return
 	}
-	var child string
-	_ = s.db.QueryRow(`SELECT id FROM children WHERE family_id=? ORDER BY created_at LIMIT 1`, family).Scan(&child)
+	child := s.familyChild(r.Context(), family, current.SelectedChildID)
+	if child == "" {
+		child = s.firstChild(r.Context(), family)
+	}
+	if current.ID != "" {
+		if _, err = s.db.Exec(`DELETE FROM sessions WHERE id=? AND family_id=?`, current.ID, family); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+	}
 	if err = s.createSession(w, family, "parent", parent, child, 12*time.Hour); err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"role": "parent"})
+	writeJSON(w, 200, map[string]string{"role": "parent", "activeChildId": child})
 }
-func (s *Server) childLogin(w http.ResponseWriter, r *http.Request) {
-	var in struct{ FamilyCode, ChildID, PIN string }
-	if decode(r, &in) != nil {
-		problem(w, 400, "invalid_request", "invalid JSON")
+
+// resolvedFamily names the family this deployment serves. GrowJoy is a
+// single-family household app, so the oldest family row wins and no screen
+// ever asks for a family code.
+func (s *Server) resolvedFamily(ctx context.Context) (string, string, error) {
+	var family, code string
+	err := s.db.QueryRowContext(ctx, `SELECT id,code FROM families ORDER BY created_at,id LIMIT 1`).Scan(&family, &code)
+	return family, code, err
+}
+
+// familyError answers the one startup state the UI can hit: no family at all.
+func (s *Server) familyError(w http.ResponseWriter, r *http.Request, err error) {
+	if err == sql.ErrNoRows {
+		problem(w, 409, "no_family", "no family is set up yet")
 		return
 	}
-	budget := authFailureKey(in.FamilyCode, "child:"+in.ChildID)
-	var family, hash string
-	err := s.db.QueryRow(`SELECT f.id,c.pin_hash FROM children c JOIN families f ON f.id=c.family_id WHERE f.code=? AND c.id=?`, in.FamilyCode, in.ChildID).Scan(&family, &hash)
+	s.internalError(w, r, err)
+}
+
+// firstChild is the family's oldest child, or "" while the family has none.
+func (s *Server) firstChild(ctx context.Context, family string) string {
+	var child string
+	_ = s.db.QueryRowContext(ctx, `SELECT id FROM children WHERE family_id=? ORDER BY created_at,id LIMIT 1`, family).Scan(&child)
+	return child
+}
+
+// familyChild returns child when it belongs to family, else "".
+func (s *Server) familyChild(ctx context.Context, family, child string) string {
+	if child == "" {
+		return ""
+	}
+	var found int
+	if s.db.QueryRowContext(ctx, `SELECT 1 FROM children WHERE id=? AND family_id=?`, child, family).Scan(&found) != nil {
+		return ""
+	}
+	return child
+}
+
+type parentSecret struct{ id, hash string }
+
+// parentSecrets lists the family's parents: the password belongs to the
+// family, so every parent row gets a chance to match it.
+func (s *Server) parentSecrets(ctx context.Context, family string) ([]parentSecret, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,password_hash FROM parents WHERE family_id=? ORDER BY created_at,id`, family)
 	if err != nil {
-		problem(w, 401, "invalid_credentials", "credentials are invalid")
-		return
+		return nil, err
 	}
-	ok, verr := s.verifyPassword(r.Context(), hash, in.PIN)
-	if verr != nil {
-		s.hashFailure(w, r, verr)
-		return
-	}
-	if !ok {
-		if !s.authBudgetLeft(budget) {
-			problem(w, 429, "too_many_requests", "too many requests; try again later")
-			return
+	defer rows.Close()
+	var out []parentSecret
+	for rows.Next() {
+		var p parentSecret
+		if err = rows.Scan(&p.id, &p.hash); err != nil {
+			return nil, err
 		}
-		s.recordAuthFailure(budget)
-		problem(w, 401, "invalid_credentials", "credentials are invalid")
-		return
+		out = append(out, p)
 	}
-	if err = s.createSession(w, family, "child", in.ChildID, in.ChildID, 30*24*time.Hour); err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	writeJSON(w, 200, map[string]string{"role": "child"})
+	return out, rows.Err()
 }
-func (s *Server) switchToChild(w http.ResponseWriter, r *http.Request) {
-	x := sess(r)
-	if x.SelectedChildID == "" {
-		problem(w, 409, "child_required", "select a child first")
-		return
-	}
-	var exists int
-	if s.db.QueryRow(`SELECT 1 FROM children WHERE id=? AND family_id=?`, x.SelectedChildID, x.FamilyID).Scan(&exists) != nil {
-		problem(w, 404, "not_found", "child not found")
-		return
-	}
-	if _, err := s.db.Exec(`DELETE FROM sessions WHERE id=? AND family_id=?`, x.ID, x.FamilyID); err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	if err := s.createSession(w, x.FamilyID, "child", x.SelectedChildID, x.SelectedChildID, 30*24*time.Hour); err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	writeJSON(w, 200, map[string]string{"role": "child"})
-}
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	x := sess(r)
-	_, _ = s.db.Exec(`DELETE FROM sessions WHERE id=? AND family_id=?`, x.ID, x.FamilyID)
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: s.secureCookies})
-	w.WriteHeader(204)
-}
-func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	x := sess(r)
-	writeJSON(w, 200, map[string]string{"role": x.ActorType, "activeChildId": x.SelectedChildID})
-}
+
+// selectChild switches the profile the device is showing. The child end may
+// switch as well: one household device is shared by siblings. A child session
+// mirrors the profile in actor_id, so the child-scoped statements and the
+// per-child idempotency keys stay exact.
 func (s *Server) selectChild(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
-	if x.ActorType != "parent" {
-		problem(w, 403, "forbidden", "child sessions cannot switch profile")
-		return
-	}
 	var in struct {
 		ChildID string `json:"childId"`
 	}
@@ -590,7 +613,7 @@ func (s *Server) selectChild(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "invalid JSON")
 		return
 	}
-	res, err := s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=? AND family_id=? AND EXISTS(SELECT 1 FROM children WHERE id=? AND family_id=?)`, in.ChildID, x.ID, x.FamilyID, in.ChildID, x.FamilyID)
+	res, err := s.db.Exec(`UPDATE sessions SET selected_child_id=?, actor_id=CASE WHEN actor_type='child' THEN ? ELSE actor_id END WHERE id=? AND family_id=? AND EXISTS(SELECT 1 FROM children WHERE id=? AND family_id=?)`, in.ChildID, in.ChildID, x.ID, x.FamilyID, in.ChildID, x.FamilyID)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -873,7 +896,6 @@ type childInput struct {
 	Name   string `json:"name"`
 	Avatar string `json:"avatar"`
 	Color  string `json:"color"`
-	PIN    string `json:"pin"`
 }
 
 func (s *Server) saveChild(w http.ResponseWriter, r *http.Request) {
@@ -885,17 +907,8 @@ func (s *Server) saveChild(w http.ResponseWriter, r *http.Request) {
 	}
 	cid := chi.URLParam(r, "id")
 	if cid == "" {
-		if len(in.PIN) != 4 || strings.Trim(in.PIN, "0123456789") != "" {
-			problem(w, 400, "invalid_request", "a 4 digit PIN is required")
-			return
-		}
-		hash, err := s.hashPassword(r.Context(), in.PIN)
-		if err != nil {
-			s.hashFailure(w, r, err)
-			return
-		}
 		cid = id("child")
-		_, err = s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,pin_hash,created_at) VALUES(?,?,?,?,?,?,?)`, cid, x.FamilyID, strings.TrimSpace(in.Name), in.Avatar, in.Color, hash, nowText(s.now()))
+		_, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,created_at) VALUES(?,?,?,?,?,?)`, cid, x.FamilyID, strings.TrimSpace(in.Name), in.Avatar, in.Color, nowText(s.now()))
 		if err != nil {
 			s.internalError(w, r, err)
 			return
