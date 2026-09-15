@@ -6,7 +6,7 @@ GrowJoy (`growjoy`): family growth-task + points-reward H5 app. One Go binary se
 
 - Purpose: parents define tasks/rewards; children submit evidence, earn points, redeem wishes. Per-family multi-tenant, single process, single replica (SQLite file + media dir on one persistent volume).
 - Two runtimes, one deployable: Go 1.22 chi service (`cmd/growjoy`, `internal/server`) + React 19/Vite SPA (`src/`) that the same binary serves from `dist/`.
-- No CI, no linter/formatter, no Makefile/Docker. Validation is manual: `go test ./...`, `npm test`, `npm run build`, `npm run check:flow`, `npm run check:ui`.
+- CI enforces the same gate list: `.github/workflows/ci.yml` runs `go` (vet + test), `web` (unit tests + `tsc -b`/Vite build) and `e2e` (Playwright flow + visual gates) on pushes to `main`, pull requests, and manual dispatch. No linter/formatter config, no Makefile/Docker — match the surrounding formatting by hand.
 
 ## Architecture & Data Flow
 
@@ -48,6 +48,7 @@ flowchart LR
 | `internal/server/migrations/` | `001_init.sql` (schema of record: CHECK constraints, uniqueness keys, indexes), `002_weekday_and_experience.sql`, `003_expiry_indexes.sql`. Embedded at compile time. |
 | `src/` | SPA: `App.tsx` (all UI), `store.ts` (state container), `types.ts` (wire shapes), `domain.ts` (pure reducers, tests only), `data.ts` (demo seed), `styles.css`. |
 | `scripts/` | Node ESM verification harnesses: `with-service.mjs` (boots a throwaway real server), `flow-check.mjs`, `visual-check.mjs`. |
+| `.github/workflows/ci.yml` | The only CI: `go` (vet + test), `web` (lockfile install, unit tests, build), then `e2e` (Playwright gates; uploads `.artifacts/ui` screenshots). |
 | `dist/` (gitignored) | Vite output; the Go server serves it — must be rebuilt for SPA changes. |
 | `data/` (gitignored) | Default `growjoy.db` + `media/`; created `0700`. Never commit. |
 | `.artifacts/ui/` (gitignored) | Screenshots written by `check:ui`; visual evidence, not versioned. |
@@ -142,4 +143,4 @@ Demo credentials (`serve --demo`): family `DEMO`, parent `parent` / `growjoy2468
 
 **End-to-end — `npm run check:flow` and `npm run check:ui`.** Both rebuild `dist/` and wrap Playwright in `scripts/with-service.mjs`, which `go build`s the binary, allocates an ephemeral port, runs `serve --demo` against a temp DB/media with the repo's real `dist/`, polls `/health/ready` (100 × 100 ms), then SIGTERMs and `rm -rf`s. `flow-check.mjs` (390×844, headless) walks the real journey — child PIN login, evidence upload, parent unlock, approve/reject/resubmit, redeem, persistence after reload, child CRUD — and asserts server state via `page.evaluate(fetch('/api/v1/state'))`; any console/page error fails the run except a whitelisted `401 (Unauthorized)`. `visual-check.mjs` runs 9 viewport/route scenarios, writes full-page PNGs to `.artifacts/ui/`, and fails (via `process.exitCode = 1`) on console errors, horizontal overflow (`bodyWidth > viewportWidth + 1`), `textLength < 20`, or `bodyHeight < height / 2`. Both harnesses hard-code demo data, Chinese accessible names (`完成任务`, `保存修改`, `确认删除`, `进入成长空间`), and CSS class hooks (`.task-card`, `.bottom-nav`, `.parent-layout`, `.pin-modal`, …): renaming any of those requires updating the scripts in the same change.
 
-**Coverage expectations:** none declared — no thresholds, no CI, no coverage tooling. Correctness bar is the README gate list (`go test ./...` → `npm test` → `npm run build` → `npm run check:flow` → `npm run check:ui`); for backend behavior changes, add or extend a `server_test.go` case, and for UI changes run `check:flow`/`check:ui` rather than inventing new test files. The Playwright harnesses log in roughly two dozen times per run, which is safe because only *failed* credentials consume the family budget — a 429 there means the throttle regressed, not that the harness needs loosening.
+**Coverage expectations:** no coverage tooling and no threshold is declared; correctness rests on the gate list (`go test ./...` → `npm test` → `npm run build` → `npm run check:flow` → `npm run check:ui`), which `.github/workflows/ci.yml` runs on every push to `main` and every pull request. For backend behavior changes, add or extend a `server_test.go` case, and for UI changes run `check:flow`/`check:ui` rather than inventing new test files. The Playwright harnesses log in roughly two dozen times per run, which is safe because only *failed* credentials consume the family budget — a 429 there means the throttle regressed, not that the harness needs loosening.

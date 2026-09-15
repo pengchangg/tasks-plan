@@ -84,3 +84,5 @@ npm run check:ui
 ```
 
 两个 Playwright 命令会各自创建临时 SQLite 数据库和媒体目录、选择动态端口、启动真实 Go 服务，并在结束时清理。
+
+CI（`.github/workflows/ci.yml`）在 push 到 `main`、发起 PR 或手动触发时跑同一套检查：`go`（`go vet` + `go test`）与 `web`（`npm ci` + `npm test` + `npm run build`）并行，两者通过后运行 `e2e`（安装 Chromium 后跑 `check:flow` 与 `check:ui`），并把 `.artifacts/ui` 截图作为构建产物上传。CI 一律用 `npm ci` 从 `package-lock.json` 安装。
