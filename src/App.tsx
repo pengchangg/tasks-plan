@@ -23,7 +23,6 @@ import {
   MessageSquare,
   Pencil,
   Plus,
-  RotateCcw,
   Sparkles,
   Star,
   Trash2,
@@ -74,10 +73,7 @@ function Shell() {
   const isParent = location.pathname.startsWith("/parent");
   const [showMenu, setShowMenu] = useState(false);
   const [showParentPin, setShowParentPin] = useState(false);
-  const [parentUnlocked, setParentUnlocked] = useState(
-    () => isParent && sessionStorage.getItem("growjoy-parent-unlocked") === "1",
-  );
-  const wasParent = useRef(isParent);
+  const parentUnlocked = store.state.role === "parent";
   const [reward, setReward] = useState<PointLedger | null>(null);
   const latestEarned = store.state.ledger
     .filter(
@@ -95,8 +91,11 @@ function Shell() {
     ),
   );
   useEffect(() => {
+    if (isParent) {
+      setReward(null);
+      return;
+    }
     if (
-      isParent ||
       !latestEarned ||
       seenRewards.current.get(store.activeChild.id) === latestEarned.id
     )
@@ -107,36 +106,48 @@ function Shell() {
     return () => window.clearTimeout(timer);
   }, [isParent, latestEarned, store.activeChild.id]);
   useEffect(() => {
-    if (isParent && !parentUnlocked) {
+    if (store.ready && isParent && !parentUnlocked) {
       navigate("/child", { replace: true });
       setShowParentPin(true);
     }
-  }, [isParent, navigate, parentUnlocked]);
-  useEffect(() => {
-    if (wasParent.current && !isParent) {
-      sessionStorage.removeItem("growjoy-parent-unlocked");
-      setParentUnlocked(false);
-    }
-    wasParent.current = isParent;
-  }, [isParent]);
-  const goRole = (role: "child" | "parent") => {
+  }, [store.ready, isParent, navigate, parentUnlocked]);
+  const goRole = async (role: "child" | "parent") => {
     setShowMenu(false);
     if (role === "parent" && !parentUnlocked) {
       setShowParentPin(true);
       return;
     }
-    store.actions.setRole(role);
-    navigate(role === "child" ? "/child" : "/parent");
+    if (role === "child") {
+      setShowParentPin(false);
+      navigate("/child");
+      await store.actions.setRole(role);
+      return;
+    }
+    await store.actions.setRole(role);
+    navigate("/parent");
   };
-  const unlockParent = (pin: string) => {
-    if (pin !== "2468") return false;
-    sessionStorage.setItem("growjoy-parent-unlocked", "1");
-    setParentUnlocked(true);
+  const unlockParent = async (
+    password: string,
+    familyCode: string,
+    username: string,
+  ) => {
+    const unlocked = await store.actions.loginParent(
+      password,
+      familyCode,
+      username,
+    );
+    if (!unlocked) return false;
     setShowParentPin(false);
-    store.actions.setRole("parent");
     navigate("/parent");
     return true;
   };
+  if (!store.ready)
+    return (
+      <div className="login-screen">
+        <p>正在连接成长空间...</p>
+      </div>
+    );
+  if (!store.authenticated) return <ChildLogin store={store} />;
   return (
     <div className={`app-shell ${isParent ? "parent-shell" : "child-shell"}`}>
       <header className="topbar">
@@ -191,14 +202,6 @@ function Shell() {
             >
               ☕ 家长端 <span>管理与鼓励</span>
             </button>
-            <button
-              onClick={() => {
-                store.actions.reset();
-                setShowMenu(false);
-              }}
-            >
-              <RotateCcw size={15} /> 重置演示数据
-            </button>
           </div>
         )}
       </header>
@@ -220,14 +223,160 @@ function Shell() {
   );
 }
 
+function ChildLogin({ store }: { store: ReturnType<typeof useAppStore> }) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<"child" | "parent">("child");
+  const [familyCode, setFamilyCode] = useState("DEMO");
+  const [childId, setChildId] = useState(store.profiles[0]?.id ?? "");
+  const [username, setUsername] = useState("parent");
+  const [secret, setSecret] = useState("");
+  const profiles = store.profiles;
+  useEffect(() => {
+    if (!profiles.some((profile) => profile.id === childId))
+      setChildId(profiles[0]?.id ?? "");
+  }, [childId, profiles]);
+  return (
+    <main className="login-screen">
+      <form
+        className="login-panel"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const loggedIn =
+            mode === "child"
+              ? await store.actions.loginChild(familyCode, childId, secret)
+              : await store.actions.loginParent(secret, familyCode, username);
+          if (loggedIn) {
+            setSecret("");
+            if (mode === "parent") navigate("/parent");
+          }
+        }}
+      >
+        <span className="brand-mark">✦</span>
+        <span className="eyebrow">GROWJOY FAMILY</span>
+        <h1>回到成长空间</h1>
+        <div className="login-switch" role="group" aria-label="登录身份">
+          <button
+            type="button"
+            className={mode === "child" ? "active" : ""}
+            onClick={() => {
+              setMode("child");
+              setSecret("");
+            }}
+          >
+            孩子登录
+          </button>
+          <button
+            type="button"
+            className={mode === "parent" ? "active" : ""}
+            onClick={() => {
+              setMode("parent");
+              setSecret("");
+            }}
+          >
+            家长登录
+          </button>
+        </div>
+        <label>
+          家庭码
+          <input
+            value={familyCode}
+            onChange={(event) =>
+              setFamilyCode(event.target.value.toUpperCase())
+            }
+            onBlur={() => {
+              if (mode === "child") void store.actions.loadProfiles(familyCode);
+            }}
+          />
+        </label>
+        {mode === "child" ? (
+          <>
+            <label>
+              选择档案
+              <select
+                value={childId}
+                onChange={(event) => setChildId(event.target.value)}
+              >
+                {profiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.avatar} {profile.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              孩子 PIN
+              <input
+                aria-label="孩子 PIN"
+                inputMode="numeric"
+                pattern="[0-9]{4}"
+                maxLength={4}
+                type="password"
+                value={secret}
+                onChange={(event) =>
+                  setSecret(event.target.value.replace(/\D/g, ""))
+                }
+              />
+            </label>
+          </>
+        ) : (
+          <>
+            <label>
+              家长用户名
+              <input
+                value={username}
+                onChange={(event) => setUsername(event.target.value)}
+                autoComplete="username"
+              />
+            </label>
+            <label>
+              家长密码
+              <input
+                aria-label="家长密码"
+                type="password"
+                value={secret}
+                onChange={(event) => setSecret(event.target.value)}
+                autoComplete="current-password"
+              />
+            </label>
+          </>
+        )}
+        {store.message && (
+          <small className="pin-error-text">{store.message}</small>
+        )}
+        <button
+          className="wide-primary"
+          disabled={
+            mode === "child"
+              ? !childId || secret.length !== 4
+              : !username.trim() || !secret
+          }
+        >
+          {mode === "child" ? "进入成长空间" : "进入家长端"}
+        </button>
+        <small>
+          {mode === "child"
+            ? "演示家庭：DEMO · 孩子 PIN：2468"
+            : "演示账号：parent · 密码：growjoy2468"}
+        </small>
+      </form>
+    </main>
+  );
+}
+
 function ParentPinModal({
   onClose,
   onConfirm,
 }: {
   onClose: () => void;
-  onConfirm: (pin: string) => boolean;
+  onConfirm: (
+    password: string,
+    familyCode: string,
+    username: string,
+  ) => Promise<boolean>;
 }) {
   const [pin, setPin] = useState("");
+  const [familyCode, setFamilyCode] = useState("DEMO");
+  const [username, setUsername] = useState("parent");
   const [error, setError] = useState(false);
   return (
     <div className="modal-backdrop">
@@ -236,9 +385,9 @@ function ParentPinModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby="parent-pin-title"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
-          if (!onConfirm(pin)) {
+          if (!(await onConfirm(pin, familyCode, username))) {
             setError(true);
             setPin("");
           }
@@ -257,18 +406,30 @@ function ParentPinModal({
         </div>
         <span className="eyebrow">PARENT ACCESS</span>
         <h2 id="parent-pin-title">进入家长端</h2>
-        <p>请输入家长密码，孩子无法直接进入管理页面。</p>
-        <label htmlFor="parent-pin">4 位数字密码</label>
+        <p>请输入家庭码、用户名和家长密码，孩子无法直接进入管理页面。</p>
+        <label htmlFor="parent-family">家庭码</label>
+        <input
+          id="parent-family"
+          value={familyCode}
+          onChange={(event) => setFamilyCode(event.target.value.toUpperCase())}
+          autoComplete="organization"
+        />
+        <label htmlFor="parent-username">家长用户名</label>
+        <input
+          id="parent-username"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          autoComplete="username"
+        />
+        <label htmlFor="parent-pin">家长密码</label>
         <input
           id="parent-pin"
           autoFocus
           type="password"
-          inputMode="numeric"
-          autoComplete="off"
-          maxLength={4}
+          autoComplete="current-password"
           value={pin}
           onChange={(event) => {
-            setPin(event.target.value.replace(/\D/g, "").slice(0, 4));
+            setPin(event.target.value);
             setError(false);
           }}
           aria-invalid={error}
@@ -276,11 +437,11 @@ function ParentPinModal({
         {error && (
           <small className="pin-error-text">密码不正确，请重新输入</small>
         )}
-        <small className="pin-hint">演示密码：2468</small>
+        <small className="pin-hint">演示密码：growjoy2468</small>
         <button
           className="wide-primary"
           type="submit"
-          disabled={pin.length !== 4}
+          disabled={pin.length < 8}
         >
           验证并进入
         </button>
@@ -574,7 +735,11 @@ function TaskCard({
                 multiple
                 onChange={(event) => {
                   const selected = Array.from(event.target.files ?? []).map(
-                    (file) => ({ name: file.name, type: "image" as const }),
+                    (file) => ({
+                      name: file.name,
+                      type: "image" as const,
+                      file,
+                    }),
                   );
                   setAttachment((current) => [
                     ...current.filter((item) => item.type !== "image"),
@@ -591,7 +756,11 @@ function TaskCard({
                 multiple
                 onChange={(event) => {
                   const selected = Array.from(event.target.files ?? []).map(
-                    (file) => ({ name: file.name, type: "video" as const }),
+                    (file) => ({
+                      name: file.name,
+                      type: "video" as const,
+                      file,
+                    }),
                   );
                   setAttachment((current) => [
                     ...current.filter((item) => item.type !== "video"),
@@ -1033,7 +1202,8 @@ function ParentHeader({
 function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
   const tasks = store.childTasks;
   const pending = tasks.filter((t) => t.status === "pending_review");
-  const done = tasks.filter((t) => t.status === "completed").length;
+  const done = store.stats.completedTasks;
+  const total = store.stats.totalTasks;
   return (
     <div className="parent-content">
       <ParentHeader
@@ -1073,10 +1243,8 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
         </div>
         <div>
           <span>本周完成率</span>
-          <strong>
-            {Math.round((done / Math.max(tasks.length, 1)) * 100)}%
-          </strong>
-          <small>比上周 ↑ 12%</small>
+          <strong>{Math.round((done / Math.max(total, 1)) * 100)}%</strong>
+          <small>最近 7 天</small>
         </div>
         <div>
           <span>当前积分</span>
@@ -1274,7 +1442,9 @@ function ChildForm({
 }: {
   child: Child | null;
   onClose: () => void;
-  onSave: (draft: Pick<Child, "name" | "avatar" | "color">) => void;
+  onSave: (
+    draft: Pick<Child, "name" | "avatar" | "color"> & { pin?: string },
+  ) => void;
 }) {
   const avatars = ["🌻", "🚀", "🌈", "⭐", "🦕", "🐳"];
   const colors = [
@@ -1288,13 +1458,20 @@ function ChildForm({
   const [name, setName] = useState(child?.name ?? "");
   const [avatar, setAvatar] = useState(child?.avatar ?? avatars[0]);
   const [color, setColor] = useState(child?.color ?? colors[0]);
+  const [pin, setPin] = useState("2468");
   return (
     <div className="modal-backdrop">
       <form
         className="form-modal child-form"
         onSubmit={(event) => {
           event.preventDefault();
-          if (name.trim()) onSave({ name: name.trim(), avatar, color });
+          if (name.trim())
+            onSave({
+              name: name.trim(),
+              avatar,
+              color,
+              pin: child ? undefined : pin,
+            });
         }}
       >
         <div className="form-heading">
@@ -1320,6 +1497,22 @@ function ChildForm({
             placeholder="请输入孩子姓名"
           />
         </label>
+        {!child && (
+          <label>
+            孩子 PIN
+            <input
+              aria-label="孩子 PIN"
+              required
+              inputMode="numeric"
+              pattern="[0-9]{4}"
+              maxLength={4}
+              value={pin}
+              onChange={(event) =>
+                setPin(event.target.value.replace(/\D/g, ""))
+              }
+            />
+          </label>
+        )}
         <fieldset>
           <legend>选择头像</legend>
           <div className="avatar-options">
@@ -1487,7 +1680,7 @@ function AdminTaskRow({
               {task.repeatRule === "daily"
                 ? "每天"
                 : task.repeatRule === "weekly"
-                  ? "每周"
+                  ? `每周${["日", "一", "二", "三", "四", "五", "六"][task.repeatWeekday ?? 1]}`
                   : "一次性"}
             </p>
           </div>
@@ -1587,6 +1780,7 @@ function TaskForm({
     category: string;
     points: number;
     repeatRule: RepeatRule;
+    repeatWeekday: number;
   }) => void;
 }) {
   const [title, setTitle] = useState(task?.title ?? "");
@@ -1596,6 +1790,9 @@ function TaskForm({
   const [repeatRule, setRepeatRule] = useState<RepeatRule>(
     task?.repeatRule ?? "once",
   );
+  const [repeatWeekday, setRepeatWeekday] = useState(
+    task?.repeatWeekday ?? new Date().getDay(),
+  );
   return (
     <div className="modal-backdrop">
       <form
@@ -1603,7 +1800,14 @@ function TaskForm({
         onSubmit={(e) => {
           e.preventDefault();
           if (title.trim())
-            onSave({ title, description, category, points, repeatRule });
+            onSave({
+              title,
+              description,
+              category,
+              points,
+              repeatRule,
+              repeatWeekday,
+            });
         }}
       >
         <div className="form-heading">
@@ -1665,6 +1869,29 @@ function TaskForm({
             <option value="weekly">每周</option>
           </select>
         </label>
+        {repeatRule === "weekly" && (
+          <label>
+            每周星期
+            <select
+              value={repeatWeekday}
+              onChange={(e) => setRepeatWeekday(Number(e.target.value))}
+            >
+              {[
+                "星期日",
+                "星期一",
+                "星期二",
+                "星期三",
+                "星期四",
+                "星期五",
+                "星期六",
+              ].map((day, index) => (
+                <option key={day} value={index}>
+                  {day}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <button className="wide-primary" type="submit">
           {task ? "保存修改" : "发布任务"}
         </button>
@@ -1878,16 +2105,16 @@ function WishForm({
 }
 
 function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
-  const tasks = store.childTasks;
-  const done = tasks.filter((t) => t.status === "completed").length;
-  const earned = store.state.ledger
-    .filter((l) => l.childId === store.activeChild.id && l.type === "earned")
-    .reduce((a, b) => a + b.amount, 0);
-  const spent = Math.abs(
-    store.state.ledger
-      .filter((l) => l.childId === store.activeChild.id && l.type === "spent")
-      .reduce((a, b) => a + b.amount, 0),
+  const done = store.stats.completedTasks;
+  const earned = store.stats.earnedPoints;
+  const spent = store.stats.spentPoints;
+  const maxCompleted = Math.max(
+    1,
+    ...store.stats.daily.map((day) => day.completed),
   );
+  const topCategory = [...store.stats.categories].sort(
+    (left, right) => right.count - left.count,
+  )[0];
   return (
     <div className="parent-content">
       <ParentHeader
@@ -1903,16 +2130,12 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
         <div>
           <span>完成任务</span>
           <strong>{done}</strong>
-          <small>
-            次 <b>↑ 18%</b>
-          </small>
+          <small>次 / {store.stats.totalTasks} 个任务</small>
         </div>
         <div>
           <span>获得积分</span>
           <strong>{earned}</strong>
-          <small>
-            分 <b>↑ 24%</b>
-          </small>
+          <small>最近 7 天</small>
         </div>
         <div>
           <span>兑换愿望</span>
@@ -1927,23 +2150,21 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
               <span className="eyebrow">TASK COMPLETION</span>
               <h2>任务完成趋势</h2>
             </div>
-            <select>
-              <option>按周查看</option>
-              <option>按月查看</option>
-            </select>
+            <span>最近 7 天</span>
           </div>
           <div className="bar-chart tall">
-            {["周一", "周二", "周三", "周四", "周五", "周六", "周日"].map(
-              (day, i) => (
-                <div className="bar-col" key={day}>
-                  <div
-                    className="bar filled"
-                    style={{ height: `${[42, 76, 55, 90, 65, 30, 48][i]}%` }}
-                  />
-                  <small>{day}</small>
-                </div>
-              ),
-            )}
+            {store.stats.daily.map((day) => (
+              <div className="bar-col" key={day.date}>
+                <div
+                  className="bar filled"
+                  title={`${day.label}完成 ${day.completed} 个任务`}
+                  style={{
+                    height: `${day.completed === 0 ? 0 : Math.max(12, (day.completed / maxCompleted) * 100)}%`,
+                  }}
+                />
+                <small>{day.label}</small>
+              </div>
+            ))}
           </div>
         </section>
         <section className="category-panel">
@@ -1953,27 +2174,31 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
               <h2>完成分布</h2>
             </div>
           </div>
-          {[
-            ["生活自理", 42, "#ffb547"],
-            ["家庭责任", 35, "#55b8a4"],
-            ["学习成长", 23, "#9d8be8"],
-          ].map(([name, percent, color]) => (
-            <div className="category-line" key={name as string}>
-              <div>
-                <span
-                  className="category-dot"
-                  style={{ background: color as string }}
-                />
-                <span>{name}</span>
-                <b>{percent}%</b>
+          {store.stats.categories.map((category) => {
+            const color =
+              {
+                生活自理: "#ffb547",
+                家庭责任: "#55b8a4",
+                学习成长: "#9d8be8",
+              }[category.name] ?? "#67a9dc";
+            return (
+              <div className="category-line" key={category.name}>
+                <div>
+                  <span
+                    className="category-dot"
+                    style={{ background: color }}
+                  />
+                  <span>{category.name}</span>
+                  <b>{category.percent}%</b>
+                </div>
+                <div className="progress">
+                  <span
+                    style={{ width: `${category.percent}%`, background: color }}
+                  />
+                </div>
               </div>
-              <div className="progress">
-                <span
-                  style={{ width: `${percent}%`, background: color as string }}
-                />
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </section>
       </div>
       <section className="insight-card">
@@ -1981,8 +2206,9 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
         <div>
           <strong>小提示</strong>
           <p>
-            {store.activeChild.name}
-            最近在「家庭责任」类任务上完成得很棒，可以继续保持这个节奏。
+            {topCategory?.count
+              ? `${store.activeChild.name}最近在「${topCategory.name}」类任务上完成得最多，可以继续保持这个节奏。`
+              : `${store.activeChild.name}最近 7 天还没有确认完成的任务，完成后这里会出现成长洞察。`}
           </p>
         </div>
       </section>

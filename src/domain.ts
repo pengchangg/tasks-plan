@@ -1,6 +1,8 @@
 import type { AppState, Attachment, Child, Task, Wish } from "./types";
 
-export type ChildDraft = Pick<Child, "name" | "avatar" | "color">;
+export type ChildDraft = Pick<Child, "name" | "avatar" | "color"> & {
+  pin?: string;
+};
 export type TaskDraft = Pick<
   Task,
   "childId" | "title" | "description" | "category" | "points" | "repeatRule"
@@ -97,15 +99,18 @@ export function reviewTask(
     ...state,
     tasks,
     submissions,
-    children: state.children.map((child) =>
-      child.id === task.childId
-        ? {
-            ...child,
-            pointsBalance: child.pointsBalance + task.points,
-            experience: Math.min(100, child.experience + task.points / 5),
-          }
-        : child,
-    ),
+    children: state.children.map((child) => {
+      if (child.id !== task.childId) return child;
+      const growth = Math.max(1, Math.floor(task.points / 5));
+      const experienceTotal =
+        (child.level - 1) * 100 + child.experience + growth;
+      return {
+        ...child,
+        pointsBalance: child.pointsBalance + task.points,
+        level: 1 + Math.floor(experienceTotal / 100),
+        experience: experienceTotal % 100,
+      };
+    }),
     ledger: [
       ...state.ledger,
       {

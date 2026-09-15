@@ -5,10 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:server": "go run ./cmd/growjoy serve --demo",
     "build": "tsc -b && vite build",
     "test": "vitest run",
-    "check:ui": "node scripts/visual-check.mjs",
-    "check:flow": "node scripts/flow-check.mjs",
+    "test:go": "go test ./...",
+    "check:ui": "npm run build && node scripts/with-service.mjs scripts/visual-check.mjs",
+    "check:flow": "npm run build && node scripts/with-service.mjs scripts/flow-check.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

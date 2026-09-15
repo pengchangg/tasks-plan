@@ -53,13 +53,27 @@ for (const scenario of scenarios) {
     if (message.type() === "error") errors.push(message.text());
   });
   page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(`${baseUrl}/child`, { waitUntil: "networkidle" });
+  await page.getByLabel("孩子 PIN").fill("2468");
+  await page.getByRole("button", { name: "进入成长空间" }).click();
+  await page.locator(".bottom-nav").waitFor();
   if (scenario.path.startsWith("/parent")) {
-    await page.addInitScript(() =>
-      sessionStorage.setItem("growjoy-parent-unlocked", "1"),
-    );
+    await page.locator(".profile-button").click();
+    await page
+      .locator(".role-menu")
+      .getByRole("button", { name: /家长端/ })
+      .click();
+    const modal = page.locator(".pin-modal");
+    await modal.getByLabel("家长密码").fill("growjoy2468");
+    await modal.getByRole("button", { name: "验证并进入" }).click();
+    await page.waitForURL(/\/parent$/);
   }
-
   await page.goto(`${baseUrl}${scenario.path}`, { waitUntil: "networkidle" });
+  await page
+    .locator(
+      scenario.path.startsWith("/parent") ? ".parent-layout" : ".bottom-nav",
+    )
+    .waitFor();
   const layout = await page.evaluate(() => ({
     title: document.title,
     bodyWidth: document.body.scrollWidth,

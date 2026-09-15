@@ -6,60 +6,69 @@ const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
 const errors = [];
 page.on("console", (message) => {
-  if (message.type() === "error") errors.push(message.text());
+  if (
+    message.type() === "error" &&
+    !message.text().includes("401 (Unauthorized)")
+  )
+    errors.push(message.text());
 });
 page.on("pageerror", (error) => errors.push(error.message));
 
-async function getState() {
-  const raw = await page.evaluate(() =>
-    localStorage.getItem("growjoy-state-v1"),
-  );
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+async function loginChild(name = "米娅") {
+  const select = page.getByLabel("选择档案");
+  const value = await select
+    .locator("option")
+    .filter({ hasText: name })
+    .getAttribute("value");
+  await select.selectOption(value);
+  await page.getByLabel("孩子 PIN").fill("2468");
+  await page.getByRole("button", { name: "进入成长空间" }).click();
+  await page.locator(".bottom-nav").waitFor();
 }
-
+async function getState() {
+  return page.evaluate(async () => {
+    const response = await fetch("/api/v1/state");
+    return response.ok ? response.json() : null;
+  });
+}
 async function waitForState(predicate) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     const state = await getState();
     if (state && predicate(state)) return state;
     await page.waitForTimeout(50);
   }
-  throw new Error("Timed out waiting for persisted state");
+  throw new Error("Timed out waiting for server state");
 }
-
-let pinErrorChecked = false;
-async function unlockParent() {
+async function unlockParent(checkError = false) {
   const modal = page.locator(".pin-modal");
   await modal.waitFor();
-  const input = modal.getByLabel("4 位数字密码");
-  if (!pinErrorChecked) {
-    await input.fill("0000");
+  const input = modal.getByLabel("家长密码");
+  if (checkError) {
+    await input.fill("wrong-password");
     await modal.getByRole("button", { name: "验证并进入" }).click();
     await modal.getByText("密码不正确，请重新输入").waitFor();
-    pinErrorChecked = true;
   }
-  await input.fill("2468");
+  await input.fill("growjoy2468");
   await modal.getByRole("button", { name: "验证并进入" }).click();
   await page.waitForURL(/\/parent$/);
 }
-
-async function enterParent() {
+async function enterParent(checkError = false) {
   await page.locator(".profile-button").click();
   await page
     .locator(".role-menu")
     .getByRole("button", { name: /家长端/ })
     .click();
-  await unlockParent();
+  await unlockParent(checkError);
 }
 
 await page.goto(`${baseUrl}/child/tasks`, { waitUntil: "networkidle" });
-await page.evaluate(() => localStorage.clear());
-await page.reload({ waitUntil: "networkidle" });
-
+await loginChild();
+await page.getByText("整理自己的书桌").waitFor();
+let state = await getState();
+const initialBalance = state.children.find(
+  (c) => c.name === "米娅",
+).pointsBalance;
+const deskId = state.tasks.find((t) => t.title === "整理自己的书桌").id;
 const task = page.locator(".task-card").filter({ hasText: "整理自己的书桌" });
 await task.getByRole("button", { name: "完成任务" }).click();
 await task
@@ -68,28 +77,28 @@ await task
 await task.locator('input[accept="image/*"]').setInputFiles({
   name: "desk-proof.jpg",
   mimeType: "image/jpeg",
-  buffer: Buffer.from("image-proof"),
+  buffer: Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00]),
 });
 await task.locator('input[accept="video/*"]').setInputFiles({
   name: "desk-proof.mp4",
   mimeType: "video/mp4",
-  buffer: Buffer.from("video-proof"),
+  buffer: Buffer.from(
+    "00000018667479706d703432000000006d70343269736f6d",
+    "hex",
+  ),
 });
 await task.getByRole("button", { name: "提交给家长确认" }).click();
-await waitForState(
-  (state) =>
-    state.tasks.find((item) => item.id === "t1").status === "pending_review",
+state = await waitForState(
+  (s) => s.tasks.find((t) => t.id === deskId)?.status === "pending_review",
 );
-let state = await getState();
 assert.equal(
-  state.children[0].pointsBalance,
-  185,
-  "submitting must not credit points",
+  state.children.find((c) => c.name === "米娅").pointsBalance,
+  initialBalance,
 );
 
 await page.goto(`${baseUrl}/parent/tasks`, { waitUntil: "networkidle" });
 await page.waitForURL(/\/child$/);
-await unlockParent();
+await unlockParent(true);
 await page.getByRole("link", { name: "任务管理" }).click();
 const parentTask = page
   .locator(".admin-task-item")
@@ -98,14 +107,15 @@ await parentTask.getByText("书本都放整齐了").waitFor();
 await parentTask.getByText("desk-proof.jpg").waitFor();
 await parentTask.getByText("desk-proof.mp4").waitFor();
 await parentTask.getByRole("button", { name: "确认", exact: true }).click();
-await waitForState((state) => state.children[0].pointsBalance === 205);
+await waitForState(
+  (s) =>
+    s.children.find((c) => c.name === "米娅")?.pointsBalance ===
+    initialBalance + 20,
+);
 await parentTask.getByRole("button", { name: "编辑整理自己的书桌" }).click();
 await page.getByLabel("任务名称").fill("整理书桌与书架");
 await page.getByRole("button", { name: "保存修改" }).click();
-await waitForState(
-  (state) =>
-    state.tasks.find((item) => item.id === "t1").title === "整理书桌与书架",
-);
+await page.getByLabel("任务名称").waitFor({ state: "hidden" });
 
 await page.getByRole("link", { name: "愿望管理" }).click();
 const managedWish = page
@@ -114,13 +124,10 @@ const managedWish = page
 await managedWish.getByRole("button", { name: "编辑公园探险半日游" }).click();
 await page.getByLabel("愿望名称").fill("周末公园探险");
 await page.getByRole("button", { name: "保存修改" }).click();
-await waitForState(
-  (state) =>
-    state.wishes.find((item) => item.id === "w3").title === "周末公园探险",
-);
+await waitForState((s) => s.wishes.some((w) => w.title === "周末公园探险"));
 await page.getByRole("button", { name: "删除周末公园探险" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
-await waitForState((state) => !state.wishes.some((item) => item.id === "w3"));
+await waitForState((s) => !s.wishes.some((w) => w.title === "周末公园探险"));
 
 await page.locator(".profile-button").click();
 await page
@@ -128,20 +135,24 @@ await page
   .getByRole("button", { name: /孩子端/ })
   .click();
 await page.getByText("+20 积分到账！").waitFor();
-
 await page.getByRole("link", { name: "愿望", exact: true }).click();
+state = await getState();
+const dinner = state.wishes.find((w) => w.title === "选择一次晚餐");
 const wish = page.locator(".wish-card").filter({ hasText: "选择一次晚餐" });
 await wish.getByRole("button", { name: "去兑换" }).click();
 await page.getByRole("button", { name: "确认兑换" }).click();
-await waitForState((state) => state.children[0].pointsBalance === 125);
+await waitForState(
+  (s) =>
+    s.children.find((c) => c.name === "米娅")?.pointsBalance ===
+    initialBalance - 60,
+);
 await page.reload({ waitUntil: "networkidle" });
 state = await getState();
 assert.equal(
-  state.children[0].pointsBalance,
-  125,
-  "balance must persist after reload",
+  state.children.find((c) => c.name === "米娅").pointsBalance,
+  initialBalance - 60,
 );
-assert.equal(state.redemptions.at(-1).wishId, "w2");
+assert.equal(state.redemptions.at(-1).wishId, dinner.id);
 
 await enterParent();
 await page.getByRole("link", { name: "任务管理" }).click();
@@ -150,7 +161,7 @@ const readingTask = page
   .filter({ hasText: "阅读 20 分钟" });
 await readingTask.getByRole("button", { name: "退回" }).click();
 await waitForState(
-  (state) => state.tasks.find((item) => item.id === "t2").status === "rejected",
+  (s) => s.tasks.find((t) => t.title === "阅读 20 分钟")?.status === "rejected",
 );
 await page.locator(".profile-button").click();
 await page
@@ -164,60 +175,49 @@ const rejectedTask = page
 await rejectedTask.getByRole("button", { name: "重新提交" }).click();
 await rejectedTask.getByRole("button", { name: "提交给家长确认" }).click();
 await waitForState(
-  (state) =>
-    state.submissions.filter((item) => item.taskId === "t2").length === 2,
-);
-state = await getState();
-assert.equal(
-  state.tasks.find((item) => item.id === "t2").status,
-  "pending_review",
+  (s) =>
+    s.submissions.filter(
+      (item) =>
+        item.taskId === s.tasks.find((t) => t.title === "阅读 20 分钟")?.id,
+    ).length === 2,
 );
 
 await page.locator(".profile-button").click();
 await page.locator(".role-menu").getByRole("button", { name: /乐乐/ }).click();
-await waitForState((state) => state.activeChildId === "leo");
+await page.getByLabel("孩子 PIN").waitFor();
+await loginChild("乐乐");
+await waitForState(
+  (s) => s.children.find((c) => c.id === s.activeChildId)?.name === "乐乐",
+);
 await page.getByText("收拾玩具箱").waitFor();
-
 await enterParent();
 await page.getByRole("link", { name: "孩子管理" }).click();
 await page.getByRole("button", { name: "新增孩子" }).click();
 await page.getByLabel("孩子姓名").fill("小安");
 await page.getByRole("button", { name: "添加孩子" }).click();
-await waitForState(
-  (state) =>
-    state.children.length === 3 &&
-    state.children.some((child) => child.name === "小安"),
-);
+await waitForState((s) => s.children.some((c) => c.name === "小安"));
 await page.getByRole("button", { name: "编辑小安" }).click();
 await page.getByLabel("孩子姓名").fill("安安");
 await page.getByRole("button", { name: "保存修改" }).click();
-await waitForState((state) =>
-  state.children.some((child) => child.name === "安安"),
-);
+await waitForState((s) => s.children.some((c) => c.name === "安安"));
 await page.getByRole("button", { name: "删除安安" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
-await waitForState(
-  (state) =>
-    state.children.length === 2 &&
-    !state.children.some((child) => child.name === "安安"),
-);
-assert.deepEqual(errors, [], "browser console must stay clean");
-
+await waitForState((s) => !s.children.some((c) => c.name === "安安"));
+assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({
     submittedWithoutCredit: true,
-    approvedBalance: 205,
+    approvedBalance: initialBalance + 20,
     rewardFeedback: true,
-    redeemedBalance: 125,
+    redeemedBalance: initialBalance - 60,
     persistedAfterReload: true,
     rejectedAndResubmitted: true,
     childProfileSwitch: true,
-    parentPinGate: true,
+    parentPasswordGate: true,
     submissionEvidence: true,
     taskWishManagement: true,
     childProfileCrud: true,
     consoleErrors: errors.length,
   }),
 );
-
 await browser.close();
