@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   BrowserRouter,
   Link,
@@ -464,6 +464,7 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
           <TaskCard
             key={task.id}
             task={task}
+            submission={store.latestSubmissions.get(task.id)}
             onSubmit={store.actions.submitTask}
           />
         ))}
@@ -509,11 +510,13 @@ function SectionTitle({
 }
 function TaskCard({
   task,
+  submission,
   onSubmit,
   parent = false,
   onReview,
 }: {
   task: Task;
+  submission?: TaskSubmission;
   onSubmit?: (id: string, note: string, attachments: Attachment[]) => void;
   parent?: boolean;
   onReview?: (id: string, approved: boolean, note?: string) => void;
@@ -575,6 +578,13 @@ function TaskCard({
             </button>
           )}
         </div>
+        {submission && (
+          <SubmissionEvidence
+            submission={submission}
+            variant="card"
+            title={parent ? "孩子提交" : "我提交的内容"}
+          />
+        )}
       </div>
       {open && (
         <div className="task-submit">
@@ -674,7 +684,12 @@ function ChildTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
       </div>
       <div className="task-list full-list">
         {tasks.map((t) => (
-          <TaskCard key={t.id} task={t} onSubmit={store.actions.submitTask} />
+          <TaskCard
+            key={t.id}
+            task={t}
+            submission={store.latestSubmissions.get(t.id)}
+            onSubmit={store.actions.submitTask}
+          />
         ))}
       </div>
       {tasks.length === 0 && (
@@ -1128,6 +1143,7 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
             <TaskCard
               key={t.id}
               task={t}
+              submission={store.latestSubmissions.get(t.id)}
               parent
               onReview={store.actions.reviewTask}
             />
@@ -1404,13 +1420,6 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
   const tasks = store.childTasks.filter(
     (task) => filter === "all" || task.status === filter,
   );
-  const latestSubmissions = useMemo(() => {
-    const byTask = new Map<string, TaskSubmission>();
-    store.state.submissions
-      .filter((submission) => submission.childId === store.activeChild.id)
-      .forEach((submission) => byTask.set(submission.taskId, submission));
-    return byTask;
-  }, [store.activeChild.id, store.state.submissions]);
   const closeForm = () => {
     setShowForm(false);
     setEditing(null);
@@ -1455,7 +1464,7 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
         {tasks.map((task) => (
           <AdminTaskRow
             task={task}
-            submission={latestSubmissions.get(task.id)}
+            submission={store.latestSubmissions.get(task.id)}
             key={task.id}
             onReview={store.actions.reviewTask}
             onEdit={() => setEditing(task)}
@@ -1488,6 +1497,129 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
           }}
         />
       )}
+    </div>
+  );
+}
+function MediaItem({
+  attachment,
+  onPreview,
+}: {
+  attachment: Attachment;
+  onPreview: (attachment: Attachment) => void;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (!attachment.url || failed)
+    return (
+      <span className="attachment-chip">
+        {attachment.type === "image" ? (
+          <ImageIcon size={15} />
+        ) : (
+          <Video size={15} />
+        )}
+        <span>{attachment.name}</span>
+        <small>
+          {failed ? "加载失败" : attachment.type === "image" ? "照片" : "视频"}
+        </small>
+      </span>
+    );
+  if (attachment.type === "video")
+    return (
+      <video
+        className="media-video"
+        src={attachment.url}
+        controls
+        preload="metadata"
+      />
+    );
+  return (
+    <button
+      type="button"
+      className="media-thumb"
+      aria-label={`查看${attachment.name}`}
+      onClick={() => onPreview(attachment)}
+    >
+      <img
+        src={attachment.url}
+        alt={attachment.name}
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    </button>
+  );
+}
+function MediaGallery({ attachments }: { attachments: Attachment[] }) {
+  const [preview, setPreview] = useState<Attachment | null>(null);
+  return (
+    <>
+      <div className="media-grid">
+        {attachments.map((attachment, index) => (
+          <MediaItem
+            key={`${attachment.name}-${index}`}
+            attachment={attachment}
+            onPreview={setPreview}
+          />
+        ))}
+      </div>
+      {preview && (
+        <div className="modal-backdrop" onClick={() => setPreview(null)}>
+          <figure
+            className="media-viewer"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <img src={preview.url} alt={preview.name} />
+            <figcaption>{preview.name}</figcaption>
+          </figure>
+          <button
+            className="modal-close"
+            onClick={() => setPreview(null)}
+            aria-label="关闭预览"
+          >
+            <X size={18} />
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+function SubmissionEvidence({
+  submission,
+  title = "孩子提交",
+  variant = "row",
+}: {
+  submission: TaskSubmission;
+  title?: string;
+  variant?: "row" | "card";
+}) {
+  return (
+    <div
+      className={`submission-evidence${variant === "card" ? " card-evidence" : ""}`}
+    >
+      <div className="evidence-heading">
+        <strong>{title}</strong>
+        <time dateTime={submission.submittedAt}>
+          {new Date(submission.submittedAt).toLocaleString("zh-CN", {
+            month: "numeric",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })}
+        </time>
+      </div>
+      {submission.note ? (
+        <p className="submission-note">
+          <MessageSquare size={15} />
+          <span>{submission.note}</span>
+        </p>
+      ) : (
+        <p className="empty-evidence">未填写文字备注</p>
+      )}
+      <div className="attachment-list">
+        {submission.attachments.length > 0 ? (
+          <MediaGallery attachments={submission.attachments} />
+        ) : (
+          <span className="empty-evidence">未添加照片或视频</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -1563,49 +1695,7 @@ function AdminTaskRow({
           <Trash2 size={16} />
         </button>
       </div>
-      {submission && (
-        <div className="submission-evidence">
-          <div className="evidence-heading">
-            <strong>孩子提交</strong>
-            <time dateTime={submission.submittedAt}>
-              {new Date(submission.submittedAt).toLocaleString("zh-CN", {
-                month: "numeric",
-                day: "numeric",
-                hour: "2-digit",
-                minute: "2-digit",
-              })}
-            </time>
-          </div>
-          {submission.note ? (
-            <p className="submission-note">
-              <MessageSquare size={15} />
-              <span>{submission.note}</span>
-            </p>
-          ) : (
-            <p className="empty-evidence">未填写文字备注</p>
-          )}
-          <div className="attachment-list">
-            {submission.attachments.length > 0 ? (
-              submission.attachments.map((attachment, index) => (
-                <span
-                  className="attachment-chip"
-                  key={`${attachment.name}-${index}`}
-                >
-                  {attachment.type === "image" ? (
-                    <ImageIcon size={15} />
-                  ) : (
-                    <Video size={15} />
-                  )}
-                  <span>{attachment.name}</span>
-                  <small>{attachment.type === "image" ? "照片" : "视频"}</small>
-                </span>
-              ))
-            ) : (
-              <span className="empty-evidence">未添加照片或视频</span>
-            )}
-          </div>
-        </div>
-      )}
+      {submission && <SubmissionEvidence submission={submission} />}
     </article>
   );
 }

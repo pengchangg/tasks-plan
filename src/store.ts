@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { seedState } from "./data";
 import type { ChildDraft, TaskDraft, WishDraft } from "./domain";
-import type { AppState, Attachment, Child, Wish } from "./types";
+import type {
+  AppState,
+  Attachment,
+  Child,
+  TaskSubmission,
+  Wish,
+} from "./types";
 
 const emptyChild: Child = {
   id: "",
@@ -157,6 +163,17 @@ export function useAppStore() {
     [state.tasks, activeChild.id],
   );
 
+  // The newest submission per task for the child on screen; the server orders
+  // submissions by submitted_at, so the last one wins.
+  const latestSubmissions = useMemo(() => {
+    const byTask = new Map<string, TaskSubmission>();
+    for (const submission of state.submissions) {
+      if (submission.childId === activeChild.id)
+        byTask.set(submission.taskId, submission);
+    }
+    return byTask;
+  }, [state.submissions, activeChild.id]);
+
   const actions = {
     reconnect: connect,
     unlockParent: async (password: string) => {
@@ -240,6 +257,7 @@ export function useAppStore() {
     state,
     activeChild,
     childTasks,
+    latestSubmissions,
     actions,
     ready,
     connected,

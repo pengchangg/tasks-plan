@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
 import { chromium } from "playwright";
 
 const baseUrl = process.env.BASE_URL ?? "http://127.0.0.1:4173";
+await mkdir(".artifacts/ui", { recursive: true });
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
 const errors = [];
@@ -33,6 +35,14 @@ async function getState() {
     const response = await fetch("/api/v1/state");
     return response.ok ? response.json() : null;
   });
+}
+// naturalWidth stays 0 until the browser has decoded the served bytes, and
+// decode() rejects outright when the media route hands back something that is
+// not a decodable image.
+async function assertRealImage(image, width) {
+  await image.waitFor();
+  await image.evaluate((node) => node.decode());
+  assert.equal(await image.evaluate((node) => node.naturalWidth), width);
 }
 async function waitForState(predicate) {
   for (let attempt = 0; attempt < 120; attempt += 1) {
@@ -73,14 +83,32 @@ const initialBalance = state.children.find(
 ).pointsBalance;
 const deskId = state.tasks.find((t) => t.title === "整理自己的书桌").id;
 const task = page.locator(".task-card").filter({ hasText: "整理自己的书桌" });
+// A real PNG rendered by the same engine that must decode it later: the old
+// hand-written JPEG header was not decodable, so an <img> could never prove
+// anything beyond the element existing.
+const proofSize = 64;
+const proofPng = Buffer.from(
+  await page.evaluate((size) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#ffb547";
+    context.fillRect(0, 0, size, size);
+    context.fillStyle = "#4da895";
+    context.fillRect(size / 4, size / 4, size / 2, size / 2);
+    return canvas.toDataURL("image/png").split(",")[1];
+  }, proofSize),
+  "base64",
+);
 await task.getByRole("button", { name: "完成任务" }).click();
 await task
   .getByPlaceholder("写一句话告诉家长吧（可选）")
   .fill("书本都放整齐了");
 await task.locator('input[accept="image/*"]').setInputFiles({
-  name: "desk-proof.jpg",
-  mimeType: "image/jpeg",
-  buffer: Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x43, 0x00]),
+  name: "desk-proof.png",
+  mimeType: "image/png",
+  buffer: proofPng,
 });
 await task.locator('input[accept="video/*"]').setInputFiles({
   name: "desk-proof.mp4",
@@ -98,6 +126,13 @@ assert.equal(
   state.children.find((c) => c.name === "米娅").pointsBalance,
   initialBalance,
 );
+const childEvidence = task.locator(".media-thumb img");
+await assertRealImage(childEvidence, proofSize);
+await page.screenshot({
+  path: ".artifacts/ui/evidence-child.png",
+  fullPage: true,
+});
+
 await page.goto(`${baseUrl}/parent/tasks`, { waitUntil: "networkidle" });
 await page.waitForURL(/\/child$/);
 await unlockParent(true, /\/parent\/tasks$/);
@@ -106,8 +141,28 @@ const parentTask = page
   .locator(".admin-task-item")
   .filter({ hasText: "整理自己的书桌" });
 await parentTask.getByText("书本都放整齐了").waitFor();
-await parentTask.getByText("desk-proof.jpg").waitFor();
-await parentTask.getByText("desk-proof.mp4").waitFor();
+await parentTask.getByAltText("desk-proof.png").waitFor();
+await parentTask.locator(".media-video").waitFor();
+assert.equal(await parentTask.locator(".media-thumb, .media-video").count(), 2);
+const evidenceImage = parentTask.locator(".media-thumb img");
+await assertRealImage(evidenceImage, proofSize);
+await parentTask.locator(".media-thumb").click();
+await page.locator(".media-viewer img").waitFor();
+await page.screenshot({
+  path: ".artifacts/ui/evidence-parent.png",
+  fullPage: true,
+});
+await page.locator(".modal-backdrop .modal-close").click();
+await page.locator(".media-viewer").waitFor({ state: "detached" });
+const video = parentTask.locator(".media-video");
+assert.ok(await video.evaluate((node) => node.controls));
+assert.deepEqual(
+  await page.evaluate(async () => {
+    const response = await fetch(document.querySelector(".media-video").src);
+    return [response.status, response.headers.get("content-type")];
+  }),
+  [200, "video/mp4"],
+);
 await parentTask.getByRole("button", { name: "确认", exact: true }).click();
 await waitForState(
   (s) =>
@@ -211,6 +266,9 @@ console.log(
     childProfileSwitch: true,
     parentPasswordGate: true,
     submissionEvidence: true,
+    childMediaVisible: true,
+    parentMediaVisible: true,
+    mediaViewer: true,
     taskWishManagement: true,
     childProfileCrud: true,
     consoleErrors: errors.length,
