@@ -5,12 +5,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -151,8 +153,18 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 	if err = s.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if after != before || migrations != 2 {
-		t.Fatalf("restart experience=%d (before %d), migrations=%d", after, before, migrations)
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			want++
+		}
+	}
+	if after != before || migrations != want {
+		t.Fatalf("restart experience=%d (before %d), migrations=%d (want %d)", after, before, migrations, want)
 	}
 }
 
@@ -397,5 +409,158 @@ func TestFamilyIsolationAndLastChildProtection(t *testing.T) {
 	otherState := getStateTest(t, h, other.Result().Cookies()[0])
 	if len(otherState.Children) != 0 || len(otherState.Tasks) != 0 {
 		t.Fatal("family data leaked")
+	}
+}
+
+func TestAuthFailureBudgetThrottlesGuessingWithoutLockingOutTheFamily(t *testing.T) {
+	s := testServer(t)
+	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "PACIFIC", Name: "Pacific", Username: "parent", Password: "anotherpass"}); err != nil {
+		t.Fatal(err)
+	}
+	var childID string
+	if err := s.db.QueryRow(`SELECT id FROM children WHERE family_id=(SELECT id FROM families WHERE code='DEMO') ORDER BY created_at LIMIT 1`).Scan(&childID); err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	attempt := func(code, id, pin string) *httptest.ResponseRecorder {
+		return doJSON(t, h, "POST", "/api/v1/auth/child", map[string]string{"FamilyCode": code, "ChildID": id, "PIN": pin}, nil, "")
+	}
+	guesses := 0
+	for range authFailBurst + 5 {
+		w := attempt("DEMO", childID, "0000")
+		if w.Code == 429 {
+			break
+		}
+		if w.Code != 401 {
+			t.Fatalf("unexpected status while guessing: %d %s", w.Code, w.Body.String())
+		}
+		guesses++
+	}
+	if guesses > authFailBurst {
+		t.Fatalf("guessing was never throttled after %d attempts", guesses)
+	}
+	w := attempt("DEMO", childID, "0000")
+	if w.Code != 429 || !strings.Contains(w.Body.String(), "too_many_requests") {
+		t.Fatalf("throttled response: %d %s", w.Code, w.Body.String())
+	}
+	// The correct PIN is never charged, so guessing cannot lock a family out.
+	if ok := attempt("DEMO", childID, "2468"); ok.Code != 200 {
+		t.Fatalf("correct PIN blocked by the failure budget: %d %s", ok.Code, ok.Body.String())
+	}
+	// Budgets are per actor and per family: a child's typos must not lock the
+	// parent out, and one family must not throttle another.
+	wrongParent := func(code string) *httptest.ResponseRecorder {
+		return doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"FamilyCode": code, "Username": "parent", "Password": "wrongpass"}, nil, "")
+	}
+	if w := wrongParent("DEMO"); w.Code != 401 {
+		t.Fatalf("child and parent share a failure budget: %d %s", w.Code, w.Body.String())
+	}
+	if w := wrongParent("PACIFIC"); w.Code != 401 {
+		t.Fatalf("failure budget leaked across families: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestSaturatedHashGateShedsLoad(t *testing.T) {
+	s := testServer(t)
+	for range argon2Slots {
+		s.hashGate <- struct{}{}
+	}
+	r := httptest.NewRequest("POST", "/api/v1/auth/parent", strings.NewReader(`{"FamilyCode":"DEMO","Username":"parent","Password":"growjoy2468"}`))
+	r.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
+	defer cancel()
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r.WithContext(ctx))
+	if w.Code != 503 || !strings.Contains(w.Body.String(), "unavailable") {
+		t.Fatalf("saturated gate response: %d %s", w.Code, w.Body.String())
+	}
+	var sessions int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Fatalf("shed request created %d sessions", sessions)
+	}
+}
+
+func TestSweepReclaimsExpiredSessionsAndStaleKeys(t *testing.T) {
+	s := testServer(t)
+	parentCookie(t, s.Handler())
+	count := func(query string) int {
+		t.Helper()
+		var n int
+		if err := s.db.QueryRow(query).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	insert := func(key, created string) {
+		t.Helper()
+		if _, err := s.db.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) SELECT id,'par','review',?,200,'{}',? FROM families WHERE code='DEMO'`, key, created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("stale", nowText(s.now().Add(-idempotencyRetention-time.Hour)))
+	if err := s.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(`SELECT COUNT(*) FROM sessions`); n != 1 {
+		t.Fatalf("sweep removed a live session: %d", n)
+	}
+	s.now = func() time.Time { return time.Now().Add(31 * 24 * time.Hour) }
+	insert("fresh", nowText(s.now()))
+	if err := s.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(`SELECT COUNT(*) FROM sessions`); n != 0 {
+		t.Fatalf("expired sessions survived sweep: %d", n)
+	}
+	if n := count(`SELECT COUNT(*) FROM idempotency_keys WHERE key='stale'`); n != 0 {
+		t.Fatalf("stale idempotency key survived sweep")
+	}
+	if n := count(`SELECT COUNT(*) FROM idempotency_keys WHERE key='fresh'`); n != 1 {
+		t.Fatalf("retained idempotency key was swept")
+	}
+}
+
+func TestInternalErrorsAreLoggedNotLeakedAndPanicsAreRecovered(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	panicking := recoverPanic(logger, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom: dsn=/srv/secret.db")
+	}))
+	w := httptest.NewRecorder()
+	panicking.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/state", nil))
+	if w.Code != 500 {
+		t.Fatalf("panic status %d", w.Code)
+	}
+	if body := w.Body.String(); strings.Contains(body, "secret.db") || strings.Contains(body, "boom") {
+		t.Fatalf("panic detail leaked: %s", body)
+	}
+	if !strings.Contains(logs.String(), "secret.db") {
+		t.Fatalf("panic was not logged: %s", logs.String())
+	}
+
+	committed := recoverPanic(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, map[string]string{"ok": "yes"})
+		panic("after commit")
+	}))
+	w = httptest.NewRecorder()
+	committed.ServeHTTP(w, httptest.NewRequest("GET", "/api/v1/state", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "yes") {
+		t.Fatalf("committed response rewritten: %d %s", w.Code, w.Body.String())
+	}
+
+	logs.Reset()
+	s := testServer(t)
+	s.log = logger
+	w = httptest.NewRecorder()
+	s.internalError(w, httptest.NewRequest("GET", "/api/v1/state", nil), errors.New("sql: no such column: secret_column"))
+	if !strings.Contains(w.Body.String(), "internal") || strings.Contains(w.Body.String(), "secret_column") {
+		t.Fatalf("internal error leaked: %s", w.Body.String())
+	}
+	if !strings.Contains(logs.String(), "secret_column") {
+		t.Fatalf("internal error was not logged: %s", logs.String())
 	}
 }

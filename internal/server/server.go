@@ -43,6 +43,9 @@ type Server struct {
 	secureCookies     bool
 	log               *slog.Logger
 	now               func() time.Time
+	authIP            *limiter
+	authFailures      *limiter
+	hashGate          chan struct{}
 }
 type session struct{ ID, FamilyID, ActorType, ActorID, SelectedChildID string }
 type ctxKey struct{}
@@ -154,7 +157,17 @@ func Open(cfg Config, logger *slog.Logger) (*Server, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Server{db: db, mediaDir: cfg.MediaDir, distDir: cfg.DistDir, secureCookies: cfg.SecureCookies, log: logger, now: time.Now}, nil
+	return &Server{
+		db:            db,
+		mediaDir:      cfg.MediaDir,
+		distDir:       cfg.DistDir,
+		secureCookies: cfg.SecureCookies,
+		log:           logger,
+		now:           time.Now,
+		authIP:        newLimiter(authIPBurst, authIPRefill),
+		authFailures:  newLimiter(authFailBurst, authFailRefill),
+		hashGate:      make(chan struct{}, argon2Slots),
+	}, nil
 }
 
 func applyMigrations(db *sql.DB) error {
@@ -207,12 +220,34 @@ func applyMigrations(db *sql.DB) error {
 func (s *Server) Close() error { return s.db.Close() }
 func (s *Server) DB() *sql.DB  { return s.db }
 
+// idempotencyRetention bounds how long a completed mutation can be replayed.
+// It matches the longest session lifetime: older keys cannot belong to a live
+// client, so keeping them only grows the database.
+const idempotencyRetention = 30 * 24 * time.Hour
+
+// Sweep reclaims expired sessions and stale idempotency keys. Expired sessions
+// are otherwise deleted only when a client logs out or switches profile, so a
+// long-lived database would grow without bound.
+func (s *Server) Sweep(ctx context.Context) error {
+	now := s.now()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at < ?`, nowText(now)); err != nil {
+		return fmt.Errorf("sweep sessions: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM idempotency_keys WHERE created_at < ?`, nowText(now.Add(-idempotencyRetention))); err != nil {
+		return fmt.Errorf("sweep idempotency keys: %w", err)
+	}
+	s.authIP.evict(now, bucketIdle)
+	s.authFailures.evict(now, bucketIdle)
+	return nil
+}
+
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/health/live", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
 	r.Get("/health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.PingContext(r.Context()); err != nil {
-			problem(w, 503, "unavailable", err.Error())
+			s.log.Error("readiness check failed", "err", err.Error())
+			problem(w, 503, "unavailable", "database unavailable")
 			return
 		}
 		writeJSON(w, 200, map[string]string{"status": "ok"})
@@ -220,9 +255,12 @@ func (s *Server) Handler() http.Handler {
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(sameOrigin)
 		api.Get("/auth/status", s.authStatus)
-		api.Get("/auth/profiles", s.profiles)
-		api.Post("/auth/parent", s.parentLogin)
-		api.Post("/auth/child", s.childLogin)
+		api.Group(func(auth chi.Router) {
+			auth.Use(s.authLimit)
+			auth.Get("/auth/profiles", s.profiles)
+			auth.Post("/auth/parent", s.parentLogin)
+			auth.Post("/auth/child", s.childLogin)
+		})
 		api.Group(func(a chi.Router) {
 			a.Use(s.authenticate)
 			a.Post("/auth/logout", s.logout)
@@ -255,7 +293,7 @@ func (s *Server) Handler() http.Handler {
 	if s.distDir != "" {
 		r.Handle("/*", spaHandler(s.distDir))
 	}
-	return requestLog(s.log, r)
+	return requestLog(s.log, recoverPanic(s.log, r))
 }
 
 func sameOrigin(next http.Handler) http.Handler {
@@ -424,7 +462,7 @@ func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("familyCode")
 	rows, err := s.db.Query(`SELECT c.id,c.name,c.avatar FROM children c JOIN families f ON f.id=c.family_id WHERE f.code=? ORDER BY c.created_at`, code)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	defer rows.Close()
@@ -432,7 +470,7 @@ func (s *Server) profiles(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var cid, name, avatar string
 		if err = rows.Scan(&cid, &name, &avatar); err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		out = append(out, map[string]string{"id": cid, "name": name, "avatar": avatar})
@@ -446,16 +484,31 @@ func (s *Server) parentLogin(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "invalid JSON")
 		return
 	}
+	budget := authFailureKey(in.FamilyCode, "parent:"+strings.ToLower(in.Username))
 	var family, parent, hash string
 	err := s.db.QueryRow(`SELECT f.id,p.id,p.password_hash FROM parents p JOIN families f ON f.id=p.family_id WHERE f.code=? AND p.username=?`, in.FamilyCode, in.Username).Scan(&family, &parent, &hash)
-	if err != nil || !verifySecret(hash, in.Password) {
+	if err != nil {
+		problem(w, 401, "invalid_credentials", "credentials are invalid")
+		return
+	}
+	ok, verr := s.verifyPassword(r.Context(), hash, in.Password)
+	if verr != nil {
+		s.hashFailure(w, r, verr)
+		return
+	}
+	if !ok {
+		if !s.authBudgetLeft(budget) {
+			problem(w, 429, "too_many_requests", "too many requests; try again later")
+			return
+		}
+		s.recordAuthFailure(budget)
 		problem(w, 401, "invalid_credentials", "credentials are invalid")
 		return
 	}
 	var child string
 	_ = s.db.QueryRow(`SELECT id FROM children WHERE family_id=? ORDER BY created_at LIMIT 1`, family).Scan(&child)
 	if err = s.createSession(w, family, "parent", parent, child, 12*time.Hour); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"role": "parent"})
@@ -466,14 +519,29 @@ func (s *Server) childLogin(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "invalid JSON")
 		return
 	}
+	budget := authFailureKey(in.FamilyCode, "child:"+in.ChildID)
 	var family, hash string
 	err := s.db.QueryRow(`SELECT f.id,c.pin_hash FROM children c JOIN families f ON f.id=c.family_id WHERE f.code=? AND c.id=?`, in.FamilyCode, in.ChildID).Scan(&family, &hash)
-	if err != nil || !verifySecret(hash, in.PIN) {
+	if err != nil {
+		problem(w, 401, "invalid_credentials", "credentials are invalid")
+		return
+	}
+	ok, verr := s.verifyPassword(r.Context(), hash, in.PIN)
+	if verr != nil {
+		s.hashFailure(w, r, verr)
+		return
+	}
+	if !ok {
+		if !s.authBudgetLeft(budget) {
+			problem(w, 429, "too_many_requests", "too many requests; try again later")
+			return
+		}
+		s.recordAuthFailure(budget)
 		problem(w, 401, "invalid_credentials", "credentials are invalid")
 		return
 	}
 	if err = s.createSession(w, family, "child", in.ChildID, in.ChildID, 30*24*time.Hour); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"role": "child"})
@@ -490,11 +558,11 @@ func (s *Server) switchToChild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.db.Exec(`DELETE FROM sessions WHERE id=? AND family_id=?`, x.ID, x.FamilyID); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if err := s.createSession(w, x.FamilyID, "child", x.SelectedChildID, x.SelectedChildID, 30*24*time.Hour); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"role": "child"})
@@ -524,7 +592,7 @@ func (s *Server) selectChild(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=? AND family_id=? AND EXISTS(SELECT 1 FROM children WHERE id=? AND family_id=?)`, in.ChildID, x.ID, x.FamilyID, in.ChildID, x.FamilyID)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -795,7 +863,7 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 func (s *Server) getState(w http.ResponseWriter, r *http.Request) {
 	out, err := s.state(r.Context(), sess(r))
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, out)
@@ -821,22 +889,22 @@ func (s *Server) saveChild(w http.ResponseWriter, r *http.Request) {
 			problem(w, 400, "invalid_request", "a 4 digit PIN is required")
 			return
 		}
-		hash, err := hashSecret(in.PIN)
+		hash, err := s.hashPassword(r.Context(), in.PIN)
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.hashFailure(w, r, err)
 			return
 		}
 		cid = id("child")
 		_, err = s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,pin_hash,created_at) VALUES(?,?,?,?,?,?,?)`, cid, x.FamilyID, strings.TrimSpace(in.Name), in.Avatar, in.Color, hash, nowText(s.now()))
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		_, _ = s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=?`, cid, x.ID)
 	} else {
 		res, err := s.db.Exec(`UPDATE children SET name=?,avatar=?,color=? WHERE id=? AND family_id=?`, strings.TrimSpace(in.Name), in.Avatar, in.Color, cid, x.FamilyID)
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		n, _ := res.RowsAffected()
@@ -859,7 +927,7 @@ func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 	mediaFiles := s.mediaForChild(r.Context(), x.FamilyID, cid)
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
@@ -876,7 +944,7 @@ func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 		res, err = tx.Exec(`DELETE FROM children WHERE id=? AND family_id=?`, cid, x.FamilyID)
 	}
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -885,7 +953,7 @@ func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = tx.Commit(); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	for _, name := range mediaFiles {
@@ -962,7 +1030,7 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 		tid := id("tpl")
 		_, err := s.db.Exec(`INSERT INTO task_templates(id,family_id,child_id,title,description,category,points,repeat_rule,repeat_weekday,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, tid, x.FamilyID, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, now, now)
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		_ = s.ensureInstances(r.Context(), x.FamilyID)
@@ -970,7 +1038,7 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 	} else {
 		res, err := s.db.Exec(`UPDATE task_templates SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=?,updated_at=? WHERE family_id=? AND id=(SELECT template_id FROM task_instances WHERE id=? AND family_id=?)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, now, x.FamilyID, instance, x.FamilyID)
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		n, _ := res.RowsAffected()
@@ -993,7 +1061,7 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 	files := s.mediaForTemplate(r.Context(), x.FamilyID, templateID)
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
@@ -1002,7 +1070,7 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(`DELETE FROM task_instances WHERE family_id=? AND template_id=?`, x.FamilyID, templateID)
 	}
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -1011,7 +1079,7 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = tx.Commit(); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	for _, name := range files {
@@ -1158,7 +1226,7 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 		src, e := h.Open()
 		if e != nil {
 			cleanup()
-			problem(w, 500, "upload_failed", e.Error())
+			s.uploadError(w, r, e)
 			return
 		}
 		storage := id("media") + candidate.ext
@@ -1170,7 +1238,7 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 		_ = src.Close()
 		if e != nil {
 			cleanup()
-			problem(w, 500, "upload_failed", e.Error())
+			s.uploadError(w, r, e)
 			return
 		}
 		savedFiles = append(savedFiles, saved{h, storage, id("att"), candidate.kind, candidate.mimeType})
@@ -1178,7 +1246,7 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		cleanup()
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	sid := id("sub")
@@ -1188,7 +1256,10 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 		var changed int64
 		changed, err = res.RowsAffected()
 		if err == nil && changed != 1 {
-			err = fmt.Errorf("task is no longer available for submission")
+			_ = tx.Rollback()
+			cleanup()
+			problem(w, 409, "conflict", "task is no longer available for submission")
+			return
 		}
 	}
 	if err == nil {
@@ -1208,12 +1279,12 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		_ = tx.Rollback()
 		cleanup()
-		problem(w, 409, "conflict", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if err = tx.Commit(); err != nil {
 		cleanup()
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"id": sid})
@@ -1242,7 +1313,7 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
@@ -1283,11 +1354,11 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'review',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
 	}
 	if err != nil {
-		problem(w, 409, "conflict", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if err = tx.Commit(); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"approved": in.Approved})
@@ -1319,13 +1390,13 @@ func (s *Server) saveWish(w http.ResponseWriter, r *http.Request) {
 		wid = id("wish")
 		_, err := s.db.Exec(`INSERT INTO wishes(id,family_id,title,description,points_cost,icon,color,is_active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, wid, x.FamilyID, strings.TrimSpace(in.Title), in.Description, in.PointsCost, in.Icon, in.Color, active, now, now)
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 	} else {
 		res, err := s.db.Exec(`UPDATE wishes SET title=?,description=?,points_cost=?,icon=?,color=?,is_active=?,updated_at=? WHERE id=? AND family_id=? AND deleted_at IS NULL`, strings.TrimSpace(in.Title), in.Description, in.PointsCost, in.Icon, in.Color, active, now, wid, x.FamilyID)
 		if err != nil {
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		n, _ := res.RowsAffected()
@@ -1340,7 +1411,7 @@ func (s *Server) deleteWish(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
 	res, err := s.db.Exec(`UPDATE wishes SET deleted_at=?,is_active=0 WHERE id=? AND family_id=? AND deleted_at IS NULL`, nowText(s.now()), chi.URLParam(r, "id"), x.FamilyID)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -1377,7 +1448,7 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
@@ -1390,7 +1461,7 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := tx.Exec(`UPDATE children SET points_balance=points_balance-? WHERE id=? AND family_id=? AND points_balance>=?`, cost, x.SelectedChildID, x.FamilyID, cost)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	n, _ := res.RowsAffected()
@@ -1408,11 +1479,11 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'redeem',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
 	}
 	if err != nil {
-		problem(w, 409, "conflict", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	if err = tx.Commit(); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	writeJSON(w, 200, map[string]string{"id": rid})
@@ -1435,7 +1506,7 @@ func (s *Server) media(w http.ResponseWriter, r *http.Request) {
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	t, _ := time.Parse(time.RFC3339Nano, created)
@@ -1448,7 +1519,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	cid := x.SelectedChildID
 	loc, err := s.familyLocation(r.Context(), x.FamilyID)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	today := s.now().In(loc)
@@ -1457,7 +1528,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 
 	var total int
 	if err = s.db.QueryRow(`SELECT COUNT(*) FROM task_instances WHERE family_id=? AND child_id=? AND template_id IS NOT NULL AND due_date BETWEEN ? AND ?`, x.FamilyID, cid, startDate, endDate).Scan(&total); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	type dailyStat struct {
@@ -1482,20 +1553,20 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	completed := 0
 	rows, err := s.db.Query(`SELECT i.category,s.reviewed_at FROM task_submissions s JOIN task_instances i ON i.id=s.task_instance_id WHERE s.family_id=? AND s.child_id=? AND s.approved=1 AND s.reviewed_at IS NOT NULL`, x.FamilyID, cid)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	for rows.Next() {
 		var category, reviewedAt string
 		if err = rows.Scan(&category, &reviewedAt); err != nil {
 			rows.Close()
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		reviewed, parseErr := time.Parse(time.RFC3339Nano, reviewedAt)
 		if parseErr != nil {
 			rows.Close()
-			problem(w, 500, "internal", parseErr.Error())
+			s.internalError(w, r, parseErr)
 			return
 		}
 		date := reviewed.In(loc).Format("2006-01-02")
@@ -1506,14 +1577,14 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err = rows.Close(); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 
 	earned, spent := 0, 0
 	rows, err = s.db.Query(`SELECT amount,created_at FROM point_ledger WHERE family_id=? AND child_id=?`, x.FamilyID, cid)
 	if err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 	for rows.Next() {
@@ -1521,13 +1592,13 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		var createdAt string
 		if err = rows.Scan(&amount, &createdAt); err != nil {
 			rows.Close()
-			problem(w, 500, "internal", err.Error())
+			s.internalError(w, r, err)
 			return
 		}
 		created, parseErr := time.Parse(time.RFC3339Nano, createdAt)
 		if parseErr != nil {
 			rows.Close()
-			problem(w, 500, "internal", parseErr.Error())
+			s.internalError(w, r, parseErr)
 			return
 		}
 		date := created.In(loc).Format("2006-01-02")
@@ -1541,7 +1612,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err = rows.Close(); err != nil {
-		problem(w, 500, "internal", err.Error())
+		s.internalError(w, r, err)
 		return
 	}
 

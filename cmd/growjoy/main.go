@@ -14,6 +14,10 @@ import (
 	"growjoy/internal/server"
 )
 
+// sweepInterval is how often expired sessions and stale idempotency keys are
+// reclaimed while serving.
+const sweepInterval = time.Hour
+
 func env(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -59,8 +63,31 @@ func run() error {
 	httpServer := &http.Server{Addr: *addr, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
+
+	// Expired sessions and stale idempotency keys are only reclaimed here.
+	sweepCtx, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	if err := app.Sweep(sweepCtx); err != nil {
+		slog.Warn("sweep failed", "err", err)
+	}
+	go func() {
+		ticker := time.NewTicker(sweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sweepCtx.Done():
+				return
+			case <-ticker.C:
+				if err := app.Sweep(sweepCtx); err != nil {
+					slog.Warn("sweep failed", "err", err)
+				}
+			}
+		}
+	}()
+
 	go func() {
 		<-done
+		stopSweep()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = httpServer.Shutdown(ctx)

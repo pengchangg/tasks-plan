@@ -24,7 +24,7 @@ func (s *Server) CreateFamily(ctx context.Context, in FamilyInput) error {
 	if in.DisplayName == "" {
 		in.DisplayName = in.Username
 	}
-	hash, err := hashSecret(in.Password)
+	hash, err := s.hashPassword(ctx, in.Password)
 	if err != nil {
 		return err
 	}
