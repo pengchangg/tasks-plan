@@ -45,3 +45,30 @@
 .star-complete{margin-top:11px;display:flex;flex-direction:column;gap:9px}
 .star-complete textarea{resize:none;border:1px solid var(--line);border-radius:6px;padding:9px;font-size:11px;min-height:45px}
 .star-complete>.wide-primary{margin-top:0;min-height:38px}
+
+.growth-calendar{margin-top:13px}
+.calendar-nav{margin-left:auto;display:flex;align-items:center;gap:8px}
+.calendar-nav button{width:30px;height:30px;border:1px solid var(--line);border-radius:6px;background:#fff;display:grid;place-items:center;font-size:13px;line-height:1}
+.calendar-nav button:disabled{opacity:.35;cursor:default}
+.calendar-month{font:700 13px Fredoka,'Noto Sans SC',sans-serif}
+.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;margin-top:14px}
+.calendar-weekday{font-size:10px;font-weight:700;color:var(--muted);text-align:center}
+.calendar-empty{aspect-ratio:1}
+.calendar-day{position:relative;aspect-ratio:1;border:1px solid transparent;border-radius:8px;background:#f6f4ef;font:700 12px Fredoka,'Noto Sans SC',sans-serif;display:grid;place-items:center;padding:0}
+.calendar-day.today{border-color:#e4bd61}
+.calendar-day.selected{background:var(--mint);color:#fff}
+.calendar-dot{position:absolute;bottom:6px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:transparent}
+.calendar-dot.open{background:var(--coral)}
+.calendar-dot.done{background:var(--mint)}
+.calendar-dot.backfill{background:var(--violet)}
+.calendar-day.selected .calendar-dot{background:#fff}
+.day-panel{margin-top:13px}
+.day-group{margin:14px 0 0;font-size:12px;color:var(--muted)}
+.day-summary{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.day-summary>span{font-size:10px;font-weight:700;background:#f2f0ea;border-radius:999px;padding:4px 9px}
+.day-task{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.day-task-line{display:flex;align-items:center;gap:11px}
+.day-task-main{flex:1;min-width:0}
+.day-task-main h4{margin:0 0 3px;font-size:13px}
+.day-task-main p{margin:0;font-size:10px;color:var(--muted)}
+.day-badge{display:inline-block;margin-left:6px;padding:2px 6px;border-radius:999px;background:#efe9fb;color:#5f4b96;font-weight:700}

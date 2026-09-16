@@ -122,6 +122,7 @@ type Redemption struct {
 }
 type State struct {
 	Version       int          `json:"version"`
+	Timezone      string       `json:"timezone"`
 	Role          string       `json:"role"`
 	ActiveChildID string       `json:"activeChildId"`
 	Children      []Child      `json:"children"`
@@ -755,6 +756,7 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 	if err != nil {
 		return out, err
 	}
+	out.Timezone = loc.String()
 	streaks, err := s.streaks(ctx, x.FamilyID, loc)
 	if err != nil {
 		return out, err

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BrowserRouter,
   Link,
@@ -33,6 +33,8 @@ import {
   X,
 } from "lucide-react";
 import { useAppStore } from "./store";
+import { dayActivity, dayDigest, familyDate } from "./domain";
+import type { DayActivity, DayEntry } from "./domain";
 import type {
   Attachment,
   Child,
@@ -52,6 +54,8 @@ const statusLabel = {
   completed: "已完成",
   rejected: "再试一次",
 };
+const taskSymbol = (category: string) =>
+  category === "学习成长" ? "✎" : category === "家庭责任" ? "⌂" : "✦";
 const dateText = (date: string) =>
   date === new Date().toISOString().slice(0, 10)
     ? "今天"
@@ -532,11 +536,7 @@ function TaskCard({
   return (
     <article className={`task-card ${task.status}`}>
       <div className={`task-symbol cat-${task.category}`}>
-        {task.category === "学习成长"
-          ? "✎"
-          : task.category === "家庭责任"
-            ? "⌂"
-            : "✦"}
+        {taskSymbol(task.category)}
       </div>
       <div className="task-main">
         <div className="task-top">
@@ -985,11 +985,50 @@ function WishCard({
 }
 
 function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
-  const tasks = store.childTasks;
-  const done = tasks.filter((t) => t.status === "completed").length;
-  const earned = store.state.ledger
-    .filter((l) => l.childId === store.activeChild.id && l.type === "earned")
-    .reduce((a, b) => a + b.amount, 0);
+  const { activeChild: child, childTasks: tasks, state } = store;
+  const done = tasks.filter((task) => task.status === "completed").length;
+  const earned = state.ledger
+    .filter((item) => item.childId === child.id && item.type === "earned")
+    .reduce((sum, item) => sum + item.amount, 0);
+  const today = familyDate(new Date().toISOString(), state.timezone);
+  const [selected, setSelected] = useState(today);
+  const [month, setMonth] = useState(today.slice(0, 7));
+  const activity = useMemo(() => dayActivity(state, child.id), [state, child.id]);
+  const digest = useMemo(
+    () => dayDigest(state, child.id, selected),
+    [state, child.id, selected],
+  );
+  // 日历算术只问「某年某月的一号是星期几 / 这个月有几天」，与瞬时无关。
+  const [year, monthNumber] = month.split("-").map(Number);
+  const lead = (new Date(year, monthNumber - 1, 1).getDay() + 6) % 7;
+  const total = new Date(year, monthNumber, 0).getDate();
+  const cells: (string | null)[] = [
+    ...Array.from({ length: lead }, (): string | null => null),
+    ...Array.from(
+      { length: total },
+      (_, index) => `${month}-${String(index + 1).padStart(2, "0")}`,
+    ),
+  ];
+  const [selectedMonth, selectedDay] = selected
+    .split("-")
+    .slice(1)
+    .map(Number);
+  const weekday = ["日", "一", "二", "三", "四", "五", "六"][
+    new Date(year, monthNumber - 1, selectedDay).getDay()
+  ];
+  const counts: Record<Task["status"], number> = {
+    todo: 0,
+    pending_review: 0,
+    completed: 0,
+    rejected: 0,
+  };
+  for (const entry of digest.scheduled) counts[entry.task.status] += 1;
+  const shiftMonth = (delta: number) => {
+    const next = new Date(year, monthNumber - 1 + delta, 1);
+    setMonth(
+      `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`,
+    );
+  };
   return (
     <div className="content-wrap">
       <PageHeading
@@ -1023,29 +1062,85 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
           color="yellow"
         />
       </div>
-      <section className="chart-panel">
+      <section className="chart-panel growth-calendar">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">LAST 7 DAYS</span>
-            <h2>完成趋势</h2>
+            <span className="eyebrow">DATE STATS</span>
+            <h2>成长日历</h2>
+          </div>
+          <div className="calendar-nav">
+            <button aria-label="上一个月" onClick={() => shiftMonth(-1)}>
+              ‹
+            </button>
+            <span className="calendar-month">
+              {year} 年 {monthNumber} 月
+            </span>
+            <button
+              aria-label="下一个月"
+              disabled={month === today.slice(0, 7)}
+              onClick={() => shiftMonth(1)}
+            >
+              ›
+            </button>
+          </div>
+        </div>
+        <CalendarGrid
+          cells={cells}
+          selected={selected}
+          today={today}
+          activity={activity}
+          onSelect={setSelected}
+        />
+      </section>
+      <section className="chart-panel day-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">DAY DETAIL</span>
+            <h2>
+              {selected === today ? "今天" : `${selectedMonth}月${selectedDay}日`}{" "}
+              · 周{weekday}
+            </h2>
           </div>
           <span className="chart-total">
-            {done} <small>次完成</small>
+            {digest.scheduled.length} <small>个任务</small>
           </span>
         </div>
-        <div className="bar-chart">
-          {["一", "二", "三", "四", "五", "六", "日"].map((day, i) => (
-            <div className="bar-col" key={day}>
-              <div
-                className={`bar ${i < 5 ? "filled" : ""}`}
-                style={{ height: `${[45, 68, 32, 85, 58, 20, 35][i]}%` }}
-              >
-                <span />
-              </div>
-              <small>{day}</small>
-            </div>
-          ))}
+        <div className="day-summary">
+          <span>已完成 {counts.completed}</span>
+          <span>待确认 {counts.pending_review}</span>
+          <span>待完成 {counts.todo}</span>
+          {counts.rejected > 0 && <span>再试一次 {counts.rejected}</span>}
+          {digest.backfilled.length > 0 && (
+            <span>补录 {digest.backfilled.length}</span>
+          )}
+          <span>获得 {digest.earned} 积分</span>
         </div>
+        {digest.scheduled.length === 0 && digest.backfilled.length === 0 ? (
+          <EmptyState
+            icon="✦"
+            title="这一天没有任务记录"
+            text="换一个日期看看吧"
+          />
+        ) : (
+          <>
+            <h3 className="day-group">当天的任务</h3>
+            {digest.scheduled.length === 0 ? (
+              <p className="empty-evidence">这一天没有安排任务</p>
+            ) : (
+              digest.scheduled.map((entry) => (
+                <DayTaskRow key={entry.task.id} entry={entry} />
+              ))
+            )}
+            {digest.backfilled.length > 0 && (
+              <>
+                <h3 className="day-group">补录记录</h3>
+                {digest.backfilled.map((entry) => (
+                  <DayTaskRow key={entry.task.id} entry={entry} backfill />
+                ))}
+              </>
+            )}
+          </>
+        )}
       </section>
       <section className="achievement">
         <div className="achievement-badge">🌱</div>
@@ -1057,6 +1152,101 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
         <ChevronRight size={18} />
       </section>
     </div>
+  );
+}
+
+function CalendarGrid({
+  cells,
+  selected,
+  today,
+  activity,
+  onSelect,
+}: {
+  cells: (string | null)[];
+  selected: string;
+  today: string;
+  activity: Record<string, DayActivity>;
+  onSelect: (date: string) => void;
+}) {
+  return (
+    <div className="calendar-grid">
+      {["一", "二", "三", "四", "五", "六", "日"].map((label) => (
+        <span className="calendar-weekday" key={label}>
+          {label}
+        </span>
+      ))}
+      {cells.map((date, index) => {
+        if (!date)
+          return <span className="calendar-empty" key={`empty-${index}`} />;
+        const day = activity[date];
+        const dot = day
+          ? day.backfilled > 0
+            ? "backfill"
+            : day.scheduled > 0 && day.completed === day.scheduled
+              ? "done"
+              : "open"
+          : "";
+        return (
+          <button
+            className={`calendar-day${date === selected ? " selected" : ""}${date === today ? " today" : ""}`}
+            aria-pressed={date === selected}
+            aria-label={`${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日`}
+            key={date}
+            onClick={() => onSelect(date)}
+          >
+            {Number(date.slice(8, 10))}
+            <span className={`calendar-dot${dot ? ` ${dot}` : ""}`} />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function DayTaskRow({
+  entry,
+  backfill = false,
+}: {
+  entry: DayEntry;
+  backfill?: boolean;
+}) {
+  const { task, submission, submissionDate } = entry;
+  return (
+    <article className="day-task">
+      <div className="day-task-line">
+        <div className={`task-symbol cat-${task.category}`}>
+          {taskSymbol(task.category)}
+        </div>
+        <div className="day-task-main">
+          <h4>
+            {task.title}
+            {backfill ? (
+              <span className="day-badge">原定 {dateText(task.dueDate)}</span>
+            ) : (
+              submissionDate !== undefined &&
+              submissionDate !== task.dueDate && (
+                <span className="day-badge">
+                  补录 · {dateText(submissionDate)}提交
+                </span>
+              )
+            )}
+          </h4>
+          <p>
+            {task.category} · +{task.points}
+          </p>
+        </div>
+        <span className={`status-dot status-${task.status}`}>
+          {statusLabel[task.status]}
+        </span>
+      </div>
+      {submission && (
+        <SubmissionEvidence
+          submission={submission}
+          title="提交记录"
+          variant="card"
+        />
+      )}
+    </article>
   );
 }
 function Metric({
@@ -1826,11 +2016,7 @@ function AdminTaskRow({
     <article className="admin-task-item">
       <div className="admin-row">
         <div className={`task-symbol cat-${task.category}`}>
-          {task.category === "学习成长"
-            ? "✎"
-            : task.category === "家庭责任"
-              ? "⌂"
-              : "✦"}
+          {taskSymbol(task.category)}
         </div>
         <div className="admin-row-main">
           <div>

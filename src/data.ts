@@ -6,6 +6,7 @@ const daysAgo = (days: number) =>
 
 export const seedState: AppState = {
   version: 1,
+  timezone: "Asia/Shanghai",
   role: "child",
   activeChildId: "mia",
   children: [

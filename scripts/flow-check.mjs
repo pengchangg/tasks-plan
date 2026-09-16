@@ -294,6 +294,103 @@ await waitForState((s) => s.children.some((c) => c.name === "安安"));
 await page.getByRole("button", { name: "删除安安" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
 await waitForState((s) => !s.children.some((c) => c.name === "安安"));
+// Growth calendar: 米娅's day holds four real instances (three completed, one
+// pending review) and today's only earned ledger entry is this run's +20
+// approval, so the screen must derive all of it from /state instead of the
+// hard-coded chart it used to render. A 补录 needs a submission whose
+// family-local date differs from the instance's due_date, and the server
+// stamps both, so a shifted browser clock cannot fabricate one: only a task
+// scheduled for another weekday can. Weekday +3 can never be today's ISO
+// weekday, so the due date always lands on a real 补录.
+const familyToday = await page.evaluate(async () => {
+  const state = await (await fetch("/api/v1/state")).json();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: state.timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    weekday: "short",
+  }).formatToParts(new Date());
+  const value = (type) => parts.find((part) => part.type === type).value;
+  return {
+    date: `${value("year")}-${value("month")}-${value("day")}`,
+    weekday: { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[
+      value("weekday")
+    ],
+  };
+});
+await page.getByRole("link", { name: "任务管理" }).click();
+await page.getByRole("button", { name: "新建任务" }).click();
+await page.getByLabel("任务名称").fill("每周整理书架");
+await page.getByLabel("重复方式").selectOption("weekly");
+await page
+  .getByLabel("每周星期")
+  .selectOption(String((familyToday.weekday + 3) % 7));
+await page.getByRole("button", { name: "发布任务" }).click();
+state = await waitForState((s) =>
+  s.tasks.some((t) => t.title === "每周整理书架"),
+);
+const weeklyTask = state.tasks.find((t) => t.title === "每周整理书架");
+assert.equal(
+  weeklyTask.childId,
+  state.children.find((c) => c.name === "米娅").id,
+);
+assert.notEqual(weeklyTask.dueDate, familyToday.date);
+
+await page.locator(".profile-button").click();
+await page
+  .locator(".role-menu")
+  .getByRole("button", { name: /孩子端/ })
+  .click();
+await switchChild("米娅");
+await page.getByRole("link", { name: "成长", exact: true }).click();
+const dayPanel = page.locator(".day-panel");
+// The parent renamed the template to 整理书桌与书架, but the instance keeps its
+// own title: saveTask only syncs instances that are todo/rejected and never
+// submitted.
+await dayPanel
+  .locator(".day-task")
+  .filter({ hasText: "整理自己的书桌" })
+  .waitFor();
+assert.equal(await page.locator(".calendar-day.selected").count(), 1);
+let dayText = await dayPanel.innerText();
+assert.ok(dayText.includes("已完成 3"));
+assert.ok(dayText.includes("待确认 1"));
+assert.ok(dayText.includes("获得 20 积分"));
+assert.ok(!dayText.includes("补录"));
+await page.screenshot({
+  path: ".artifacts/ui/growth-day.png",
+  fullPage: true,
+});
+
+await page.getByRole("link", { name: "任务", exact: true }).click();
+const weeklyCard = page
+  .locator(".task-card")
+  .filter({ hasText: "每周整理书架" });
+await weeklyCard.getByRole("button", { name: "完成任务" }).click();
+await weeklyCard.getByRole("button", { name: "提交给家长确认" }).click();
+await waitForState(
+  (s) =>
+    s.tasks.find((t) => t.title === "每周整理书架")?.status === "pending_review",
+);
+await page.getByRole("link", { name: "成长", exact: true }).click();
+const backfilled = dayPanel
+  .locator(".day-task")
+  .filter({ hasText: "每周整理书架" });
+await backfilled.waitFor();
+assert.ok((await backfilled.innerText()).includes("原定 "));
+dayText = await dayPanel.innerText();
+assert.ok(dayText.includes("补录记录"));
+assert.ok(dayText.includes("补录 1"));
+assert.ok(dayText.includes("待确认 1"));
+assert.equal(
+  await page.locator(".calendar-day.selected .calendar-dot.backfill").count(),
+  1,
+);
+await page.screenshot({
+  path: ".artifacts/ui/growth-backfill.png",
+  fullPage: true,
+});
 // Both harnesses run on 127.0.0.1, a secure context where crypto.randomUUID
 // always exists, so nothing above reaches the idempotency-key fallback in
 // src/store.ts that plain-HTTP LAN deployments depend on: there the browser
@@ -359,6 +456,8 @@ console.log(
     redemptionCompletionParentReadOnly: true,
     redemptionCompletionReversible: true,
     redemptionCompletionEvidence: true,
+    growthDayStats: true,
+    growthBackfill: true,
     consoleErrors: errors.length,
   }),
 );

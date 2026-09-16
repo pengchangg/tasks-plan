@@ -38,7 +38,15 @@ const scenarios = [
     width: 1440,
     height: 1000,
   },
+  { name: "growth-375", path: "/child/growth", width: 375, height: 812 },
+  { name: "growth-390", path: "/child/growth", width: 390, height: 844 },
 ];
+
+const childLinks = {
+  "/child": null,
+  "/child/tasks": "任务",
+  "/child/growth": "成长",
+};
 
 const parentLinks = {
   "/parent": null,
@@ -81,6 +89,14 @@ for (const scenario of scenarios) {
     if (link) await page.getByRole("link", { name: link }).click();
     else if (scenario.path !== "/parent")
       throw new Error(`no sidebar link for ${scenario.path}`);
+  } else {
+    // same route walk on the child end; exact names because the brand link
+    // 小小成长家 contains 成长 as a substring.
+    const link = childLinks[scenario.path];
+    if (link)
+      await page.getByRole("link", { name: link, exact: true }).click();
+    else if (scenario.path !== "/child")
+      throw new Error(`no bottom-nav link for ${scenario.path}`);
   }
   await page
     .locator(parent ? ".parent-layout" : ".bottom-nav")

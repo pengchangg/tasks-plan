@@ -267,6 +267,13 @@ func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {
 	if streaks[child] != 2 {
 		t.Fatalf("streak=%d, want 2", streaks[child])
 	}
+	payload, err := s.state(context.Background(), session{FamilyID: family, ActorType: "parent", SelectedChildID: child})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.Timezone != "America/Los_Angeles" {
+		t.Fatalf("state timezone=%q, want America/Los_Angeles", payload.Timezone)
+	}
 }
 
 func TestUploadContentSniffingAndConcurrentSubmission(t *testing.T) {
