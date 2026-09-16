@@ -33,24 +33,28 @@ function run(command, args, options = {}) {
   });
 }
 
-await run("go", ["build", "-o", binary, "./cmd/growjoy"]);
-const service = spawn(
-  binary,
-  ["serve", "--demo", "--addr", `127.0.0.1:${port}`],
-  {
-    cwd: root,
-    stdio: ["ignore", "inherit", "inherit"],
-    env: {
-      ...process.env,
-      GROWJOY_DB: join(temp, "growjoy.db"),
-      GROWJOY_MEDIA: join(temp, "media"),
-      GROWJOY_DIST: join(root, "dist"),
-    },
-  },
-);
-const serviceExited = new Promise((resolve) => service.once("exit", resolve));
+let service = null;
+let serviceExited = null;
 
 try {
+  // Inside the try so a failed build still runs the finally block below, which
+  // is the only thing that removes the temp directory.
+  await run("go", ["build", "-o", binary, "./cmd/growjoy"]);
+  service = spawn(
+    binary,
+    ["serve", "--demo", "--addr", `127.0.0.1:${port}`],
+    {
+      cwd: root,
+      stdio: ["ignore", "inherit", "inherit"],
+      env: {
+        ...process.env,
+        GROWJOY_DB: join(temp, "growjoy.db"),
+        GROWJOY_MEDIA: join(temp, "media"),
+        GROWJOY_DIST: join(root, "dist"),
+      },
+    },
+  );
+  serviceExited = new Promise((resolve) => service.once("exit", resolve));
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const response = await fetch(`${baseUrl}/health/ready`);
@@ -63,7 +67,7 @@ try {
     env: { ...process.env, BASE_URL: baseUrl },
   });
 } finally {
-  service.kill("SIGTERM");
-  await serviceExited;
+  service?.kill("SIGTERM");
+  if (serviceExited) await serviceExited;
   await rm(temp, { recursive: true, force: true });
 }

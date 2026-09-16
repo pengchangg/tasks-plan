@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,9 +20,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	// A scratch/distroless image has no /usr/share/zoneinfo, and the family
+	// timezone is runtime data, so the IANA database is compiled in: without it
+	// CreateFamily and familyLocation fail on an otherwise healthy host.
+	_ "time/tzdata"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -37,11 +43,15 @@ const cookieName = "growjoy_session"
 type Config struct {
 	DBPath, MediaDir, DistDir string
 	SecureCookies             bool
+	// Version is stamped into /health/live; the build injects it with
+	// -ldflags "-X main.version=...".
+	Version string
 }
 type Server struct {
 	db                *sql.DB
 	mediaDir, distDir string
 	secureCookies     bool
+	version           string
 	log               *slog.Logger
 	now               func() time.Time
 	authIP            *limiter
@@ -171,6 +181,7 @@ func Open(cfg Config, logger *slog.Logger) (*Server, error) {
 		mediaDir:      cfg.MediaDir,
 		distDir:       cfg.DistDir,
 		secureCookies: cfg.SecureCookies,
+		version:       cfg.Version,
 		log:           logger,
 		now:           time.Now,
 		authIP:        newLimiter(authIPBurst, authIPRefill),
@@ -234,6 +245,65 @@ func (s *Server) DB() *sql.DB  { return s.db }
 // client, so keeping them only grows the database.
 const idempotencyRetention = 30 * 24 * time.Hour
 
+// idempotencyPending is the status_code a live claim writes before its effects
+// land. It never reaches a client: a request that finds it answers 409, because
+// whoever holds the key may still be mid-flight.
+const idempotencyPending = -1
+
+// claimIdempotencyKey takes key for this operation as the first write of tx. It
+// reports claimed=true when this request owns the key, or replay=status when an
+// earlier request already finished it (idempotencyPending while it is still in
+// flight, or when the winner rolled back and left no status to replay).
+//
+// The claim is what makes a same-key retry exactly-once: a second request's
+// INSERT conflicts, so it cannot run the side effects again — checking for the
+// key before BeginTx instead let both requests pass the check and the loser
+// died on the primary key.
+//
+// It rolls tx back on every path except a successful claim, so the caller can
+// return immediately when claimed is false.
+func (s *Server) claimIdempotencyKey(ctx context.Context, tx *sql.Tx, x session, operation, key, now string) (int, bool, error) {
+	res, err := tx.ExecContext(ctx, `INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,?,?,?,'',?) ON CONFLICT(family_id,actor_id,operation,key) DO NOTHING`, x.FamilyID, x.ActorID, operation, key, idempotencyPending, now)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, false, err
+	}
+	if n == 1 {
+		return 0, true, nil
+	}
+	// Lost the race. Release the claim's transaction before reading: the pool
+	// holds a single connection, so querying through s.db with tx open blocks on
+	// itself.
+	if err := tx.Rollback(); err != nil {
+		return 0, false, err
+	}
+	var prior int
+	switch err := s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE family_id=? AND actor_id=? AND operation=? AND key=?`, x.FamilyID, x.ActorID, operation, key).Scan(&prior); {
+	case err == nil:
+		return prior, false, nil
+	case errors.Is(err, sql.ErrNoRows):
+		// The winner rolled back, so it failed and stored nothing.
+		return idempotencyPending, false, nil
+	default:
+		return 0, false, err
+	}
+}
+
+// replayOrConflict answers the request that lost a claim: the stored status
+// when the winner finished, or 409 when it is still in flight.
+func replayOrConflict(w http.ResponseWriter, replay int) {
+	if replay == idempotencyPending {
+		problem(w, 409, "conflict", "request is still in flight")
+		return
+	}
+	writeJSON(w, replay, map[string]bool{"replayed": true})
+}
+
 // Sweep reclaims expired sessions and stale idempotency keys. Expired sessions
 // are otherwise deleted only when a client logs out or switches profile, so a
 // long-lived database would grow without bound.
@@ -252,12 +322,30 @@ func (s *Server) Sweep(ctx context.Context) error {
 
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
-	r.Get("/health/live", func(w http.ResponseWriter, _ *http.Request) { writeJSON(w, 200, map[string]string{"status": "ok"}) })
+	r.Get("/health/live", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, 200, map[string]string{"status": "ok", "version": s.version})
+	})
 	r.Get("/health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.PingContext(r.Context()); err != nil {
 			s.log.Error("readiness check failed", "err", err.Error())
 			problem(w, 503, "unavailable", "database unavailable")
 			return
+		}
+		family, _, err := s.resolvedFamily(r.Context())
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.log.Error("readiness check failed", "err", err.Error())
+			problem(w, 503, "unavailable", "database unavailable")
+			return
+		}
+		// Having no family is a legitimate startup state (the SPA answers
+		// no_family), but once one exists its timezone must load: /state hard
+		// 500s otherwise, so reporting ready would be a lie.
+		if family != "" {
+			if _, err := s.familyLocation(r.Context(), family); err != nil {
+				s.log.Error("readiness check failed", "err", err.Error())
+				problem(w, 503, "unavailable", "runtime timezone data unavailable")
+				return
+			}
 		}
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
@@ -363,7 +451,12 @@ func decode(r *http.Request, v any) error {
 }
 func id(prefix string) string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	// A crypto/rand failure must not degrade into an all-zero id: the primary
+	// key collision would surface as an unrelated 500, and recoverPanic logs
+	// this one with the real cause.
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Errorf("generate %s id: %w", prefix, err))
+	}
 	return prefix + "_" + hex.EncodeToString(b)
 }
 func nowText(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
@@ -579,6 +672,17 @@ func (s *Server) resolvedFamily(ctx context.Context) (string, string, error) {
 	var family, code string
 	err := s.db.QueryRowContext(ctx, `SELECT id,code FROM families ORDER BY created_at,id LIMIT 1`).Scan(&family, &code)
 	return family, code, err
+}
+
+// ServingFamily names the family this process serves, so `serve` can log it at
+// boot: the SPA never asks for a code, and which family a database holds is a
+// deployment fact worth seeing in the logs.
+func (s *Server) ServingFamily(ctx context.Context) (string, error) {
+	_, code, err := s.resolvedFamily(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return code, err
 }
 
 // familyError answers the one startup state the UI can hit: no family at all.
@@ -1033,7 +1137,13 @@ func (s *Server) saveChild(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, r, err)
 			return
 		}
-		_, _ = s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=?`, cid, x.ID)
+		// The child row is already committed, so a failure here answers 500 and
+		// leaves the created child visible on the next /state; the client only
+		// has to refresh.
+		if _, err = s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=?`, cid, x.ID); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
 	} else {
 		res, err := s.db.Exec(`UPDATE children SET name=?,avatar=?,color=? WHERE id=? AND family_id=?`, strings.TrimSpace(in.Name), in.Avatar, in.Color, cid, x.FamilyID)
 		if err != nil {
@@ -1051,19 +1161,26 @@ func (s *Server) saveChild(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
 	cid := chi.URLParam(r, "id")
-	var count int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM children WHERE family_id=?`, x.FamilyID).Scan(&count)
-	if count <= 1 {
-		problem(w, 409, "last_child", "at least one child is required")
-		return
-	}
-	mediaFiles := s.mediaForChild(r.Context(), x.FamilyID, cid)
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
+	// The child count and the media list are read inside the transaction: two
+	// concurrent deletions must not both pass the last-child check, and an
+	// attachment inserted between the read and the commit would be cascaded
+	// away with its file left on disk.
+	var count int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM children WHERE family_id=?`, x.FamilyID).Scan(&count); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if count <= 1 {
+		problem(w, 409, "last_child", "at least one child is required")
+		return
+	}
+	mediaFiles := mediaForChild(r.Context(), tx, x.FamilyID, cid)
 	var replacement string
 	if err = tx.QueryRow(`SELECT id FROM children WHERE family_id=? AND id<>? ORDER BY created_at LIMIT 1`, x.FamilyID, cid).Scan(&replacement); err != nil {
 		problem(w, 409, "last_child", "at least one child is required")
@@ -1095,8 +1212,15 @@ func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-func (s *Server) mediaForChild(ctx context.Context, family, child string) []string {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN task_submissions s ON s.id=a.submission_id WHERE a.family_id=? AND s.child_id=?`, family, child)
+// queryer lets the media lookups run either outside a transaction (s.db) or
+// inside one (tx). The pool holds a single connection, so a transaction MUST
+// read through tx: querying s.db while tx is open would block on itself.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func mediaForChild(ctx context.Context, q queryer, family, child string) []string {
+	rows, err := q.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN task_submissions s ON s.id=a.submission_id WHERE a.family_id=? AND s.child_id=?`, family, child)
 	var out []string
 	if err == nil {
 		for rows.Next() {
@@ -1107,7 +1231,7 @@ func (s *Server) mediaForChild(ctx context.Context, family, child string) []stri
 		}
 		rows.Close()
 	}
-	rows, err = s.db.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN redemptions r ON r.id=a.redemption_id WHERE a.family_id=? AND r.child_id=?`, family, child)
+	rows, err = q.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN redemptions r ON r.id=a.redemption_id WHERE a.family_id=? AND r.child_id=?`, family, child)
 	if err != nil {
 		return out
 	}
@@ -1121,8 +1245,8 @@ func (s *Server) mediaForChild(ctx context.Context, family, child string) []stri
 	return out
 }
 
-func (s *Server) mediaForTemplate(ctx context.Context, family, template string) []string {
-	rows, err := s.db.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN task_submissions s ON s.id=a.submission_id JOIN task_instances i ON i.id=s.task_instance_id WHERE a.family_id=? AND i.template_id=?`, family, template)
+func mediaForTemplate(ctx context.Context, q queryer, family, template string) []string {
+	rows, err := q.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN task_submissions s ON s.id=a.submission_id JOIN task_instances i ON i.id=s.task_instance_id WHERE a.family_id=? AND i.template_id=?`, family, template)
 	if err != nil {
 		return nil
 	}
@@ -1176,8 +1300,22 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 			s.internalError(w, r, err)
 			return
 		}
-		_ = s.ensureInstances(r.Context(), x.FamilyID)
-		_ = s.db.QueryRow(`SELECT id FROM task_instances WHERE template_id=? ORDER BY created_at DESC LIMIT 1`, tid).Scan(&instance)
+		// The template row is already written when this fails, so the 500 leaves
+		// a template without an instance behind: the next GET /state recreates
+		// the instance through ensureInstances, which is cheaper than silently
+		// answering 200 with an empty id.
+		if err = s.ensureInstances(r.Context(), x.FamilyID); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		// ensureInstances just ran, so an empty id can only be an internal fault.
+		if err = s.db.QueryRow(`SELECT id FROM task_instances WHERE template_id=? ORDER BY created_at DESC LIMIT 1`, tid).Scan(&instance); err != nil || instance == "" {
+			if err == nil {
+				err = fmt.Errorf("task template %s has no instance", tid)
+			}
+			s.internalError(w, r, err)
+			return
+		}
 	} else {
 		res, err := s.db.Exec(`UPDATE task_templates SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=?,updated_at=? WHERE family_id=? AND id=(SELECT template_id FROM task_instances WHERE id=? AND family_id=?)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, now, x.FamilyID, instance, x.FamilyID)
 		if err != nil {
@@ -1189,7 +1327,12 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 			problem(w, 404, "not_found", "task not found")
 			return
 		}
-		_, _ = s.db.Exec(`UPDATE task_instances SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=? WHERE id=? AND family_id=? AND status IN ('todo','rejected') AND NOT EXISTS(SELECT 1 FROM task_submissions WHERE task_instance_id=task_instances.id)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, instance, x.FamilyID)
+		// Zero rows is the expected outcome when the instance is already
+		// submitted or no longer todo/rejected, so only the error matters.
+		if _, err = s.db.Exec(`UPDATE task_instances SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=? WHERE id=? AND family_id=? AND status IN ('todo','rejected') AND NOT EXISTS(SELECT 1 FROM task_submissions WHERE task_instance_id=task_instances.id)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, instance, x.FamilyID); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]string{"id": instance})
 }
@@ -1201,13 +1344,15 @@ func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
 		problem(w, 404, "not_found", "task not found")
 		return
 	}
-	files := s.mediaForTemplate(r.Context(), x.FamilyID, templateID)
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
+	// Inside the transaction, so evidence attached after the read cannot be
+	// cascaded away while its file stays on disk.
+	files := mediaForTemplate(r.Context(), tx, x.FamilyID, templateID)
 	res, err := tx.Exec(`UPDATE task_templates SET active=0 WHERE family_id=? AND id=? AND active=1`, x.FamilyID, templateID)
 	if err == nil {
 		_, err = tx.Exec(`DELETE FROM task_instances WHERE family_id=? AND template_id=?`, x.FamilyID, templateID)
@@ -1306,6 +1451,14 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
 	}
+	// One short note for the parent, same budget as a manual points note: the
+	// field is not size-bounded by the multipart limits, so an oversized note
+	// would land in SQLite and be resent by every /state.
+	note := strings.TrimSpace(r.FormValue("note"))
+	if utf8.RuneCountInString(note) > 30 {
+		problem(w, 400, "invalid_request", "note must be 30 characters or fewer")
+		return
+	}
 	files := r.MultipartForm.File["files"]
 	if len(files) > 6 {
 		problem(w, 400, "too_many_files", "at most 6 files are allowed")
@@ -1330,28 +1483,9 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 		problem(w, 413, "upload_too_large", "evidence exceeds 100 MB")
 		return
 	}
-	var child, status string
-	err := s.db.QueryRow(`SELECT child_id,status FROM task_instances WHERE id=? AND family_id=?`, iid, x.FamilyID).Scan(&child, &status)
-	if err != nil {
-		problem(w, 404, "not_found", "task not found")
-		return
-	}
-	if x.ActorType == "child" && child != x.ActorID {
-		problem(w, 403, "forbidden", "task belongs to another child")
-		return
-	}
-	if child != x.SelectedChildID || !(status == "todo" || status == "rejected") {
-		problem(w, 409, "invalid_state", "task cannot be submitted")
-		return
-	}
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		problem(w, 400, "idempotency_required", "Idempotency-Key is required")
-		return
-	}
-	var prior int
-	if s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE family_id=? AND actor_id=? AND operation='submit' AND key=?`, x.FamilyID, x.ActorID, key).Scan(&prior) == nil {
-		writeJSON(w, prior, map[string]bool{"replayed": true})
 		return
 	}
 	type saved struct {
@@ -1392,21 +1526,53 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	defer tx.Rollback()
 	sid := id("sub")
 	now := nowText(s.now())
+	replay, claimed, err := s.claimIdempotencyKey(r.Context(), tx, x, "submit", key, now)
+	if err != nil {
+		cleanup()
+		s.internalError(w, r, err)
+		return
+	}
+	if !claimed {
+		// The evidence files were written before the transaction, so a replay
+		// must drop its own copies instead of orphaning them.
+		cleanup()
+		replayOrConflict(w, replay)
+		return
+	}
+	// The instance's state is read after the claim, inside the transaction: a
+	// same-key retry has to replay the stored status instead of tripping over
+	// the state the request that owns the key already moved.
+	var child, status string
+	if err = tx.QueryRow(`SELECT child_id,status FROM task_instances WHERE id=? AND family_id=?`, iid, x.FamilyID).Scan(&child, &status); err != nil {
+		cleanup()
+		problem(w, 404, "not_found", "task not found")
+		return
+	}
+	if child != x.ActorID {
+		cleanup()
+		problem(w, 403, "forbidden", "task belongs to another child")
+		return
+	}
+	if child != x.SelectedChildID || !(status == "todo" || status == "rejected") {
+		cleanup()
+		problem(w, 409, "invalid_state", "task cannot be submitted")
+		return
+	}
 	res, err := tx.Exec(`UPDATE task_instances SET status='pending_review' WHERE id=? AND family_id=? AND child_id=? AND status IN ('todo','rejected')`, iid, x.FamilyID, child)
 	if err == nil {
 		var changed int64
 		changed, err = res.RowsAffected()
 		if err == nil && changed != 1 {
-			_ = tx.Rollback()
 			cleanup()
 			problem(w, 409, "conflict", "task is no longer available for submission")
 			return
 		}
 	}
 	if err == nil {
-		_, err = tx.Exec(`INSERT INTO task_submissions(id,family_id,task_instance_id,child_id,note,submitted_at) VALUES(?,?,?,?,?,?)`, sid, x.FamilyID, iid, child, r.FormValue("note"), now)
+		_, err = tx.Exec(`INSERT INTO task_submissions(id,family_id,task_instance_id,child_id,note,submitted_at) VALUES(?,?,?,?,?,?)`, sid, x.FamilyID, iid, child, note, now)
 	}
 	if err == nil {
 		for _, v := range savedFiles {
@@ -1417,10 +1583,9 @@ func (s *Server) submitTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err == nil {
-		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'submit',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
+		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'submit',?,200,'{}',?) ON CONFLICT(family_id,actor_id,operation,key) DO UPDATE SET status_code=excluded.status_code,response_body=excluded.response_body`, x.FamilyID, x.ActorID, key, now)
 	}
 	if err != nil {
-		_ = tx.Rollback()
 		cleanup()
 		s.internalError(w, r, err)
 		return
@@ -1449,17 +1614,22 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "invalid JSON")
 		return
 	}
-	var prior int
-	if s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE family_id=? AND actor_id=? AND operation='review' AND key=?`, x.FamilyID, x.ActorID, key).Scan(&prior) == nil {
-		writeJSON(w, prior, map[string]bool{"replayed": true})
-		return
-	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
+	now := nowText(s.now())
+	replay, claimed, err := s.claimIdempotencyKey(r.Context(), tx, x, "review", key, now)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if !claimed {
+		replayOrConflict(w, replay)
+		return
+	}
 	var sid, child, title, status string
 	var points int
 	err = tx.QueryRow(`SELECT s.id,i.child_id,i.title,i.points,i.status FROM task_instances i JOIN task_submissions s ON s.task_instance_id=i.id AND s.reviewed_at IS NULL WHERE i.id=? AND i.family_id=? ORDER BY s.submitted_at DESC LIMIT 1`, iid, x.FamilyID).Scan(&sid, &child, &title, &points, &status)
@@ -1467,7 +1637,6 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		problem(w, 409, "invalid_state", "no pending submission")
 		return
 	}
-	now := nowText(s.now())
 	approved := 0
 	newStatus := "rejected"
 	if in.Approved {
@@ -1494,7 +1663,7 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err == nil {
-		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'review',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
+		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'review',?,200,'{}',?) ON CONFLICT(family_id,actor_id,operation,key) DO UPDATE SET status_code=excluded.status_code,response_body=excluded.response_body`, x.FamilyID, x.ActorID, key, now)
 	}
 	if err != nil {
 		s.internalError(w, r, err)
@@ -1536,23 +1705,27 @@ func (s *Server) awardPoints(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "note must be 30 characters or fewer")
 		return
 	}
-	var prior int
-	if s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE family_id=? AND actor_id=? AND operation='award' AND key=?`, x.FamilyID, x.ActorID, key).Scan(&prior) == nil {
-		writeJSON(w, prior, map[string]bool{"replayed": true})
-		return
-	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
+	now := nowText(s.now())
+	replay, claimed, err := s.claimIdempotencyKey(r.Context(), tx, x, "award", key, now)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if !claimed {
+		replayOrConflict(w, replay)
+		return
+	}
 	var exists int
 	if tx.QueryRow(`SELECT 1 FROM children WHERE id=? AND family_id=?`, cid, x.FamilyID).Scan(&exists) != nil {
 		problem(w, 404, "not_found", "child not found")
 		return
 	}
-	now := nowText(s.now())
 	lid := id("led")
 	desc, entryType := "家长奖励", "earned"
 	if in.Amount < 0 {
@@ -1581,7 +1754,7 @@ func (s *Server) awardPoints(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(`INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,?,'manual',?,?,?)`, lid, x.FamilyID, cid, in.Amount, entryType, lid, desc, now)
 	}
 	if err == nil {
-		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'award',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
+		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'award',?,200,'{}',?) ON CONFLICT(family_id,actor_id,operation,key) DO UPDATE SET status_code=excluded.status_code,response_body=excluded.response_body`, x.FamilyID, x.ActorID, key, now)
 	}
 	if err != nil {
 		s.internalError(w, r, err)
@@ -1671,17 +1844,22 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wid := chi.URLParam(r, "id")
-	var prior int
-	if s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE family_id=? AND actor_id=? AND operation='redeem' AND key=?`, x.FamilyID, x.ActorID, key).Scan(&prior) == nil {
-		writeJSON(w, prior, map[string]bool{"replayed": true})
-		return
-	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
 	defer tx.Rollback()
+	now := nowText(s.now())
+	replay, claimed, err := s.claimIdempotencyKey(r.Context(), tx, x, "redeem", key, now)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if !claimed {
+		replayOrConflict(w, replay)
+		return
+	}
 	var title string
 	var cost, active int
 	err = tx.QueryRow(`SELECT title,points_cost,is_active FROM wishes WHERE id=? AND family_id=? AND deleted_at IS NULL`, wid, x.FamilyID).Scan(&title, &cost, &active)
@@ -1700,13 +1878,12 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rid := id("red")
-	now := nowText(s.now())
 	_, err = tx.Exec(`INSERT INTO redemptions(id,family_id,wish_id,wish_title,child_id,points_cost,created_at) VALUES(?,?,?,?,?,?,?)`, rid, x.FamilyID, wid, title, x.SelectedChildID, cost, now)
 	if err == nil {
 		_, err = tx.Exec(`INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,?,'redemption',?,?,?)`, id("led"), x.FamilyID, x.SelectedChildID, -cost, "spent", rid, "兑换「"+title+"」", now)
 	}
 	if err == nil {
-		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'redeem',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
+		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'redeem',?,200,'{}',?) ON CONFLICT(family_id,actor_id,operation,key) DO UPDATE SET status_code=excluded.status_code,response_body=excluded.response_body`, x.FamilyID, x.ActorID, key, now)
 	}
 	if err != nil {
 		s.internalError(w, r, err)
@@ -1745,6 +1922,12 @@ func (s *Server) completeRedemption(w http.ResponseWriter, r *http.Request) {
 	// own photos/videos. Undoing it clears the record, so those are the only
 	// files this handler ever reads.
 	completed := r.FormValue("completed") == "true"
+	// Same 30-character budget as submitTask and awardPoints.
+	storedNote := strings.TrimSpace(r.FormValue("note"))
+	if utf8.RuneCountInString(storedNote) > 30 {
+		problem(w, 400, "invalid_request", "note must be 30 characters or fewer")
+		return
+	}
 	var files []*multipart.FileHeader
 	if completed {
 		files = r.MultipartForm.File["files"]
@@ -1829,7 +2012,7 @@ func (s *Server) completeRedemption(w http.ResponseWriter, r *http.Request) {
 	now := nowText(s.now())
 	var res sql.Result
 	if err == nil && completed {
-		res, err = tx.Exec(`UPDATE redemptions SET completed_at=?,completed_note=? WHERE id=? AND family_id=? AND child_id=?`, now, nullString(strings.TrimSpace(r.FormValue("note"))), rid, x.FamilyID, x.SelectedChildID)
+		res, err = tx.Exec(`UPDATE redemptions SET completed_at=?,completed_note=? WHERE id=? AND family_id=? AND child_id=?`, now, nullString(storedNote), rid, x.FamilyID, x.SelectedChildID)
 	}
 	if err == nil && !completed {
 		res, err = tx.Exec(`UPDATE redemptions SET completed_at=NULL,completed_note=NULL WHERE id=? AND family_id=? AND child_id=?`, rid, x.FamilyID, x.SelectedChildID)
@@ -1903,11 +2086,18 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	today := s.now().In(loc)
-	start := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -6)
-	startDate, endDate := start.Format("2006-01-02"), today.Format("2006-01-02")
-
-	var total int
-	if err = s.db.QueryRow(`SELECT COUNT(*) FROM task_instances WHERE family_id=? AND child_id=? AND template_id IS NOT NULL AND due_date BETWEEN ? AND ?`, x.FamilyID, cid, startDate, endDate).Scan(&total); err != nil {
+	from, to, ok := statsWindow(r, today, loc)
+	if !ok {
+		problem(w, 400, "invalid_request", "invalid stats range")
+		return
+	}
+	startDate, endDate := from.Format("2006-01-02"), to.Format("2006-01-02")
+	// Instance rows only exist for the days that were read, so a historical
+	// window would count zero scheduled tasks; derive the number from the
+	// templates instead. The query holds the pool's single connection, so it
+	// must finish before the two queries below start.
+	scheduled, err := s.scheduledTaskCount(r.Context(), x.FamilyID, cid, from, to, loc)
+	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
@@ -1921,13 +2111,28 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		Count   int    `json:"count"`
 		Percent int    `json:"percent"`
 	}
-	daily := make([]dailyStat, 7)
+	days := 0
+	for offset := 0; ; offset++ {
+		if time.Date(from.Year(), from.Month(), from.Day()+offset, 0, 0, 0, 0, loc).After(to) {
+			break
+		}
+		days++
+	}
+	daily := make([]dailyStat, 0, days)
 	dailyIndex := map[string]int{}
 	weekdayLabels := [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
-	for index := range daily {
-		date := start.AddDate(0, 0, index)
-		daily[index] = dailyStat{Date: date.Format("2006-01-02"), Label: weekdayLabels[date.Weekday()]}
-		dailyIndex[daily[index].Date] = index
+	for offset := 0; offset < days; offset++ {
+		// Calendar arithmetic on the date fields, not AddDate: a DST transition
+		// does not always leave the same wall-clock time inside the same day.
+		day := time.Date(from.Year(), from.Month(), from.Day()+offset, 0, 0, 0, 0, loc)
+		label := weekdayLabels[day.Weekday()]
+		if days > 14 {
+			// A weekday name repeats in a long window; a short date does not.
+			label = fmt.Sprintf("%d/%d", day.Month(), day.Day())
+		}
+		date := day.Format("2006-01-02")
+		daily = append(daily, dailyStat{Date: date, Label: label})
+		dailyIndex[date] = len(daily) - 1
 	}
 	categoryCounts := map[string]int{}
 	completed := 0
@@ -1996,8 +2201,22 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	categories := make([]categoryStat, 0, len(categoryCounts))
-	for _, name := range []string{"生活自理", "家庭责任", "学习成长"} {
+	// The list is derived from the confirmations in the window: a family that
+	// renamed a category, or whose children only ever do one kind of task, must
+	// see its own names rather than a fixed trio. Order is by count descending,
+	// ties by name, so the payload is deterministic.
+	names := make([]string, 0, len(categoryCounts))
+	for name := range categoryCounts {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if categoryCounts[names[i]] != categoryCounts[names[j]] {
+			return categoryCounts[names[i]] > categoryCounts[names[j]]
+		}
+		return names[i] < names[j]
+	})
+	categories := make([]categoryStat, 0, len(names))
+	for _, name := range names {
 		count := categoryCounts[name]
 		percent := 0
 		if completed > 0 {
@@ -2005,5 +2224,86 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		}
 		categories = append(categories, categoryStat{Name: name, Count: count, Percent: percent})
 	}
-	writeJSON(w, 200, map[string]any{"totalTasks": total, "completedTasks": completed, "earnedPoints": earned, "spentPoints": spent, "daily": daily, "categories": categories})
+	writeJSON(w, 200, map[string]any{"from": startDate, "to": endDate, "totalTasks": scheduled, "completedTasks": completed, "earnedPoints": earned, "spentPoints": spent, "daily": daily, "categories": categories})
+}
+
+// statsMaxRangeDays bounds one stats window. The daily series carries one
+// bucket per day, so the ceiling keeps the chart (and the response) readable
+// rather than guarding performance.
+const statsMaxRangeDays = 92
+
+// statsWindow resolves ?from/?to (family-local 2006-01-02 dates) into the
+// inclusive window to report on. Neither parameter means the trailing seven
+// days; a single parameter, an unparseable date, from > to or a window wider
+// than statsMaxRangeDays are all rejected. A future date is not an error: it
+// simply has no data.
+func statsWindow(r *http.Request, today time.Time, loc *time.Location) (time.Time, time.Time, bool) {
+	end := time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, loc)
+	fromValue, toValue := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	if fromValue == "" && toValue == "" {
+		return end.AddDate(0, 0, -6), end, true
+	}
+	if fromValue == "" || toValue == "" {
+		return time.Time{}, time.Time{}, false
+	}
+	from, fromErr := time.ParseInLocation("2006-01-02", fromValue, loc)
+	to, toErr := time.ParseInLocation("2006-01-02", toValue, loc)
+	if fromErr != nil || toErr != nil || from.After(to) {
+		return time.Time{}, time.Time{}, false
+	}
+	if to.After(from.AddDate(0, 0, statsMaxRangeDays-1)) {
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
+// scheduledTaskCount is how many tasks the child was supposed to complete in
+// the window, derived from the templates: a daily template counts once per day
+// from its creation day (clamped to the window), a weekly one only on its
+// weekday, and a once template on the day it was created (its due_date).
+// task_instances cannot answer this because ensureInstances only materializes
+// the day or week that was read, so a historical window would always report
+// zero. Inactive templates are excluded: deleting one cascades to its
+// submissions, so counting it would report a gap nobody can close.
+func (s *Server) scheduledTaskCount(ctx context.Context, family, child string, from, to time.Time, loc *time.Location) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT repeat_rule,repeat_weekday,created_at FROM task_templates WHERE family_id=? AND child_id=? AND active=1`, family, child)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	total := 0
+	for rows.Next() {
+		var rule, created string
+		var weekday int
+		if err = rows.Scan(&rule, &weekday, &created); err != nil {
+			return 0, err
+		}
+		at, parseErr := time.Parse(time.RFC3339Nano, created)
+		if parseErr != nil {
+			return 0, parseErr
+		}
+		local := at.In(loc)
+		createdDay := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+		if rule == "once" {
+			if !createdDay.Before(from) && !createdDay.After(to) {
+				total++
+			}
+			continue
+		}
+		first := createdDay
+		if first.Before(from) {
+			first = from
+		}
+		for offset := 0; ; offset++ {
+			day := time.Date(first.Year(), first.Month(), first.Day()+offset, 0, 0, 0, 0, loc)
+			if day.After(to) {
+				break
+			}
+			if rule == "weekly" && int(day.Weekday()) != weekday {
+				continue
+			}
+			total++
+		}
+	}
+	return total, rows.Err()
 }

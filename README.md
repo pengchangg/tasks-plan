@@ -4,7 +4,7 @@
 
 ## 开发环境
 
-要求 Go 1.22+、Node.js 20+，并已安装 Playwright Chromium。
+要求 Go 1.22+、Node.js 22.22.2+，并已安装 Playwright Chromium。
 
 ```bash
 npm install
@@ -48,7 +48,7 @@ go build -o growjoy ./cmd/growjoy
   --timezone Asia/Shanghai
 ```
 
-`--code` 和 `--username` 只是数据库中的标识（`--username` 不再用于登录，界面只校验 `--password`）。家庭码不再需要输入：服务启动后始终使用数据库中第一个家庭，需要多个家庭时请分别部署。
+`--code` 和 `--username` 只是数据库中的标识（`--username` 不再用于登录，界面只校验 `--password`）。家庭码不再需要输入：服务启动后始终使用数据库中第一个家庭，需要多个家庭时请分别部署；同一个数据库里第二次执行 `admin create-family` 会被直接拒绝，避免留下永远不可达的家庭。
 
 为指定家庭幂等生成演示内容：
 
@@ -60,7 +60,7 @@ go build -o growjoy ./cmd/growjoy
 
 ```bash
 npm run build
-go build -o growjoy ./cmd/growjoy
+go build -ldflags "-X main.version=$(git describe --always --dirty)" -o growjoy ./cmd/growjoy
 GROWJOY_ADDR=127.0.0.1:8080 \
 GROWJOY_DB=/srv/growjoy/growjoy.db \
 GROWJOY_MEDIA=/srv/growjoy/media \
@@ -71,7 +71,19 @@ GROWJOY_SECURE_COOKIES=true \
 
 服务启动时向前执行嵌入式迁移，并启用 SQLite WAL、外键与 5 秒 busy timeout。首版按单进程、单副本部署；应由反向代理负责 TLS。数据库和媒体目录必须位于持久卷中，并作为一个一致单元备份。
 
-健康检查：`GET /health/live` 和 `GET /health/ready`。
+健康检查：`GET /health/live`（返回 `{"status":"ok","version":...}`，版本来自构建时的 `-ldflags "-X main.version=..."`，未注入时为 `dev`）和 `GET /health/ready`（数据库可用、且所服务家庭的时区能加载时才返回 200，否则 503）。启动日志会打印本次实际服务的家庭码。
+
+前端不请求任何外部资源：Fredoka 字体已自托管在 `public/fonts/`，中文使用系统自带字体栈，页面没有第三方域名请求。
+
+单进程运行时也可以做备份与媒体清理：
+
+```bash
+./growjoy backup --out /srv/growjoy/backup
+./growjoy gc --media          # 只列出没有附件记录的文件
+./growjoy gc --media --delete # 真正删除
+```
+
+`backup` 用 `VACUUM INTO` 取数据库一致性快照，因此可以在服务运行时执行；输出目录里已存在 `growjoy.db` 或 `media.tar` 时会拒绝覆盖，请换一个目录。`gc --media` 只处理文件名形如 `media_<32位hex>.<扩展名>` 的上传文件，其他文件一律不动；数据库里一条附件记录都没有时会拒绝删除（通常是 `GROWJOY_DB` 指错了库），确认无误后加 `--force`。
 
 ## 访问限制与清理
 

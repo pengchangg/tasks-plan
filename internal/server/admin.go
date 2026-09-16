@@ -3,9 +3,8 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 )
 
@@ -20,6 +19,15 @@ func (s *Server) CreateFamily(ctx context.Context, in FamilyInput) error {
 	}
 	if _, err := time.LoadLocation(in.Timezone); err != nil {
 		return fmt.Errorf("invalid IANA timezone %q: %w", in.Timezone, err)
+	}
+	// GrowJoy serves the oldest family row only, so a second family in the same
+	// database would be unreachable forever. Refuse before hashing the password:
+	// argon2 allocates 64 MiB and a doomed call should not pay for it.
+	var existing string
+	if err := s.db.QueryRowContext(ctx, `SELECT code FROM families ORDER BY created_at,id LIMIT 1`).Scan(&existing); err == nil {
+		return fmt.Errorf("family %q already exists; GrowJoy serves the oldest family only (deploy a second instance for another family)", existing)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
 	if in.DisplayName == "" {
 		in.DisplayName = in.Username
@@ -54,7 +62,8 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 		return fmt.Errorf("family %q timezone: %w", code, err)
 	}
 	now := s.now()
-	today := now.In(location).Format("2006-01-02")
+	todayDate := now.In(location)
+	today := todayDate.Format("2006-01-02")
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -114,6 +123,55 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 			}
 		}
 	}
+	// Ten days of confirmations, so a freshly seeded family has a real report on
+	// the stats screen instead of an empty chart. Every row lands before today:
+	// today's ledger stays untouched, which is what the child end's arrival
+	// banner, the growth calendar's today panel and the flow check's +20
+	// assertion all depend on. The amounts add up to the seeded points_balance
+	// (185), because the ledger remains the only truth about the balance.
+	// SeedDemo reruns on every boot, so each row is skipped once its instance
+	// exists.
+	history := []struct {
+		title  string
+		offset int
+	}{
+		{"阅读 20 分钟", 1}, {"阅读 20 分钟", 2}, {"整理自己的书桌", 3},
+		{"阅读 20 分钟", 4}, {"给植物浇水", 5}, {"阅读 20 分钟", 6},
+		{"阅读 20 分钟", 8},
+	}
+	for _, v := range history {
+		var tid string
+		var points int
+		if e := tx.QueryRowContext(ctx, `SELECT id,points FROM task_templates WHERE family_id=? AND child_id=? AND title=? AND active=1`, family, mia, v.title).Scan(&tid, &points); e != nil {
+			if e == sql.ErrNoRows {
+				continue
+			}
+			return e
+		}
+		day := time.Date(todayDate.Year(), todayDate.Month(), todayDate.Day()-v.offset, 0, 0, 0, 0, location)
+		var existing string
+		e := tx.QueryRowContext(ctx, `SELECT id FROM task_instances WHERE template_id=? AND period_key=?`, tid, day.Format("2006-01-02")).Scan(&existing)
+		if e == nil {
+			continue
+		}
+		if e != sql.ErrNoRows {
+			return e
+		}
+		iid := id("task")
+		created := nowText(time.Date(day.Year(), day.Month(), day.Day(), 9, 0, 0, 0, location))
+		submitted := nowText(time.Date(day.Year(), day.Month(), day.Day(), 19, 0, 0, 0, location))
+		reviewed := nowText(time.Date(day.Year(), day.Month(), day.Day(), 19, 5, 0, 0, location))
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_instances(id,family_id,template_id,child_id,period_key,title,description,category,points,repeat_rule,repeat_weekday,due_date,status,created_at) SELECT ?,?,?,?,?,title,description,category,points,repeat_rule,repeat_weekday,?, 'completed',? FROM task_templates WHERE id=?`, iid, family, tid, mia, day.Format("2006-01-02"), day.Format("2006-01-02"), created, tid); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO task_submissions(id,family_id,task_instance_id,child_id,note,submitted_at,reviewed_at,approved) VALUES(?,?,?,?,?,?,?,1)`, id("sub"), family, iid, mia, "完成啦！", submitted, reviewed); err != nil {
+			return err
+		}
+		// Field for field the row reviewTask writes, description included.
+		if _, err = tx.ExecContext(ctx, `INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,'earned','task',?,?,?)`, id("led"), family, mia, points, iid, "完成「"+v.title+"」", reviewed); err != nil {
+			return err
+		}
+	}
 	type wd struct {
 		title, desc, icon, color string
 		cost                     int
@@ -145,6 +203,3 @@ func (s *Server) EnsureDemo(ctx context.Context) error {
 	}
 	return s.SeedDemo(ctx, "DEMO")
 }
-
-func (s *Server) MediaDir() string { return s.mediaDir }
-func EnsurePath(path string) error { return os.MkdirAll(filepath.Dir(path), 0700) }

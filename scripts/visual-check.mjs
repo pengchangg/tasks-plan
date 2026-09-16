@@ -98,6 +98,9 @@ for (const scenario of scenarios) {
     else if (scenario.path !== "/child")
       throw new Error(`no bottom-nav link for ${scenario.path}`);
   }
+  // Navigation that neither moves nor lands wrongly would still screenshot a
+  // plausible screen, so the URL is part of the gate.
+  await page.waitForURL(new RegExp(`${scenario.path}$`));
   await page
     .locator(parent ? ".parent-layout" : ".bottom-nav")
     .waitFor();

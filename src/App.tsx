@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
+import type { ErrorInfo, ReactNode } from "react";
 import {
   BrowserRouter,
   Link,
@@ -33,7 +34,7 @@ import {
   X,
 } from "lucide-react";
 import { useAppStore } from "./store";
-import { dayActivity, dayDigest, familyDate } from "./domain";
+import { dayActivity, dayDigest, familyDate, shiftDate } from "./domain";
 import type { DayActivity, DayEntry } from "./domain";
 import type {
   Attachment,
@@ -41,6 +42,7 @@ import type {
   PointLedger,
   Redemption,
   RepeatRule,
+  StatsPayload,
   Task,
   TaskSubmission,
   Wish,
@@ -48,6 +50,26 @@ import type {
 import "./styles.css";
 
 const categories = ["全部", "生活自理", "学习成长", "家庭责任"];
+// 与服务端的 statsMaxRangeDays 同值：只用于自定义区间日期输入的 min。
+const statsMaxRangeDays = 92;
+const statsRanges = [
+  { key: "today", label: "今天" },
+  { key: "week", label: "最近 7 天" },
+  { key: "month", label: "最近 30 天" },
+  { key: "custom", label: "自定义" },
+] as const;
+type StatsRangeKey = (typeof statsRanges)[number]["key"];
+
+// 区间标题：预设用固定说法，自定义用服务端回显的 from/to（同一年只写月日）。
+function statsRangeLabel(key: StatsRangeKey, stats: StatsPayload): string {
+  const preset = statsRanges.find((item) => item.key === key);
+  if (key !== "custom") return preset?.label ?? "";
+  const [fromYear, fromMonth, fromDay] = stats.from.split("-").map(Number);
+  const [toYear, toMonth, toDay] = stats.to.split("-").map(Number);
+  const short = (year: number, month: number, day: number) =>
+    year === toYear ? `${month}月${day}日` : `${year}年${month}月${day}日`;
+  return `${short(fromYear, fromMonth, fromDay)} - ${short(toYear, toMonth, toDay)}`;
+}
 const statusLabel = {
   todo: "待完成",
   pending_review: "待确认",
@@ -61,11 +83,99 @@ const dateText = (date: string) =>
     ? "今天"
     : date.slice(5).replace("-", "月") + "日";
 
+// 弹窗的统一键盘行为：Esc 关闭、打开时把焦点移进对话框、关闭后还给触发元素、
+// Tab 在对话框内循环。作用域是 .modal-backdrop——所有弹窗都挂在同一层包裹里。
+// 依赖数组为空：onClose 在弹窗的整个生命周期里语义稳定（调用点传的都是
+// setX(null) 这样的稳定箭头函数），否则每次父组件重渲染都会把焦点抢回第一个元素。
+function useDialog(onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const opener = document.activeElement as HTMLElement | null;
+    const scope = ref.current;
+    if (!scope) return;
+    const focusables = () =>
+      Array.from(
+        scope.querySelectorAll<HTMLElement>(
+          'button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => !element.hasAttribute("disabled"));
+    // A dialog whose form field carries autoFocus has already been focused by
+    // React during the commit, and it is the field the user wants: only take
+    // focus when nothing inside the dialog holds it yet.
+    if (!scope.contains(document.activeElement)) (focusables()[0] ?? scope).focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusables();
+      if (!items.length) return;
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    scope.addEventListener("keydown", onKeyDown);
+    return () => {
+      scope.removeEventListener("keydown", onKeyDown);
+      // The trigger can be gone by now: the account menu unmounts as soon as
+      // the dialog it opened appears, and focusing a detached node is a no-op
+      // that leaves the user on <body>.
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
+  return ref;
+}
+
+// The only way React catches a render error: without a boundary any screen that
+// throws blanks the whole app, and the only recovery is a manual reload.
+class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("页面渲染出错", error, info.componentStack);
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="boot-screen">
+        <div className="boot-panel">
+          <span className="brand-mark">✦</span>
+          <h1>页面出了点问题</h1>
+          <p>刷新一下就能回到成长空间。</p>
+          <button
+            className="wide-primary"
+            onClick={() => window.location.reload()}
+          >
+            重新加载
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
 function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="*" element={<Shell />} />
+        <Route
+          path="*"
+          element={
+            <AppErrorBoundary>
+              <Shell />
+            </AppErrorBoundary>
+          }
+        />
       </Routes>
     </BrowserRouter>
   );
@@ -172,14 +282,14 @@ function Shell() {
   };
   if (!store.ready)
     return (
-      <div className="login-screen">
+      <div className="boot-screen">
         <p>正在连接成长空间...</p>
       </div>
     );
   if (!store.connected)
     return (
-      <main className="login-screen">
-        <div className="login-panel">
+      <main className="boot-screen">
+        <div className="boot-panel">
           <span className="brand-mark">✦</span>
           <span className="eyebrow">GROWJOY FAMILY</span>
           <h1>无法进入成长空间</h1>
@@ -312,8 +422,9 @@ function ParentPinModal({
 }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={dialog}>
       <form
         className={`modal pin-modal ${error ? "pin-error" : ""}`}
         role="dialog"
@@ -382,8 +493,9 @@ function ParentPasswordModal({
   const [next, setNext] = useState("");
   const [repeat, setRepeat] = useState("");
   const [error, setError] = useState("");
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={dialog}>
       <form
         className="form-modal"
         role="dialog"
@@ -1467,9 +1579,10 @@ function ConfirmModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
-      <div className="modal">
+    <div className="modal-backdrop" ref={dialog}>
+      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
         <button className="modal-close" onClick={onClose}>
           <X size={18} />
         </button>
@@ -1881,10 +1994,14 @@ function ChildForm({
   const [name, setName] = useState(child?.name ?? "");
   const [avatar, setAvatar] = useState(child?.avatar ?? avatars[0]);
   const [color, setColor] = useState(child?.color ?? colors[0]);
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={dialog}>
       <form
         className="form-modal child-form"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="child-form-title"
         onSubmit={(event) => {
           event.preventDefault();
           if (name.trim())
@@ -1898,7 +2015,7 @@ function ChildForm({
         <div className="form-heading">
           <div>
             <span className="eyebrow">CHILD PROFILE</span>
-            <h2>{child ? "编辑孩子档案" : "添加一个孩子"}</h2>
+            <h2 id="child-form-title">{child ? "编辑孩子档案" : "添加一个孩子"}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭孩子表单">
             <X size={18} />
@@ -1971,8 +2088,9 @@ function PointsForm({
   const [amount, setAmount] = useState("10");
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={dialog}>
       <form
         className="form-modal"
         role="dialog"
@@ -2202,6 +2320,8 @@ function MediaItem({
 }
 function MediaGallery({ attachments }: { attachments: Attachment[] }) {
   const [preview, setPreview] = useState<Attachment | null>(null);
+  const closePreview = () => setPreview(null);
+  const dialog = useDialog(closePreview);
   return (
     <>
       <div className="media-grid">
@@ -2214,9 +2334,12 @@ function MediaGallery({ attachments }: { attachments: Attachment[] }) {
         ))}
       </div>
       {preview && (
-        <div className="modal-backdrop" onClick={() => setPreview(null)}>
+        <div className="modal-backdrop" onClick={closePreview} ref={dialog}>
           <figure
             className="media-viewer"
+            role="dialog"
+            aria-modal="true"
+            aria-label={preview.name}
             onClick={(event) => event.stopPropagation()}
           >
             <img src={preview.url} alt={preview.name} />
@@ -2224,7 +2347,7 @@ function MediaGallery({ attachments }: { attachments: Attachment[] }) {
           </figure>
           <button
             className="modal-close"
-            onClick={() => setPreview(null)}
+            onClick={closePreview}
             aria-label="关闭预览"
           >
             <X size={18} />
@@ -2303,7 +2426,7 @@ function AdminTaskRow({
               {task.repeatRule === "daily"
                 ? "每天"
                 : task.repeatRule === "weekly"
-                  ? `每周${["日", "一", "二", "三", "四", "五", "六"][task.repeatWeekday ?? 1]}`
+                  ? `每周${["日", "一", "二", "三", "四", "五", "六"][task.repeatWeekday]}`
                   : "一次性"}
             </p>
           </div>
@@ -2374,10 +2497,14 @@ function TaskForm({
   const [repeatWeekday, setRepeatWeekday] = useState(
     task?.repeatWeekday ?? new Date().getDay(),
   );
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={dialog}>
       <form
         className="form-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="task-form-title"
         onSubmit={(e) => {
           e.preventDefault();
           if (title.trim())
@@ -2394,7 +2521,7 @@ function TaskForm({
         <div className="form-heading">
           <div>
             <span className="eyebrow">{task ? "EDIT TASK" : "NEW TASK"}</span>
-            <h2>{task ? "编辑任务信息" : "创建一个新任务"}</h2>
+            <h2 id="task-form-title">{task ? "编辑任务信息" : "创建一个新任务"}</h2>
           </div>
           <button type="button" onClick={onClose}>
             <X size={18} />
@@ -2617,10 +2744,14 @@ function WishForm({
   const [pointsCost, setPoints] = useState(wish?.pointsCost ?? 100);
   const [icon, setIcon] = useState(wish?.icon ?? "🎁");
   const [color, setColor] = useState(wish?.color ?? colors[0]);
+  const dialog = useDialog(onClose);
   return (
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" ref={dialog}>
       <form
         className="form-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="wish-form-title"
         onSubmit={(e) => {
           e.preventDefault();
           if (title.trim())
@@ -2637,7 +2768,7 @@ function WishForm({
         <div className="form-heading">
           <div>
             <span className="eyebrow">{wish ? "EDIT WISH" : "NEW WISH"}</span>
-            <h2>{wish ? "编辑愿望信息" : "添加一个愿望"}</h2>
+            <h2 id="wish-form-title">{wish ? "编辑愿望信息" : "添加一个愿望"}</h2>
           </div>
           <button type="button" onClick={onClose}>
             <X size={18} />
@@ -2703,37 +2834,108 @@ function WishForm({
 }
 
 function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
-  const done = store.stats.completedTasks;
-  const earned = store.stats.earnedPoints;
-  const spent = store.stats.spentPoints;
-  const maxCompleted = Math.max(
-    1,
-    ...store.stats.daily.map((day) => day.completed),
-  );
-  const topCategory = [...store.stats.categories].sort(
+  const today = familyDate(new Date().toISOString(), store.state.timezone);
+  const [rangeKey, setRangeKey] = useState<StatsRangeKey>("week");
+  const [draft, setDraft] = useState({ from: today, to: today });
+  const [applied, setApplied] = useState({ from: today, to: today });
+  // 首屏先用 store 的默认 7 天载荷，避免闪一次空图表；随后的区间请求会覆盖它。
+  const [stats, setStats] = useState<StatsPayload>(store.stats);
+  const range =
+    rangeKey === "today"
+      ? { from: today, to: today }
+      : rangeKey === "week"
+        ? { from: shiftDate(today, -6), to: today }
+        : rangeKey === "month"
+          ? { from: shiftDate(today, -29), to: today }
+          : applied;
+  useEffect(() => {
+    let live = true;
+    void store.actions.loadStats(range.from, range.to).then((payload) => {
+      if (live && payload) setStats(payload);
+    });
+    return () => {
+      live = false;
+    };
+  }, [store.state, range.from, range.to]);
+  const rangeLabel = statsRangeLabel(rangeKey, stats);
+  const done = stats.completedTasks;
+  const earned = stats.earnedPoints;
+  const spent = stats.spentPoints;
+  const maxCompleted = Math.max(1, ...stats.daily.map((day) => day.completed));
+  // 长区间有几十根柱子，只给 7 根留标签位置，其余留空占位保持列高一致。
+  const labelStep = Math.ceil(stats.daily.length / 7);
+  const topCategory = [...stats.categories].sort(
     (left, right) => right.count - left.count,
   )[0];
+  const empty =
+    stats.totalTasks === 0 &&
+    stats.completedTasks === 0 &&
+    stats.earnedPoints === 0 &&
+    stats.spentPoints === 0;
   return (
     <div className="parent-content">
       <ParentHeader
         eyebrow="GROWTH REPORT"
         title="成长统计"
         action={
-          <div className="date-select">
-            最近 7 天 <ChevronRight size={15} />
+          <div className="range-picker">
+            <label>
+              统计范围
+              <select
+                value={rangeKey}
+                onChange={(e) => setRangeKey(e.target.value as StatsRangeKey)}
+              >
+                {statsRanges.map((item) => (
+                  <option key={item.key} value={item.key}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
         }
       />
+      {rangeKey === "custom" && (
+        <div className="range-custom">
+          <label>
+            开始日期
+            <input
+              type="date"
+              value={draft.from}
+              min={shiftDate(today, -(statsMaxRangeDays - 1))}
+              max={today}
+              onChange={(e) => setDraft({ ...draft, from: e.target.value })}
+            />
+          </label>
+          <label>
+            结束日期
+            <input
+              type="date"
+              value={draft.to}
+              min={shiftDate(today, -(statsMaxRangeDays - 1))}
+              max={today}
+              onChange={(e) => setDraft({ ...draft, to: e.target.value })}
+            />
+          </label>
+          <button
+            className="primary-button"
+            disabled={!draft.from || !draft.to || draft.from > draft.to}
+            onClick={() => setApplied(draft)}
+          >
+            应用
+          </button>
+        </div>
+      )}
       <div className="stats-cards">
         <div>
           <span>完成任务</span>
           <strong>{done}</strong>
-          <small>次 / {store.stats.totalTasks} 个任务</small>
+          <small>次 / 应完成 {stats.totalTasks} 个</small>
         </div>
         <div>
           <span>获得积分</span>
           <strong>{earned}</strong>
-          <small>最近 7 天</small>
+          <small>{rangeLabel}</small>
         </div>
         <div>
           <span>兑换愿望</span>
@@ -2741,72 +2943,91 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
           <small>分</small>
         </div>
       </div>
-      <div className="stats-layout">
-        <section className="chart-panel parent-chart">
-          <div className="panel-heading">
-            <div>
-              <span className="eyebrow">TASK COMPLETION</span>
-              <h2>任务完成趋势</h2>
-            </div>
-            <span>最近 7 天</span>
-          </div>
-          <div className="bar-chart tall">
-            {store.stats.daily.map((day) => (
-              <div className="bar-col" key={day.date}>
-                <div
-                  className="bar filled"
-                  title={`${day.label}完成 ${day.completed} 个任务`}
-                  style={{
-                    height: `${day.completed === 0 ? 0 : Math.max(12, (day.completed / maxCompleted) * 100)}%`,
-                  }}
-                />
-                <small>{day.label}</small>
+      {empty ? (
+        <EmptyState
+          icon="✦"
+          title="这段时间还没有记录"
+          text="换个日期范围，或者先去确认孩子的任务吧"
+        />
+      ) : (
+        <div className="stats-layout">
+          <section className="chart-panel parent-chart">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">TASK COMPLETION</span>
+                <h2>任务完成趋势</h2>
               </div>
-            ))}
-          </div>
-        </section>
-        <section className="category-panel">
-          <div className="panel-heading">
-            <div>
-              <span className="eyebrow">BY CATEGORY</span>
-              <h2>完成分布</h2>
+              <span>{rangeLabel}</span>
             </div>
-          </div>
-          {store.stats.categories.map((category) => {
-            const color =
-              {
-                生活自理: "#ffb547",
-                家庭责任: "#55b8a4",
-                学习成长: "#9d8be8",
-              }[category.name] ?? "#67a9dc";
-            return (
-              <div className="category-line" key={category.name}>
-                <div>
-                  <span
-                    className="category-dot"
-                    style={{ background: color }}
+            <div className="bar-chart tall">
+              {stats.daily.map((day, index) => (
+                <div className="bar-col" key={day.date}>
+                  <div
+                    className="bar filled"
+                    title={`${day.date} 完成 ${day.completed} 个任务`}
+                    style={{
+                      height: `${day.completed === 0 ? 0 : Math.max(12, (day.completed / maxCompleted) * 100)}%`,
+                    }}
                   />
-                  <span>{category.name}</span>
-                  <b>{category.percent}%</b>
+                  {index % labelStep === 0 || index === stats.daily.length - 1 ? (
+                    <small>{day.label}</small>
+                  ) : (
+                    <small />
+                  )}
                 </div>
-                <div className="progress">
-                  <span
-                    style={{ width: `${category.percent}%`, background: color }}
-                  />
-                </div>
+              ))}
+            </div>
+          </section>
+          <section className="category-panel">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">BY CATEGORY</span>
+                <h2>完成分布</h2>
               </div>
-            );
-          })}
-        </section>
-      </div>
+            </div>
+            {stats.categories.length === 0 ? (
+              <p className="empty-evidence">这段时间没有确认完成的任务</p>
+            ) : (
+              stats.categories.map((category) => {
+                const color =
+                  {
+                    生活自理: "#ffb547",
+                    家庭责任: "#55b8a4",
+                    学习成长: "#9d8be8",
+                  }[category.name] ?? "#67a9dc";
+                return (
+                  <div className="category-line" key={category.name}>
+                    <div>
+                      <span
+                        className="category-dot"
+                        style={{ background: color }}
+                      />
+                      <span>{category.name}</span>
+                      <b>{category.percent}%</b>
+                    </div>
+                    <div className="progress">
+                      <span
+                        style={{
+                          width: `${category.percent}%`,
+                          background: color,
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </section>
+        </div>
+      )}
       <section className="insight-card">
         <span>💡</span>
         <div>
           <strong>小提示</strong>
           <p>
             {topCategory?.count
-              ? `${store.activeChild.name}最近在「${topCategory.name}」类任务上完成得最多，可以继续保持这个节奏。`
-              : `${store.activeChild.name}最近 7 天还没有确认完成的任务，完成后这里会出现成长洞察。`}
+              ? `${store.activeChild.name}在${rangeLabel}内「${topCategory.name}」类任务上完成得最多，可以继续保持这个节奏。`
+              : `${store.activeChild.name}在${rangeLabel}内还没有确认完成的任务，完成后这里会出现成长洞察。`}
           </p>
         </div>
       </section>

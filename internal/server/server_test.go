@@ -19,6 +19,9 @@ import (
 	"time"
 )
 
+// pngMagic is enough of a PNG for inspectUpload, which sniffs the first bytes.
+var pngMagic = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
 func testServer(t *testing.T) *Server {
 	t.Helper()
 	dir := t.TempDir()
@@ -87,6 +90,20 @@ func sessionFor(t *testing.T, s *Server, family, actorType, actor, child string)
 		t.Fatal(err)
 	}
 	return &http.Cookie{Name: cookieName, Value: raw}
+}
+
+// otherFamily inserts a second families row directly. CreateFamily refuses one
+// — this deployment only ever serves the oldest row — but tests need a foreign
+// family (isolation) or one with another timezone, and isolation has to hold
+// for any families row, however it got there. The stamp is deliberately later
+// than the served family's so the oldest row stays the one resolvedFamily picks.
+func otherFamily(t *testing.T, s *Server, code, timezone string) string {
+	t.Helper()
+	fid := id("fam")
+	if _, err := s.db.Exec(`INSERT INTO families(id,code,name,timezone,created_at) VALUES(?,?,?,?,?)`, fid, code, code, timezone, nowText(s.now().Add(24*time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	return fid
 }
 func getStateTest(t *testing.T, h http.Handler, c *http.Cookie) State {
 	t.Helper()
@@ -236,16 +253,13 @@ func TestRejectsCrossOriginMutation(t *testing.T) {
 func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {
 	s := testServer(t)
 	s.now = func() time.Time { return time.Date(2025, 1, 6, 0, 30, 0, 0, time.UTC) }
-	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "PACIFIC", Name: "Pacific", Timezone: "America/Los_Angeles", Username: "parent", Password: "2468"}); err != nil {
-		t.Fatal(err)
-	}
+	// This test needs a family whose timezone is not the served DEMO one, so it
+	// is inserted directly (CreateFamily refuses a second family).
+	family := otherFamily(t, s, "PACIFIC", "America/Los_Angeles")
 	if err := s.SeedDemo(context.Background(), "PACIFIC"); err != nil {
 		t.Fatal(err)
 	}
-	var family, child string
-	if err := s.db.QueryRow(`SELECT id FROM families WHERE code='PACIFIC'`).Scan(&family); err != nil {
-		t.Fatal(err)
-	}
+	var child string
 	if err := s.db.QueryRow(`SELECT id FROM children WHERE family_id=? ORDER BY created_at LIMIT 1`, family).Scan(&child); err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +277,7 @@ func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {
 		t.Fatalf("weekly due date=%s, want 2025-01-01", due)
 	}
 	var seededDue string
-	if err := s.db.QueryRow(`SELECT due_date FROM task_instances WHERE family_id=? AND repeat_rule='daily' LIMIT 1`, family).Scan(&seededDue); err != nil {
+	if err := s.db.QueryRow(`SELECT due_date FROM task_instances WHERE family_id=? AND repeat_rule='daily' ORDER BY due_date DESC LIMIT 1`, family).Scan(&seededDue); err != nil {
 		t.Fatal(err)
 	}
 	if seededDue != "2025-01-05" {
@@ -321,6 +335,45 @@ func TestUploadContentSniffingAndConcurrentSubmission(t *testing.T) {
 		t.Fatalf("fake image status=%d, want 415", bad.Code)
 	}
 
+	// Only a child submits, and only its own task. Both guards answer before the
+	// request can claim its idempotency key, so the task stays submittable for
+	// the concurrent pair below.
+	parentSubmit := httptest.NewRecorder()
+	h.ServeHTTP(parentSubmit, multipartRequest(t, "POST", "/api/v1/tasks/"+task.ID+"/submit", parent, "parent-submit", nil, nil))
+	if parentSubmit.Code != http.StatusForbidden || !strings.Contains(parentSubmit.Body.String(), "forbidden") {
+		t.Fatalf("parent submission: %d %s", parentSubmit.Code, parentSubmit.Body.String())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "弟弟", "avatar": "★", "color": "#8f7bd2"}, parent, ""); w.Code != 200 {
+		t.Fatalf("create sibling: %d %s", w.Code, w.Body.String())
+	}
+	siblings := getStateTest(t, h, parent).Children
+	sibling := siblings[len(siblings)-1]
+	siblingSubmit := httptest.NewRecorder()
+	h.ServeHTTP(siblingSubmit, multipartRequest(t, "POST", "/api/v1/tasks/"+task.ID+"/submit", childCookie(t, h, sibling.ID), "sibling-submit", nil, nil))
+	if siblingSubmit.Code != http.StatusForbidden || !strings.Contains(siblingSubmit.Body.String(), "forbidden") {
+		t.Fatalf("sibling submission: %d %s", siblingSubmit.Code, siblingSubmit.Body.String())
+	}
+
+	// At most 6 files per submission; the header sniffing only looks at the
+	// first bytes, so eight magic bytes are a valid candidate.
+	seven := map[string][]byte{}
+	for _, name := range []string{"a.png", "b.png", "c.png", "d.png", "e.png", "f.png", "g.png"} {
+		seven[name] = pngMagic
+	}
+	tooMany := httptest.NewRecorder()
+	h.ServeHTTP(tooMany, multipartRequest(t, "POST", "/api/v1/tasks/"+task.ID+"/submit", child, "seven-files", nil, seven))
+	if tooMany.Code != http.StatusBadRequest || !strings.Contains(tooMany.Body.String(), "too_many_files") {
+		t.Fatalf("seven files: %d %s", tooMany.Code, tooMany.Body.String())
+	}
+	// A body that is not multipart fails inside ParseMultipartForm and is
+	// reported as an oversize upload (there is no file to sniff).
+	notMultipart := doJSON(t, h, "POST", "/api/v1/tasks/"+task.ID+"/submit", map[string]string{"note": "x"}, child, "not-multipart")
+	if notMultipart.Code != http.StatusRequestEntityTooLarge || !strings.Contains(notMultipart.Body.String(), "upload_too_large") {
+		t.Fatalf("non-multipart body: %d %s", notMultipart.Code, notMultipart.Body.String())
+	}
+	// The 100 MiB total cap is not exercised here: building such a body would
+	// make the suite slow and memory hungry, so that branch is review-checked.
+
 	var wg sync.WaitGroup
 	codes := make(chan int, 2)
 	requests := map[string]*http.Request{}
@@ -351,6 +404,261 @@ func TestUploadContentSniffingAndConcurrentSubmission(t *testing.T) {
 	}
 	if submissions != 1 {
 		t.Fatalf("submissions=%d, want 1", submissions)
+	}
+}
+
+// The stats payload follows the requested family-local range: scheduled tasks
+// are derived from the templates (so a historical window is not empty), the
+// categories come from the confirmations inside it, and both stay scoped to the
+// selected child — a sibling sees zeros, so a family aggregate would be caught.
+func TestStatsFollowRequestedRangeScheduleAndCategories(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	state := getStateTest(t, h, parent)
+	var task Task
+	for _, candidate := range state.Tasks {
+		if candidate.Status == "todo" {
+			task = candidate
+			break
+		}
+	}
+	if task.ID == "" {
+		t.Fatal("missing todo task")
+	}
+	child := childCookie(t, h, task.ChildID)
+	type statsPayload struct {
+		From           string `json:"from"`
+		To             string `json:"to"`
+		TotalTasks     int    `json:"totalTasks"`
+		CompletedTasks int    `json:"completedTasks"`
+		EarnedPoints   int    `json:"earnedPoints"`
+		SpentPoints    int    `json:"spentPoints"`
+		Daily          []struct {
+			Date      string `json:"date"`
+			Label     string `json:"label"`
+			Completed int    `json:"completed"`
+		} `json:"daily"`
+		Categories []struct {
+			Name    string `json:"name"`
+			Count   int    `json:"count"`
+			Percent int    `json:"percent"`
+		} `json:"categories"`
+	}
+	readStats := func(path string) statsPayload {
+		t.Helper()
+		w := doJSON(t, h, "GET", path, nil, child, "")
+		if w.Code != 200 {
+			t.Fatalf("stats %s: %d %s", path, w.Code, w.Body.String())
+		}
+		var payload statsPayload
+		if err := json.NewDecoder(w.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	loc, err := time.LoadLocation(state.Timezone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	todayTime := s.now().In(loc)
+	today := todayTime.Format("2006-01-02")
+	day := func(offset int) string {
+		return time.Date(todayTime.Year(), todayTime.Month(), todayTime.Day()+offset, 0, 0, 0, 0, loc).Format("2006-01-02")
+	}
+	// The seed writes ten days of confirmations, so the expectations below are
+	// relative to the baseline: what this test pins is that the range and the
+	// categories follow the request, not how large the demo history is.
+	baseline := readStats("/api/v1/stats")
+	if want := day(-6); baseline.From != want || baseline.To != today {
+		t.Fatalf("default window=%s..%s, want %s..%s", baseline.From, baseline.To, want, today)
+	}
+	if len(baseline.Daily) != 7 {
+		t.Fatalf("daily=%d, want 7", len(baseline.Daily))
+	}
+	submit := httptest.NewRecorder()
+	h.ServeHTTP(submit, multipartRequest(t, "POST", "/api/v1/tasks/"+task.ID+"/submit", child, "stats-submit", map[string]string{"note": "统计"}, nil))
+	if submit.Code != 200 {
+		t.Fatalf("submit: %d %s", submit.Code, submit.Body.String())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/tasks/"+task.ID+"/review", map[string]any{"approved": true}, parent, "stats-review"); w.Code != 200 {
+		t.Fatalf("review: %d %s", w.Code, w.Body.String())
+	}
+	stats := readStats("/api/v1/stats")
+	// The window ends today, and the approval is stamped now, so the last bucket
+	// is the one that counts it.
+	if stats.Daily[6].Completed != baseline.Daily[6].Completed+1 || stats.CompletedTasks != baseline.CompletedTasks+1 {
+		t.Fatalf("today bucket=%+v summary=%+v baseline=%+v", stats.Daily[6], stats, baseline)
+	}
+	if stats.Daily[6].Label == "" || stats.To != today {
+		t.Fatalf("today bucket=%+v", stats.Daily[6])
+	}
+	if stats.EarnedPoints != baseline.EarnedPoints+task.Points || stats.SpentPoints != 0 {
+		t.Fatalf("earned=%d spent=%d, want %d and 0", stats.EarnedPoints, stats.SpentPoints, baseline.EarnedPoints+task.Points)
+	}
+
+	// One historical day: still scheduled work, which the old instance-based
+	// count could not report because instances only exist for days that were
+	// read. Its confirmations must equal the bucket the default window showed.
+	yesterday := readStats("/api/v1/stats?from=" + day(-1) + "&to=" + day(-1))
+	if len(yesterday.Daily) != 1 || yesterday.Daily[0].Date != day(-1) || yesterday.Daily[0].Label == "" {
+		t.Fatalf("single day window=%+v", yesterday)
+	}
+	if yesterday.TotalTasks < 3 {
+		t.Fatalf("scheduled tasks=%d on %s, want the seeded daily templates", yesterday.TotalTasks, day(-1))
+	}
+	if yesterday.CompletedTasks != baseline.Daily[5].Completed || yesterday.Daily[0].Completed != baseline.Daily[5].Completed {
+		t.Fatalf("yesterday=%+v, default window bucket=%+v", yesterday, baseline.Daily[5])
+	}
+	// A day the seed never confirmed is empty in both counters; a three-day
+	// window keeps one bucket per day.
+	quiet := readStats("/api/v1/stats?from=" + day(-7) + "&to=" + day(-7))
+	if quiet.CompletedTasks != 0 || quiet.EarnedPoints != 0 || len(quiet.Categories) != 0 {
+		t.Fatalf("quiet day=%+v", quiet)
+	}
+	if span := readStats("/api/v1/stats?from=" + day(-3) + "&to=" + day(-1)); len(span.Daily) != 3 || span.Daily[0].Date != day(-3) {
+		t.Fatalf("three-day window=%+v", span)
+	}
+	if single := readStats("/api/v1/stats?from=" + today + "&to=" + today); len(single.Daily) != 1 || single.Daily[0].Date != today {
+		t.Fatalf("today only=%+v", single)
+	}
+	for _, path := range []string{
+		"/api/v1/stats?from=" + day(-1),
+		"/api/v1/stats?to=" + today,
+		"/api/v1/stats?from=" + today + "&to=" + day(-1),
+		"/api/v1/stats?from=" + day(-92) + "&to=" + today,
+		"/api/v1/stats?from=2025-13-01&to=" + today,
+	} {
+		if w := doJSON(t, h, "GET", path, nil, child, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_request") {
+			t.Fatalf("range %s: %d %s", path, w.Code, w.Body.String())
+		}
+	}
+
+	// A category outside the fixed trio must reach the payload once a confirmed
+	// task carries it, and the percentages must add up to the completions.
+	created := doJSON(t, h, "POST", "/api/v1/tasks/", map[string]any{"childId": task.ChildID, "title": "跳跳绳", "description": "", "category": "运动健康", "points": 12, "repeatRule": "once", "repeatWeekday": 1}, parent, "")
+	if created.Code != 200 {
+		t.Fatalf("create task: %d %s", created.Code, created.Body.String())
+	}
+	var sports struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&sports); err != nil {
+		t.Fatal(err)
+	}
+	submit = httptest.NewRecorder()
+	h.ServeHTTP(submit, multipartRequest(t, "POST", "/api/v1/tasks/"+sports.ID+"/submit", child, "stats-sports", map[string]string{"note": "统计"}, nil))
+	if submit.Code != 200 {
+		t.Fatalf("submit sports: %d %s", submit.Code, submit.Body.String())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/tasks/"+sports.ID+"/review", map[string]any{"approved": true}, parent, "stats-sports-review"); w.Code != 200 {
+		t.Fatalf("review sports: %d %s", w.Code, w.Body.String())
+	}
+	todayStats := readStats("/api/v1/stats?from=" + today + "&to=" + today)
+	if todayStats.CompletedTasks != 2 {
+		t.Fatalf("today completed=%d, want the two approvals", todayStats.CompletedTasks)
+	}
+	found, counted := false, 0
+	for _, category := range todayStats.Categories {
+		counted += category.Count
+		if category.Percent != category.Count*100/todayStats.CompletedTasks {
+			t.Fatalf("category=%+v of %d completions", category, todayStats.CompletedTasks)
+		}
+		if category.Name == "运动健康" && category.Count == 1 {
+			found = true
+		}
+	}
+	if !found || counted != todayStats.CompletedTasks {
+		t.Fatalf("categories=%v of %d completions", todayStats.Categories, todayStats.CompletedTasks)
+	}
+
+	// A sibling's window is its own: no templates, no confirmations, no ledger.
+	if w := doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "弟弟", "avatar": "★", "color": "#8f7bd2"}, parent, ""); w.Code != 200 {
+		t.Fatalf("create sibling: %d %s", w.Code, w.Body.String())
+	}
+	siblings := getStateTest(t, h, parent).Children
+	sibling := siblings[len(siblings)-1]
+	if w := doJSON(t, h, "GET", "/api/v1/stats", nil, childCookie(t, h, sibling.ID), ""); w.Code != 200 {
+		t.Fatalf("sibling stats: %d %s", w.Code, w.Body.String())
+	} else {
+		var siblingStats statsPayload
+		if err := json.NewDecoder(w.Body).Decode(&siblingStats); err != nil {
+			t.Fatal(err)
+		}
+		if siblingStats.TotalTasks != 0 || siblingStats.CompletedTasks != 0 || siblingStats.EarnedPoints != 0 || siblingStats.SpentPoints != 0 || len(siblingStats.Categories) != 0 {
+			t.Fatalf("sibling saw another child's window: %+v", siblingStats)
+		}
+	}
+}
+
+func TestHealthEndpointsReportLivenessReadinessAndVersion(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(Config{DBPath: filepath.Join(dir, "health.db"), MediaDir: filepath.Join(dir, "media"), Version: "test-1"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	h := s.Handler()
+	live := httptest.NewRecorder()
+	h.ServeHTTP(live, httptest.NewRequest("GET", "/health/live", nil))
+	if live.Code != 200 || !strings.Contains(live.Body.String(), `"version":"test-1"`) {
+		t.Fatalf("live: %d %s", live.Code, live.Body.String())
+	}
+	// A database without a family is a legitimate startup state: the SPA answers
+	// no_family, so readiness holds there too.
+	ready := httptest.NewRecorder()
+	h.ServeHTTP(ready, httptest.NewRequest("GET", "/health/ready", nil))
+	if ready.Code != 200 {
+		t.Fatalf("ready without a family: %d %s", ready.Code, ready.Body.String())
+	}
+	if err = s.CreateFamily(context.Background(), FamilyInput{Code: "DEMO", Name: "Demo", Username: "parent", Password: "2468"}); err != nil {
+		t.Fatal(err)
+	}
+	ready = httptest.NewRecorder()
+	h.ServeHTTP(ready, httptest.NewRequest("GET", "/health/ready", nil))
+	if ready.Code != 200 {
+		t.Fatalf("ready with a family: %d %s", ready.Code, ready.Body.String())
+	}
+	// A dead database must not report ready.
+	if err = s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ready = httptest.NewRecorder()
+	h.ServeHTTP(ready, httptest.NewRequest("GET", "/health/ready", nil))
+	if ready.Code != http.StatusServiceUnavailable || !strings.Contains(ready.Body.String(), "unavailable") {
+		t.Fatalf("ready after close: %d %s", ready.Code, ready.Body.String())
+	}
+}
+
+// Creating a task answers with the instance id every later route addresses, and
+// an instance that /state can actually list: the response used to be able to
+// carry an empty id while the failure was swallowed.
+func TestCreateTaskAnswersWithAListableInstance(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	childID := getStateTest(t, h, parent).Children[0].ID
+	w := doJSON(t, h, "POST", "/api/v1/tasks/", map[string]any{"childId": childID, "title": "审计任务", "description": "", "category": "生活自理", "points": 5, "repeatRule": "daily", "repeatWeekday": 1}, parent, "")
+	if w.Code != 200 {
+		t.Fatalf("create task: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" {
+		t.Fatal("created task id is empty")
+	}
+	var found Task
+	for _, candidate := range getStateTest(t, h, parent).Tasks {
+		if candidate.ID == created.ID {
+			found = candidate
+		}
+	}
+	if found.Title != "审计任务" || found.Status != "todo" || found.ChildID != childID {
+		t.Fatalf("created instance %+v", found)
 	}
 }
 
@@ -537,13 +845,7 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 
 func TestFamilyIsolationAndLastChildProtection(t *testing.T) {
 	s := testServer(t)
-	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "2468"}); err != nil {
-		t.Fatal(err)
-	}
-	var otherFamily string
-	if err := s.db.QueryRow(`SELECT id FROM families WHERE code='OTHER'`).Scan(&otherFamily); err != nil {
-		t.Fatal(err)
-	}
+	otherFamily := otherFamily(t, s, "OTHER", "Asia/Shanghai")
 	if _, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES('child-other',?,'Other child','⭐','#ffb547',1,0,0,?)`, otherFamily, nowText(s.now())); err != nil {
 		t.Fatal(err)
 	}
@@ -955,14 +1257,10 @@ func TestParentPointsAdjustmentIsIdempotentScopedAndCreditsGrowth(t *testing.T) 
 		t.Fatalf("child actor: %d %s", w.Code, w.Body.String())
 	}
 	// A parent of another family cannot reach this child even with its id.
-	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "2468"}); err != nil {
-		t.Fatal(err)
-	}
-	var otherFamily string
-	if err := s.db.QueryRow(`SELECT id FROM families WHERE code='OTHER'`).Scan(&otherFamily); err != nil {
-		t.Fatal(err)
-	}
-	other := sessionFor(t, s, otherFamily, "parent", "par-other", "")
+	// CreateFamily refuses a second family (this deployment only ever serves the
+	// oldest row), so the foreign family is inserted directly: isolation has to
+	// hold for any families row, however it got there.
+	other := sessionFor(t, s, otherFamily(t, s, "OTHER", "Asia/Shanghai"), "parent", "par-other", "")
 	if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, other, "award-other"); w.Code != 404 {
 		t.Fatalf("cross family award: %d %s", w.Code, w.Body.String())
 	}

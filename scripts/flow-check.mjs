@@ -7,13 +7,28 @@ await mkdir(".artifacts/ui", { recursive: true });
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
 const errors = [];
+// A 401 is logged as a console error, and exactly two situations produce one:
+// the deliberate wrong credentials (two PIN attempts and one wrong current
+// password) and the probe enterChild() makes while its POST /auth/child is still
+// in flight, which can carry the session that call just demoted. Both windows
+// are opened explicitly below, so a logged-in read that regresses to 401 still
+// fails the run.
+let expectAuth401 = false;
+let expectSwitch401 = false;
+function expected401(url) {
+  if (expectAuth401 && url.endsWith("/api/v1/auth/parent")) return true;
+  if (expectAuth401 && url.endsWith("/api/v1/auth/parent/password")) return true;
+  return expectSwitch401 && url.endsWith("/api/v1/state");
+}
 function collectErrors(target) {
   target.on("console", (message) => {
+    if (message.type() !== "error") return;
     if (
-      message.type() === "error" &&
-      !message.text().includes("401 (Unauthorized)")
+      message.text().includes("401 (Unauthorized)") &&
+      expected401(message.location()?.url ?? "")
     )
-      errors.push(message.text());
+      return;
+    errors.push(message.text());
   });
   target.on("pageerror", (error) => errors.push(error.message));
 }
@@ -55,6 +70,13 @@ async function waitForState(predicate) {
   }
   throw new Error("Timed out waiting for server state");
 }
+// 同一标题在状态里可能有多个实例：种子带十天历史，真实部署也会按天累计。断言要的
+// 始终是「当前这一个」——日任务的今天、周任务的本周那天——所以按 due_date 取最新的。
+function currentTask(state, title) {
+  return state.tasks
+    .filter((task) => task.title === title)
+    .sort((left, right) => right.dueDate.localeCompare(left.dueDate))[0];
+}
 async function unlockParent(
   checkError = false,
   url = /\/parent$/,
@@ -65,9 +87,11 @@ async function unlockParent(
   await modal.waitFor();
   const input = modal.getByLabel("家长密码");
   if (checkError) {
+    expectAuth401 = true;
     await input.fill(rejected);
     await modal.getByRole("button", { name: "验证并进入" }).click();
     await modal.getByText("密码不正确，请重新输入").waitFor();
+    expectAuth401 = false;
   }
   await input.fill(password);
   await modal.getByRole("button", { name: "验证并进入" }).click();
@@ -94,7 +118,9 @@ async function enterChild() {
     .locator(".role-menu")
     .getByRole("button", { name: /孩子端/ })
     .click();
+  expectSwitch401 = true;
   await waitForState((s) => s.role === "child");
+  expectSwitch401 = false;
 }
 
 await page.goto(`${baseUrl}/child/tasks`, { waitUntil: "networkidle" });
@@ -105,7 +131,7 @@ assert.equal(state.children.length, 1);
 const initialBalance = state.children.find(
   (c) => c.name === "米娅",
 ).pointsBalance;
-const deskId = state.tasks.find((t) => t.title === "整理自己的书桌").id;
+const deskId = currentTask(state, "整理自己的书桌").id;
 const task = page.locator(".task-card").filter({ hasText: "整理自己的书桌" });
 // A real PNG rendered by the same engine that must decode it later: the old
 // hand-written JPEG header was not decodable, so an <img> could never prove
@@ -206,6 +232,19 @@ await managedWish.getByRole("button", { name: "编辑公园探险半日游" }).c
 await page.getByLabel("愿望名称").fill("周末公园探险");
 await page.getByRole("button", { name: "保存修改" }).click();
 await waitForState((s) => s.wishes.some((w) => w.title === "周末公园探险"));
+// 上/下架走的是 PUT /wishes/{id}，与 saveWish 共用 wishInput；客户端一旦把服务端
+// DTO 整个展开回传（多出一个 id），DisallowUnknownFields 就会判成 400。
+const renamedWish = page
+  .locator(".admin-wish")
+  .filter({ hasText: "周末公园探险" });
+await renamedWish.getByRole("button", { name: "下架" }).click();
+await waitForState(
+  (s) => s.wishes.find((w) => w.title === "周末公园探险")?.isActive === false,
+);
+await renamedWish.getByRole("button", { name: "重新上架" }).click();
+await waitForState(
+  (s) => s.wishes.find((w) => w.title === "周末公园探险")?.isActive === true,
+);
 await page.getByRole("button", { name: "删除周末公园探险" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
 await waitForState((s) => !s.wishes.some((w) => w.title === "周末公园探险"));
@@ -267,7 +306,7 @@ const readingTask = page
   .filter({ hasText: "阅读 20 分钟" });
 await readingTask.getByRole("button", { name: "退回" }).click();
 await waitForState(
-  (s) => s.tasks.find((t) => t.title === "阅读 20 分钟")?.status === "rejected",
+  (s) => currentTask(s, "阅读 20 分钟")?.status === "rejected",
 );
 await enterChild();
 await page.getByRole("link", { name: "愿望", exact: true }).click();
@@ -288,7 +327,7 @@ await waitForState(
   (s) =>
     s.submissions.filter(
       (item) =>
-        item.taskId === s.tasks.find((t) => t.title === "阅读 20 分钟")?.id,
+        item.taskId === currentTask(s, "阅读 20 分钟")?.id,
     ).length === 2,
 );
 
@@ -347,10 +386,8 @@ await page
   .getByLabel("每周星期")
   .selectOption(String((familyToday.weekday + 3) % 7));
 await page.getByRole("button", { name: "发布任务" }).click();
-state = await waitForState((s) =>
-  s.tasks.some((t) => t.title === "每周整理书架"),
-);
-const weeklyTask = state.tasks.find((t) => t.title === "每周整理书架");
+state = await waitForState((s) => Boolean(currentTask(s, "每周整理书架")));
+const weeklyTask = currentTask(state, "每周整理书架");
 assert.equal(
   weeklyTask.childId,
   state.children.find((c) => c.name === "米娅").id,
@@ -387,7 +424,7 @@ await weeklyCard.getByRole("button", { name: "完成任务" }).click();
 await weeklyCard.getByRole("button", { name: "提交给家长确认" }).click();
 await waitForState(
   (s) =>
-    s.tasks.find((t) => t.title === "每周整理书架")?.status === "pending_review",
+    currentTask(s, "每周整理书架")?.status === "pending_review",
 );
 await page.getByRole("link", { name: "成长", exact: true }).click();
 const backfilled = dayPanel
@@ -417,11 +454,9 @@ const readingRow = page
   .first();
 await readingRow.getByRole("button", { name: "确认", exact: true }).click();
 let approved = await waitForState(
-  (s) => s.tasks.find((t) => t.title === "阅读 20 分钟")?.status === "completed",
+  (s) => currentTask(s, "阅读 20 分钟")?.status === "completed",
 );
-const readingPoints = approved.tasks.find(
-  (t) => t.title === "阅读 20 分钟",
-).points;
+const readingPoints = currentTask(approved, "阅读 20 分钟").points;
 // created_at 是去掉尾零的 RFC3339Nano，同一秒内的两条记录不能保证字典序等于
 // 时间序；这里让两次确认跨秒，排队顺序才是确定的。
 await page.waitForTimeout(1100);
@@ -431,11 +466,9 @@ const weeklyRow = page
   .first();
 await weeklyRow.getByRole("button", { name: "确认", exact: true }).click();
 approved = await waitForState(
-  (s) => s.tasks.find((t) => t.title === "每周整理书架")?.status === "completed",
+  (s) => currentTask(s, "每周整理书架")?.status === "completed",
 );
-const weeklyPoints = approved.tasks.find(
-  (t) => t.title === "每周整理书架",
-).points;
+const weeklyPoints = currentTask(approved, "每周整理书架").points;
 
 await enterChild();
 const celebration = page.locator(".reward-celebration");
@@ -461,6 +494,61 @@ await page
   .getByRole("button", { name: "关闭积分到账提示" })
   .click();
 await page.locator(".reward-celebration").waitFor({ state: "detached" });
+// 成长统计：区间由服务端 from/to 决定，卡片和柱状图随区间变化，不再是写死的 7 天。
+await enterParent();
+await page.getByRole("link", { name: "成长统计" }).click();
+await page.waitForURL(/\/parent\/stats$/);
+const statValue = async (index) =>
+  Number(await page.locator(".stats-cards strong").nth(index).innerText());
+const barCount = () => page.locator(".bar-chart .bar-col").count();
+// 换区间会触发一次 /api/v1/stats?from=… 请求，React 只在它回来后才重渲染；下面每次
+// 都先挂 waitForResponse 再改控件，并在断言前轮询到期望值，才不会读到上一轮的数字。
+const poll = async (read, expected) => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if ((await read()) === expected) return;
+    await page.waitForTimeout(50);
+  }
+  assert.equal(await read(), expected);
+};
+const waitForBars = (expected) => poll(barCount, expected);
+const waitForStat = (index, expected) =>
+  poll(() => statValue(index), expected);
+const ranged = async (act) => {
+  const pending = page.waitForResponse((response) =>
+    response.url().includes("/api/v1/stats?from="),
+  );
+  await act();
+  await pending;
+};
+await page.locator(".range-picker select").waitFor();
+await waitForBars(7);
+assert.ok((await statValue(1)) >= 20 + readingPoints + weeklyPoints);
+const completedWeek = await statValue(0);
+await ranged(() => page.getByLabel("统计范围").selectOption("today"));
+await waitForBars(1);
+await waitForStat(1, 20 + readingPoints + weeklyPoints);
+await ranged(() => page.getByLabel("统计范围").selectOption("month"));
+await waitForBars(30);
+// 种子里有一天落在 7 天之外，所以 30 天区间必须比最近 7 天多出确认记录。
+assert.ok((await statValue(0)) > completedWeek);
+await ranged(() => page.getByLabel("统计范围").selectOption("custom"));
+const yesterday = new Date(
+  new Date(`${familyToday.date}T00:00:00Z`).getTime() - 86400000,
+)
+  .toISOString()
+  .slice(0, 10);
+await page.getByLabel("开始日期").fill(yesterday);
+await page.getByLabel("结束日期").fill(yesterday);
+await ranged(() => page.getByRole("button", { name: "应用" }).click());
+// 种子里「一天前」那笔确认：阅读 20 分钟。
+await waitForStat(1, 30);
+await waitForBars(1);
+await page.screenshot({
+  path: ".artifacts/ui/stats-range.png",
+  fullPage: true,
+});
+// 下面还要点一次「家长端」才弹 PIN，所以必须先回到孩子端。
+await enterChild();
 // 家长端可以修改家长密码：先要当前密码，改完旧密码立即失效、新密码才能进入。
 await enterParent();
 await page.locator(".profile-button").click();
@@ -477,8 +565,10 @@ await passwordModal.getByRole("button", { name: "保存新密码" }).click();
 await passwordModal.getByText("两次输入的新密码不一致").waitFor();
 await passwordModal.getByLabel("确认新密码").fill("1357");
 await passwordModal.getByLabel("当前密码").fill("0000");
+expectAuth401 = true;
 await passwordModal.getByRole("button", { name: "保存新密码" }).click();
 await passwordModal.getByText("当前密码不正确，请重新输入").waitFor();
+expectAuth401 = false;
 assert.equal(await passwordModal.getByLabel("当前密码").inputValue(), "");
 // 401 不能被 src/store.ts 的「重开孩子端并重放」吃掉：家长端必须还在。
 await page.locator(".parent-layout").waitFor();
@@ -497,9 +587,9 @@ await page.getByRole("button", { name: "新建任务" }).click();
 await page.getByLabel("任务名称").fill("倒垃圾");
 await page.getByLabel("重复方式").selectOption("daily");
 await page.getByRole("button", { name: "发布任务" }).click();
-state = await waitForState((s) => s.tasks.some((t) => t.title === "倒垃圾"));
+state = await waitForState((s) => Boolean(currentTask(s, "倒垃圾")));
 assert.equal(
-  state.tasks.find((t) => t.title === "倒垃圾").childId,
+  currentTask(state, "倒垃圾").childId,
   state.children.find((c) => c.name === "米娅").id,
 );
 // Both harnesses run on 127.0.0.1, a secure context where crypto.randomUUID
@@ -622,6 +712,7 @@ console.log(
     parentMediaVisible: true,
     mediaViewer: true,
     taskWishManagement: true,
+    wishToggle: true,
     childProfileCrud: true,
     redemptionCompleted: true,
     redemptionCompletionPersisted: true,
@@ -630,6 +721,7 @@ console.log(
     redemptionCompletionEvidence: true,
     growthDayStats: true,
     growthBackfill: true,
+    statsRange: true,
     consoleErrors: errors.length,
   }),
 );

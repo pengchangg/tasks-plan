@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { seedState } from "./data";
+import { familyDate } from "./domain";
 import type { ChildDraft, TaskDraft, WishDraft } from "./domain";
 import type {
   AppState,
   Attachment,
   Child,
+  StatsPayload,
   TaskSubmission,
   Wish,
+  WishInput,
 } from "./types";
 
 const emptyChild: Child = {
@@ -32,6 +35,7 @@ const messages: Record<string, string> = {
   insufficient_points: "积分不足，无法兑换",
   insufficient_balance: "孩子当前积分不足，无法扣除",
   wish_unavailable: "这个愿望暂时无法兑换",
+  invalid_request: "提交的内容不合法，请检查后重试",
   invalid_state: "当前状态不能完成这个操作，请刷新后再试",
   not_found: "内容已经不存在了，请刷新后再试",
   conflict: "操作冲突，请刷新后再试",
@@ -119,13 +123,16 @@ export function useAppStore() {
   const [ready, setReady] = useState(false);
   const [connected, setConnected] = useState(false);
   const [message, setMessage] = useState("");
-  const [stats, setStats] = useState({
+  // 家庭总览用默认区间（最近 7 天）；成长统计页按自己选的区间单独取，不覆盖它。
+  const [stats, setStats] = useState<StatsPayload>({
+    from: "",
+    to: "",
     totalTasks: 0,
     completedTasks: 0,
     earnedPoints: 0,
     spentPoints: 0,
-    daily: [] as { date: string; label: string; completed: number }[],
-    categories: [] as { name: string; count: number; percent: number }[],
+    daily: [],
+    categories: [],
   });
 
   const refresh = useCallback(async () => {
@@ -175,9 +182,19 @@ export function useAppStore() {
     state.children.find((child) => child.id === state.activeChildId) ??
     state.children[0] ??
     emptyChild;
+  // 任务列表（孩子端首页/任务页、家长端总览/任务管理）只列当前要处理的任务：已经
+  // 确认完成的过往实例属于历史，由成长日历按天呈现，否则它们会挤满列表、也会把
+  // 「今日完成 n/m」的分母算错。待完成/待确认/退回的实例无论落在哪天都留着，家长
+  // 隔天才能确认的提交不会被藏起来。
+  const today = familyDate(new Date().toISOString(), state.timezone);
   const childTasks = useMemo(
-    () => state.tasks.filter((task) => task.childId === activeChild.id),
-    [state.tasks, activeChild.id],
+    () =>
+      state.tasks.filter(
+        (task) =>
+          task.childId === activeChild.id &&
+          !(task.status === "completed" && task.dueDate < today),
+      ),
+    [state.tasks, activeChild.id, today],
   );
 
   // The newest submission per task for the child on screen; the server orders
@@ -203,6 +220,17 @@ export function useAppStore() {
 
   const actions = {
     reconnect: connect,
+    // 成长统计页按区间读取。失败时返回 null，页面保留上一次的数字，
+    // 不把总览的 7 天口径改掉。
+    loadStats: async (from: string, to: string) => {
+      try {
+        const response = await request(`/stats?from=${from}&to=${to}`);
+        return (await response.json()) as StatsPayload;
+      } catch (error) {
+        setMessage(describe(error, "加载统计失败"));
+        return null;
+      }
+    },
     unlockParent: async (password: string) => {
       try {
         await request("/auth/parent", json("POST", { password }));
@@ -311,16 +339,17 @@ export function useAppStore() {
       void run(() => request(`/wishes/${id}`, json("DELETE"))),
     toggleWish: (id: string) => {
       const wish = state.wishes.find((item) => item.id === id);
-      if (wish)
-        void run(() =>
-          request(
-            `/wishes/${id}`,
-            json("PUT", {
-              ...wish,
-              isActive: !wish.isActive,
-            }),
-          ),
-        );
+      if (!wish) return;
+      // 只发写接口认得的字段：wishInput 没有 id，而服务端的 decode() 拒绝未知字段。
+      const body: WishInput = {
+        title: wish.title,
+        description: wish.description,
+        pointsCost: wish.pointsCost,
+        icon: wish.icon,
+        color: wish.color,
+        isActive: !wish.isActive,
+      };
+      void run(() => request(`/wishes/${id}`, json("PUT", body)));
     },
   };
   return {
