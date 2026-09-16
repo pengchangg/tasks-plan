@@ -391,6 +391,64 @@ await page.screenshot({
   path: ".artifacts/ui/growth-backfill.png",
   fullPage: true,
 });
+// 每个被确认的任务各弹一次到账：家长先连续确认两条任务，孩子端第一次打开时
+// 必须把两笔到账逐条走完，而不是只庆祝最新的一条。
+await enterParent();
+await page.getByRole("link", { name: "任务管理" }).click();
+const readingRow = page
+  .locator(".admin-task-item")
+  .filter({ hasText: "阅读 20 分钟" })
+  .first();
+await readingRow.getByRole("button", { name: "确认", exact: true }).click();
+let approved = await waitForState(
+  (s) => s.tasks.find((t) => t.title === "阅读 20 分钟")?.status === "completed",
+);
+const readingPoints = approved.tasks.find(
+  (t) => t.title === "阅读 20 分钟",
+).points;
+// created_at 是去掉尾零的 RFC3339Nano，同一秒内的两条记录不能保证字典序等于
+// 时间序；这里让两次确认跨秒，排队顺序才是确定的。
+await page.waitForTimeout(1100);
+const weeklyRow = page
+  .locator(".admin-task-item")
+  .filter({ hasText: "每周整理书架" })
+  .first();
+await weeklyRow.getByRole("button", { name: "确认", exact: true }).click();
+approved = await waitForState(
+  (s) => s.tasks.find((t) => t.title === "每周整理书架")?.status === "completed",
+);
+const weeklyPoints = approved.tasks.find(
+  (t) => t.title === "每周整理书架",
+).points;
+
+await page.locator(".profile-button").click();
+await page
+  .locator(".role-menu")
+  .getByRole("button", { name: /孩子端/ })
+  .click();
+const celebration = page.locator(".reward-celebration");
+await celebration.getByText("完成「阅读 20 分钟」").waitFor();
+assert.equal(
+  await celebration.locator("strong").innerText(),
+  `+${readingPoints} 积分到账！`,
+);
+assert.equal(await page.locator(".reward-celebration").count(), 1);
+assert.ok(!(await celebration.innerText()).includes("每周整理书架"));
+await page.screenshot({
+  path: ".artifacts/ui/reward-queue.png",
+  fullPage: true,
+});
+await celebration.getByRole("button", { name: "关闭积分到账提示" }).click();
+await page.getByText("完成「每周整理书架」").waitFor();
+assert.equal(
+  await page.locator(".reward-celebration strong").innerText(),
+  `+${weeklyPoints} 积分到账！`,
+);
+await page
+  .locator(".reward-celebration")
+  .getByRole("button", { name: "关闭积分到账提示" })
+  .click();
+await page.locator(".reward-celebration").waitFor({ state: "detached" });
 // Both harnesses run on 127.0.0.1, a secure context where crypto.randomUUID
 // always exists, so nothing above reaches the idempotency-key fallback in
 // src/store.ts that plain-HTTP LAN deployments depend on: there the browser
@@ -440,6 +498,7 @@ console.log(
     submittedWithoutCredit: true,
     approvedBalance: initialBalance + 20,
     rewardFeedback: true,
+    rewardPerTask: true,
     redeemedBalance: initialBalance - 60,
     persistedAfterReload: true,
     rejectedAndResubmitted: true,

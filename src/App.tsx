@@ -81,37 +81,62 @@ function Shell() {
     null,
   );
   const parentUnlocked = store.state.role === "parent";
-  const [reward, setReward] = useState<PointLedger | null>(null);
-  const latestEarned = store.state.ledger
-    .filter(
-      (item) => item.childId === store.activeChild.id && item.type === "earned",
-    )
-    .slice(-1)[0];
-  const seenRewards = useRef(
-    new Map(
-      store.state.children.map((child) => [
-        child.id,
-        store.state.ledger
-          .filter((item) => item.childId === child.id && item.type === "earned")
-          .slice(-1)[0]?.id,
-      ]),
-    ),
-  );
+  const [rewardQueue, setRewardQueue] = useState<PointLedger[]>([]);
+  const reward = rewardQueue[0] ?? null;
+  // childId -> 本次页面加载里已经庆祝过的到账台账 id，同一笔到账不会弹第二次。
+  const seenRewards = useRef(new Map<string, Set<string>>());
+  const rewardsBaselined = useRef(false);
   useEffect(() => {
-    if (isParent) {
-      setReward(null);
+    // store 启动时用的是 src/data.ts 的演示状态，必须等第一份服务端状态落地，
+    // 才能判断哪些到账属于「打开页面前就已经存在」的历史记录。
+    if (!store.connected) return;
+    if (!rewardsBaselined.current) {
+      rewardsBaselined.current = true;
+      for (const child of store.state.children)
+        seenRewards.current.set(
+          child.id,
+          new Set(
+            store.state.ledger
+              .filter(
+                (item) => item.childId === child.id && item.type === "earned",
+              )
+              .map((item) => item.id),
+          ),
+        );
       return;
     }
-    if (
-      !latestEarned ||
-      seenRewards.current.get(store.activeChild.id) === latestEarned.id
-    )
-      return;
-    seenRewards.current.set(store.activeChild.id, latestEarned.id);
-    setReward(latestEarned);
-    const timer = window.setTimeout(() => setReward(null), 3600);
+    // 家长端不庆祝：这些到账保持「未读」，等孩子端一打开就逐条弹出来。
+    if (isParent) return;
+    const childId = store.state.activeChildId;
+    const seen = seenRewards.current.get(childId) ?? new Set<string>();
+    seenRewards.current.set(childId, seen);
+    const pending = store.state.ledger.filter(
+      (item) =>
+        item.childId === childId && item.type === "earned" && !seen.has(item.id),
+    );
+    if (!pending.length) return;
+    setRewardQueue((queue) => {
+      const queued = new Set(queue.map((item) => item.id));
+      const fresh = pending.filter((item) => !queued.has(item.id));
+      return fresh.length ? [...queue, ...fresh] : queue;
+    });
+  }, [isParent, store.connected, store.state]);
+  useEffect(() => {
+    if (isParent) setRewardQueue([]);
+  }, [isParent]);
+  const dismissReward = () => {
+    if (reward) {
+      const seen = seenRewards.current.get(reward.childId) ?? new Set<string>();
+      seen.add(reward.id);
+      seenRewards.current.set(reward.childId, seen);
+    }
+    setRewardQueue((queue) => queue.slice(1));
+  };
+  useEffect(() => {
+    if (!reward) return;
+    const timer = window.setTimeout(dismissReward, 3600);
     return () => window.clearTimeout(timer);
-  }, [isParent, latestEarned, store.activeChild.id]);
+  }, [reward?.id]);
   useEffect(() => {
     // The parent end is never restored by the session: a parent path always
     // costs the password, so a device left with a child cannot wander in.
@@ -239,7 +264,11 @@ function Shell() {
         </div>
       )}
       {reward && (
-        <RewardCelebration reward={reward} onClose={() => setReward(null)} />
+        <RewardCelebration
+          key={reward.id}
+          reward={reward}
+          onClose={dismissReward}
+        />
       )}
       {isParent && parentUnlocked ? (
         <ParentLayout store={store} />
