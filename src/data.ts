@@ -176,8 +176,12 @@ export const seedState: AppState = {
     {
       id: "r1",
       wishId: "w4",
+      wishTitle: "睡前故事加长版",
+      wishIcon: "📚",
+      wishColor: "#bdb2ed",
       childId: "mia",
       pointsCost: 60,
+      attachments: [],
       createdAt: daysAgo(3),
     },
   ],

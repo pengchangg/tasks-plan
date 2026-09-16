@@ -190,6 +190,16 @@ export function useAppStore() {
     return byTask;
   }, [state.submissions, activeChild.id]);
 
+  // The child on screen owns this list; the server returns redemptions oldest
+  // first, so reverse it for display.
+  const childRedemptions = useMemo(
+    () =>
+      state.redemptions
+        .filter((redemption) => redemption.childId === activeChild.id)
+        .reverse(),
+    [state.redemptions, activeChild.id],
+  );
+
   const actions = {
     reconnect: connect,
     unlockParent: async (password: string) => {
@@ -243,6 +253,21 @@ export function useAppStore() {
       void run(() =>
         request(`/wishes/${wish.id}/redeem`, json("POST", {}, true)),
       ),
+    toggleRedemption: (
+      id: string,
+      completed: boolean,
+      note = "",
+      attachments: Attachment[] = [],
+    ) =>
+      void run(() => {
+        const body = new FormData();
+        body.set("completed", completed ? "true" : "false");
+        if (note) body.set("note", note);
+        for (const attachment of attachments) {
+          if (attachment.file) body.append("files", attachment.file);
+        }
+        return request(`/redemptions/${id}`, { method: "PATCH", body });
+      }),
     saveTask: (draft: TaskDraft, id?: string) =>
       void run(() =>
         request(`/tasks/${id ?? ""}`, json(id ? "PUT" : "POST", draft)),
@@ -274,6 +299,7 @@ export function useAppStore() {
     activeChild,
     childTasks,
     latestSubmissions,
+    childRedemptions,
     actions,
     ready,
     connected,

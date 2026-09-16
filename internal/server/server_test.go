@@ -100,10 +100,15 @@ func getStateTest(t *testing.T, h http.Handler, c *http.Cookie) State {
 	return state
 }
 
-func multipartRequest(t *testing.T, path string, cookie *http.Cookie, key string, files map[string][]byte) *http.Request {
+func multipartRequest(t *testing.T, method, path string, cookie *http.Cookie, key string, fields map[string]string, files map[string][]byte) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	for name, value := range fields {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for name, content := range files {
 		part, err := writer.CreateFormFile("files", name)
 		if err != nil {
@@ -116,7 +121,7 @@ func multipartRequest(t *testing.T, path string, cookie *http.Cookie, key string
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
-	r := httptest.NewRequest(http.MethodPost, path, &body)
+	r := httptest.NewRequest(method, path, &body)
 	r.Header.Set("Content-Type", writer.FormDataContentType())
 	r.Header.Set("Idempotency-Key", key)
 	if cookie != nil {
@@ -282,7 +287,7 @@ func TestUploadContentSniffingAndConcurrentSubmission(t *testing.T) {
 	child := childCookie(t, h, task.ChildID)
 
 	bad := httptest.NewRecorder()
-	h.ServeHTTP(bad, multipartRequest(t, "/api/v1/tasks/"+task.ID+"/submit", child, "bad-upload", map[string][]byte{"fake.jpg": []byte("plain text")}))
+	h.ServeHTTP(bad, multipartRequest(t, "POST", "/api/v1/tasks/"+task.ID+"/submit", child, "bad-upload", nil, map[string][]byte{"fake.jpg": []byte("plain text")}))
 	if bad.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("fake image status=%d, want 415", bad.Code)
 	}
@@ -291,7 +296,7 @@ func TestUploadContentSniffingAndConcurrentSubmission(t *testing.T) {
 	codes := make(chan int, 2)
 	requests := map[string]*http.Request{}
 	for _, key := range []string{"concurrent-a", "concurrent-b"} {
-		requests[key] = multipartRequest(t, "/api/v1/tasks/"+task.ID+"/submit", child, key, nil)
+		requests[key] = multipartRequest(t, "POST", "/api/v1/tasks/"+task.ID+"/submit", child, key, nil, nil)
 	}
 	for key, request := range requests {
 		wg.Add(1)
@@ -394,6 +399,102 @@ func TestReviewCreditsExactlyOnceUsesMinimumGrowthAndRedemptionCannotOverdraw(t 
 		if c.ID == pending.ChildID && c.PointsBalance != after {
 			t.Fatal("failed redemption changed balance")
 		}
+	}
+}
+
+func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	state := getStateTest(t, h, parent)
+	var mia, leo Child
+	for _, c := range state.Children {
+		switch c.Name {
+		case "米娅":
+			mia = c
+		case "乐乐":
+			leo = c
+		}
+	}
+	var affordable Wish
+	for _, v := range state.Wishes {
+		if v.PointsCost <= mia.PointsBalance {
+			affordable = v
+			break
+		}
+	}
+	if mia.ID == "" || leo.ID == "" || affordable.ID == "" {
+		t.Fatal("missing demo child or affordable wish")
+	}
+	child := childCookie(t, h, mia.ID)
+	w := doJSON(t, h, "POST", "/api/v1/wishes/"+affordable.ID+"/redeem", map[string]any{}, child, "complete-redeem")
+	if w.Code != 200 {
+		t.Fatalf("redeem: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, child)
+	if len(state.Redemptions) != 1 {
+		t.Fatalf("redemptions=%d, want 1", len(state.Redemptions))
+	}
+	rid := state.Redemptions[0].ID
+	if state.Redemptions[0].CompletedAt != nil {
+		t.Fatal("new redemption is already completed")
+	}
+	if state.Redemptions[0].WishTitle != affordable.Title {
+		t.Fatalf("wish title %q, want %q", state.Redemptions[0].WishTitle, affordable.Title)
+	}
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01")
+	complete := func(id string, cookie *http.Cookie, fields map[string]string, files map[string][]byte) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, multipartRequest(t, "PATCH", "/api/v1/redemptions/"+id, cookie, "", fields, files))
+		return rec
+	}
+	note := "已经听到加长版的故事啦"
+	done := map[string]string{"completed": "true", "note": note}
+	if w = complete(rid, parent, done, nil); w.Code != 403 {
+		t.Fatalf("parent completion: %d %s", w.Code, w.Body.String())
+	}
+	if w = complete(rid, childCookie(t, h, leo.ID), done, nil); w.Code != 404 {
+		t.Fatalf("other child completion: %d %s", w.Code, w.Body.String())
+	}
+	if w = complete("red_missing", child, done, nil); w.Code != 404 {
+		t.Fatalf("unknown redemption: %d %s", w.Code, w.Body.String())
+	}
+	if w = complete(rid, child, done, map[string][]byte{"wish-proof.png": png}); w.Code != 204 {
+		t.Fatalf("complete: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, child)
+	if state.Redemptions[0].CompletedAt == nil {
+		t.Fatal("completion not recorded")
+	}
+	if state.Redemptions[0].CompletedNote != note {
+		t.Fatalf("note %q, want %q", state.Redemptions[0].CompletedNote, note)
+	}
+	if len(state.Redemptions[0].Attachments) != 1 {
+		t.Fatalf("attachments=%d, want 1", len(state.Redemptions[0].Attachments))
+	}
+	evidence := state.Redemptions[0].Attachments[0]
+	media := httptest.NewRequest("GET", evidence.URL, nil)
+	media.AddCookie(child)
+	served := httptest.NewRecorder()
+	h.ServeHTTP(served, media)
+	if served.Code != 200 || served.Body.String() != string(png) || !strings.Contains(served.Header().Get("Content-Type"), "png") {
+		t.Fatalf("evidence media: %d %q %q", served.Code, served.Header().Get("Content-Type"), served.Body.String())
+	}
+	if other := getStateTest(t, h, childCookie(t, h, leo.ID)); len(other.Redemptions) != 0 {
+		t.Fatalf("other child sees %d redemptions", len(other.Redemptions))
+	}
+	if w = complete(rid, child, map[string]string{"completed": "false"}, nil); w.Code != 204 {
+		t.Fatalf("undo: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, child)
+	if state.Redemptions[0].CompletedAt != nil || state.Redemptions[0].CompletedNote != "" || len(state.Redemptions[0].Attachments) != 0 {
+		t.Fatalf("undo kept the completion record: %+v", state.Redemptions[0])
+	}
+	served = httptest.NewRecorder()
+	h.ServeHTTP(served, media)
+	if served.Code != 404 {
+		t.Fatalf("removed evidence is still served: %d", served.Code)
 	}
 }
 

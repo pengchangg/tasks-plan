@@ -213,8 +213,37 @@ assert.equal(
   initialBalance - 60,
 );
 assert.equal(state.redemptions.at(-1).wishId, dinner.id);
+const starRow = page.locator(".star-row").filter({ hasText: "选择一次晚餐" });
+const wishNote = "晚餐点了披萨，全家一起吃光啦";
+await starRow.getByRole("button", { name: "标记完成" }).click();
+await starRow.getByPlaceholder("写一句话记录这一刻吧（可选）").fill(wishNote);
+await starRow.locator('input[accept="image/*"]').setInputFiles({
+  name: "wish-proof.png",
+  mimeType: "image/png",
+  buffer: proofPng,
+});
+await starRow.getByRole("button", { name: "确认完成" }).click();
+state = await waitForState((s) => Boolean(s.redemptions.at(-1)?.completedAt));
+assert.equal(state.redemptions.at(-1).completedNote, wishNote);
+assert.equal(state.redemptions.at(-1).attachments.length, 1);
+await page.reload({ waitUntil: "networkidle" });
+await starRow.getByText("已完成").waitFor();
+await starRow.getByText(wishNote).waitFor();
+await assertRealImage(starRow.locator(".media-thumb img"), proofSize);
+assert.equal(await starRow.getByRole("button", { name: "标记完成" }).count(), 0);
+assert.equal(await starRow.getByRole("button", { name: "撤销完成" }).count(), 1);
 
 await enterParent();
+await page.getByRole("link", { name: "愿望管理" }).click();
+const parentStarRow = page
+  .locator(".star-row")
+  .filter({ hasText: "选择一次晚餐" });
+assert.ok((await parentStarRow.innerText()).includes("米娅"));
+await parentStarRow.getByText("已完成").waitFor();
+await parentStarRow.getByText(wishNote).waitFor();
+await assertRealImage(parentStarRow.locator(".media-thumb img"), proofSize);
+assert.equal(await parentStarRow.getByRole("button", { name: "标记完成" }).count(), 0);
+assert.equal(await parentStarRow.getByRole("button", { name: "撤销完成" }).count(), 0);
 await page.getByRole("link", { name: "任务管理" }).click();
 const readingTask = page
   .locator(".admin-row")
@@ -228,6 +257,14 @@ await page
   .locator(".role-menu")
   .getByRole("button", { name: /孩子端/ })
   .click();
+await page.getByRole("link", { name: "愿望", exact: true }).click();
+const reopenRow = page.locator(".star-row").filter({ hasText: "选择一次晚餐" });
+await reopenRow.getByRole("button", { name: "撤销完成" }).click();
+await page.getByRole("button", { name: "确认撤销" }).click();
+await waitForState((s) => !s.redemptions.at(-1)?.completedAt);
+await reopenRow.getByText("未完成").waitFor();
+assert.equal(await reopenRow.locator(".media-thumb").count(), 0);
+assert.ok(!(await reopenRow.innerText()).includes(wishNote));
 await page.getByRole("link", { name: "任务", exact: true }).click();
 const rejectedTask = page
   .locator(".task-card")
@@ -317,6 +354,11 @@ console.log(
     mediaViewer: true,
     taskWishManagement: true,
     childProfileCrud: true,
+    redemptionCompleted: true,
+    redemptionCompletionPersisted: true,
+    redemptionCompletionParentReadOnly: true,
+    redemptionCompletionReversible: true,
+    redemptionCompletionEvidence: true,
     consoleErrors: errors.length,
   }),
 );

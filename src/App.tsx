@@ -37,6 +37,7 @@ import type {
   Attachment,
   Child,
   PointLedger,
+  Redemption,
   RepeatRule,
   Task,
   TaskSubmission,
@@ -698,6 +699,178 @@ function ChildTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
     </div>
   );
 }
+function StarRow({
+  redemption,
+  ownerName,
+  onToggle,
+}: {
+  redemption: Redemption;
+  ownerName?: string;
+  onToggle?: (
+    id: string,
+    completed: boolean,
+    note: string,
+    attachments: Attachment[],
+  ) => void;
+}) {
+  const done = Boolean(redemption.completedAt);
+  const [open, setOpen] = useState(false);
+  const [undoing, setUndoing] = useState(false);
+  const [note, setNote] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const pick = (type: "image" | "video", files: FileList | null) => {
+    const selected = Array.from(files ?? []).map((file) => ({
+      name: file.name,
+      type,
+      file,
+    }));
+    setAttachments((current) => [
+      ...current.filter((item) => item.type !== type),
+      ...selected,
+    ]);
+  };
+  return (
+    <div className={`star-row ${done ? "star-done" : ""}`}>
+      <div className="star-line">
+        <span className="star-icon" style={{ background: redemption.wishColor }}>
+          {redemption.wishIcon}
+        </span>
+        <div className="star-body">
+          <strong>{redemption.wishTitle}</strong>
+          <small>
+            {ownerName ? `${ownerName} · ` : ""}
+            {redemption.pointsCost} 积分 ·{" "}
+            {dateText(redemption.createdAt.slice(0, 10))}
+          </small>
+        </div>
+        <span
+          className={`status-chip ${done ? "status-completed" : "status-todo"}`}
+        >
+          {done ? "已完成" : "未完成"}
+        </span>
+        {onToggle &&
+          (done ? (
+            <button
+              className="small-primary star-action"
+              onClick={() => setUndoing(true)}
+            >
+              撤销完成
+            </button>
+          ) : (
+            <button
+              className="small-primary star-action"
+              onClick={() => setOpen((current) => !current)}
+            >
+              标记完成
+            </button>
+          ))}
+      </div>
+      {(redemption.completedNote || redemption.attachments.length > 0) && (
+        <div className="star-evidence">
+          {redemption.completedNote && (
+            <p className="submission-note">
+              <MessageSquare size={15} />
+              <span>{redemption.completedNote}</span>
+            </p>
+          )}
+          <MediaGallery attachments={redemption.attachments} />
+        </div>
+      )}
+      {open && onToggle && (
+        <div className="star-complete">
+          <textarea
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="写一句话记录这一刻吧（可选）"
+          />
+          <div className="attachment-row">
+            <label>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(event) => pick("image", event.target.files)}
+              />
+              <span>＋ 添加照片</span>
+            </label>
+            <label>
+              <input
+                type="file"
+                accept="video/*"
+                multiple
+                onChange={(event) => pick("video", event.target.files)}
+              />
+              <span>＋ 添加视频</span>
+            </label>
+          </div>
+          {attachments.length > 0 && (
+            <div className="attachment-name">
+              {attachments.map((item, index) => (
+                <small key={`${item.name}-${index}`}>✓ {item.name}</small>
+              ))}
+            </div>
+          )}
+          <button
+            className="wide-primary"
+            onClick={() => {
+              onToggle(redemption.id, true, note, attachments);
+              setOpen(false);
+              setNote("");
+              setAttachments([]);
+            }}
+          >
+            确认完成
+          </button>
+        </div>
+      )}
+      {undoing && (
+        <ConfirmModal
+          title="撤销这次完成？"
+          text="撤销后，你写的备注和照片也会一起移除，可以重新标记完成。"
+          confirm="确认撤销"
+          onClose={() => setUndoing(false)}
+          onConfirm={() => {
+            onToggle?.(redemption.id, false, "", []);
+            setUndoing(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+function StarWishList({
+  items,
+  onToggle,
+}: {
+  items: { redemption: Redemption; ownerName?: string }[];
+  onToggle?: (
+    id: string,
+    completed: boolean,
+    note: string,
+    attachments: Attachment[],
+  ) => void;
+}) {
+  if (items.length === 0)
+    return (
+      <EmptyState
+        icon="✦"
+        title="星愿清单还是空的"
+        text={onToggle ? "去愿望小铺兑换第一个心愿吧" : "孩子还没有兑换过心愿"}
+      />
+    );
+  return (
+    <div className="star-list">
+      {items.map(({ redemption, ownerName }) => (
+        <StarRow
+          key={redemption.id}
+          redemption={redemption}
+          ownerName={ownerName}
+          onToggle={onToggle}
+        />
+      ))}
+    </div>
+  );
+}
 function ChildWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
   const [selected, setSelected] = useState<Wish | null>(null);
   return (
@@ -729,6 +902,19 @@ function ChildWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
             />
           ))}
       </div>
+      <div className="section-title">
+        <h2>我的星愿清单</h2>
+        {store.childRedemptions.length > 0 && (
+          <span>
+            {store.childRedemptions.filter((item) => item.completedAt).length}/
+            {store.childRedemptions.length} 已实现
+          </span>
+        )}
+      </div>
+      <StarWishList
+        items={store.childRedemptions.map((redemption) => ({ redemption }))}
+        onToggle={store.actions.toggleRedemption}
+      />
       {selected && (
         <ConfirmModal
           title={`兑换「${selected.title}」？`}
@@ -1911,6 +2097,23 @@ function ParentWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
           </div>
         ))}
       </div>
+      <div className="section-title">
+        <h2>星愿清单</h2>
+        {store.state.redemptions.length > 0 && (
+          <span>
+            {store.state.redemptions.filter((item) => item.completedAt).length}/
+            {store.state.redemptions.length} 已实现
+          </span>
+        )}
+      </div>
+      <StarWishList
+        items={[...store.state.redemptions].reverse().map((redemption) => ({
+          redemption,
+          ownerName: store.state.children.find(
+            (child) => child.id === redemption.childId,
+          )?.name,
+        }))}
+      />
       {(showForm || editing) && (
         <WishForm
           wish={editing}

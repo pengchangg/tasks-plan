@@ -301,8 +301,12 @@ export function redeemWish(
       {
         id: clock.id("redemption"),
         wishId: currentWish.id,
+        wishTitle: currentWish.title,
+        wishIcon: currentWish.icon,
+        wishColor: currentWish.color,
         childId: child.id,
         pointsCost: currentWish.pointsCost,
+        attachments: [],
         createdAt,
       },
     ],

@@ -108,11 +108,17 @@ type Ledger struct {
 	CreatedAt   string `json:"createdAt"`
 }
 type Redemption struct {
-	ID         string `json:"id"`
-	WishID     string `json:"wishId"`
-	ChildID    string `json:"childId"`
-	PointsCost int    `json:"pointsCost"`
-	CreatedAt  string `json:"createdAt"`
+	ID            string       `json:"id"`
+	WishID        string       `json:"wishId"`
+	WishTitle     string       `json:"wishTitle"`
+	WishIcon      string       `json:"wishIcon"`
+	WishColor     string       `json:"wishColor"`
+	ChildID       string       `json:"childId"`
+	PointsCost    int          `json:"pointsCost"`
+	CompletedAt   *string      `json:"completedAt,omitempty"`
+	CompletedNote string       `json:"completedNote,omitempty"`
+	Attachments   []Attachment `json:"attachments"`
+	CreatedAt     string       `json:"createdAt"`
 }
 type State struct {
 	Version       int          `json:"version"`
@@ -281,6 +287,7 @@ func (s *Server) Handler() http.Handler {
 				v.Delete("/{id}", s.parentOnly(s.deleteWish))
 				v.Post("/{id}/redeem", s.redeemWish)
 			})
+			a.Patch("/redemptions/{id}", s.completeRedemption)
 			a.Get("/media/{id}", s.media)
 			a.Get("/stats", s.stats)
 		})
@@ -850,15 +857,42 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 		out.Ledger = append(out.Ledger, v)
 	}
 	rows.Close()
-	rows, err = s.db.QueryContext(ctx, `SELECT id,COALESCE(wish_id,''),child_id,points_cost,created_at FROM redemptions WHERE family_id=? AND (?='parent' OR child_id=?) ORDER BY created_at`, x.FamilyID, x.ActorType, x.SelectedChildID)
+	attachmentByRedemption := map[string][]Attachment{}
+	rows, err = s.db.QueryContext(ctx, `SELECT a.redemption_id,a.id,a.original_name,a.media_type FROM attachments a JOIN redemptions r ON r.id=a.redemption_id WHERE a.family_id=? AND (?='parent' OR r.child_id=?) ORDER BY a.created_at`, x.FamilyID, x.ActorType, x.SelectedChildID)
+	if err != nil {
+		return out, err
+	}
+	for rows.Next() {
+		var rid string
+		var a Attachment
+		if err = rows.Scan(&rid, &a.ID, &a.Name, &a.Type); err != nil {
+			rows.Close()
+			return out, err
+		}
+		a.URL = "/api/v1/media/" + a.ID
+		attachmentByRedemption[rid] = append(attachmentByRedemption[rid], a)
+	}
+	rows.Close()
+	rows, err = s.db.QueryContext(ctx, `SELECT r.id,COALESCE(r.wish_id,''),r.wish_title,COALESCE(w.icon,'🎁'),COALESCE(w.color,'#ffcf70'),r.child_id,r.points_cost,r.completed_at,r.completed_note,r.created_at FROM redemptions r LEFT JOIN wishes w ON w.id=r.wish_id WHERE r.family_id=? AND (?='parent' OR r.child_id=?) ORDER BY r.created_at`, x.FamilyID, x.ActorType, x.SelectedChildID)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var v Redemption
-		if err = rows.Scan(&v.ID, &v.WishID, &v.ChildID, &v.PointsCost, &v.CreatedAt); err != nil {
+		var completed, note sql.NullString
+		if err = rows.Scan(&v.ID, &v.WishID, &v.WishTitle, &v.WishIcon, &v.WishColor, &v.ChildID, &v.PointsCost, &completed, &note, &v.CreatedAt); err != nil {
 			rows.Close()
 			return out, err
+		}
+		if completed.Valid {
+			v.CompletedAt = &completed.String
+		}
+		if note.Valid {
+			v.CompletedNote = note.String
+		}
+		v.Attachments = attachmentByRedemption[v.ID]
+		if v.Attachments == nil {
+			v.Attachments = []Attachment{}
 		}
 		out.Redemptions = append(out.Redemptions, v)
 	}
@@ -977,11 +1011,21 @@ func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) mediaForChild(ctx context.Context, family, child string) []string {
 	rows, err := s.db.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN task_submissions s ON s.id=a.submission_id WHERE a.family_id=? AND s.child_id=?`, family, child)
+	var out []string
+	if err == nil {
+		for rows.Next() {
+			var name string
+			if rows.Scan(&name) == nil {
+				out = append(out, name)
+			}
+		}
+		rows.Close()
+	}
+	rows, err = s.db.QueryContext(ctx, `SELECT a.storage_name FROM attachments a JOIN redemptions r ON r.id=a.redemption_id WHERE a.family_id=? AND r.child_id=?`, family, child)
 	if err != nil {
-		return nil
+		return out
 	}
 	defer rows.Close()
-	var out []string
 	for rows.Next() {
 		var name string
 		if rows.Scan(&name) == nil {
@@ -1500,6 +1544,156 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"id": rid})
+}
+
+func (s *Server) completeRedemption(w http.ResponseWriter, r *http.Request) {
+	x := sess(r)
+	if x.ActorType != "child" {
+		problem(w, 403, "forbidden", "child access required")
+		return
+	}
+	if x.SelectedChildID == "" {
+		problem(w, 403, "forbidden", "child selection required")
+		return
+	}
+	if x.ActorID != x.SelectedChildID {
+		problem(w, 403, "forbidden", "wrong child")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 101<<20)
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		problem(w, 413, "upload_too_large", "evidence exceeds 100 MB")
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
+	}
+	// Completion is one record: the timestamp, an optional note and the child's
+	// own photos/videos. Undoing it clears the record, so those are the only
+	// files this handler ever reads.
+	completed := r.FormValue("completed") == "true"
+	var files []*multipart.FileHeader
+	if completed {
+		files = r.MultipartForm.File["files"]
+	}
+	if len(files) > 6 {
+		problem(w, 400, "too_many_files", "at most 6 files are allowed")
+		return
+	}
+	type upload struct {
+		h                   *multipart.FileHeader
+		kind, mimeType, ext string
+	}
+	var total int64
+	validated := make([]upload, 0, len(files))
+	for _, h := range files {
+		total += h.Size
+		kind, mimeType, ext, ok := inspectUpload(h)
+		if !ok {
+			problem(w, 415, "unsupported_media", "file content is not a supported image or video")
+			return
+		}
+		validated = append(validated, upload{h: h, kind: kind, mimeType: mimeType, ext: ext})
+	}
+	if total > 100<<20 {
+		problem(w, 413, "upload_too_large", "evidence exceeds 100 MB")
+		return
+	}
+	type saved struct {
+		h                            *multipart.FileHeader
+		storage, aid, kind, mimeType string
+	}
+	savedFiles := []saved{}
+	cleanup := func() {
+		for _, v := range savedFiles {
+			_ = os.Remove(filepath.Join(s.mediaDir, v.storage))
+		}
+	}
+	for _, candidate := range validated {
+		h := candidate.h
+		src, e := h.Open()
+		if e != nil {
+			cleanup()
+			s.uploadError(w, r, e)
+			return
+		}
+		storage := id("media") + candidate.ext
+		dst, e := os.OpenFile(filepath.Join(s.mediaDir, storage), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if e == nil {
+			_, e = io.Copy(dst, src)
+			_ = dst.Close()
+		}
+		_ = src.Close()
+		if e != nil {
+			cleanup()
+			s.uploadError(w, r, e)
+			return
+		}
+		savedFiles = append(savedFiles, saved{h, storage, id("att"), candidate.kind, candidate.mimeType})
+	}
+	rid := chi.URLParam(r, "id")
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		cleanup()
+		s.internalError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	var stale []string
+	if !completed {
+		var rows *sql.Rows
+		rows, err = tx.Query(`SELECT storage_name FROM attachments WHERE family_id=? AND redemption_id=?`, x.FamilyID, rid)
+		for err == nil && rows.Next() {
+			var name string
+			if err = rows.Scan(&name); err == nil {
+				stale = append(stale, name)
+			}
+		}
+		if rows != nil {
+			rows.Close()
+		}
+	}
+	now := nowText(s.now())
+	var res sql.Result
+	if err == nil && completed {
+		res, err = tx.Exec(`UPDATE redemptions SET completed_at=?,completed_note=? WHERE id=? AND family_id=? AND child_id=?`, now, nullString(strings.TrimSpace(r.FormValue("note"))), rid, x.FamilyID, x.SelectedChildID)
+	}
+	if err == nil && !completed {
+		res, err = tx.Exec(`UPDATE redemptions SET completed_at=NULL,completed_note=NULL WHERE id=? AND family_id=? AND child_id=?`, rid, x.FamilyID, x.SelectedChildID)
+		if err == nil {
+			_, err = tx.Exec(`DELETE FROM attachments WHERE family_id=? AND redemption_id=?`, x.FamilyID, rid)
+		}
+	}
+	if err != nil {
+		cleanup()
+		s.internalError(w, r, err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		cleanup()
+		problem(w, 404, "not_found", "redemption not found")
+		return
+	}
+	for _, v := range savedFiles {
+		_, err = tx.Exec(`INSERT INTO attachments(id,family_id,redemption_id,original_name,storage_name,media_type,mime_type,size_bytes,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, v.aid, x.FamilyID, rid, filepath.Base(v.h.Filename), v.storage, v.kind, v.mimeType, v.h.Size, now)
+		if err != nil {
+			break
+		}
+	}
+	if err != nil {
+		cleanup()
+		s.internalError(w, r, err)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		cleanup()
+		s.internalError(w, r, err)
+		return
+	}
+	for _, name := range stale {
+		_ = os.Remove(filepath.Join(s.mediaDir, filepath.Base(name)))
+	}
+	w.WriteHeader(204)
 }
 
 func (s *Server) media(w http.ResponseWriter, r *http.Request) {
