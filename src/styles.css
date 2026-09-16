@@ -72,3 +72,5 @@
 .day-task-main h4{margin:0 0 3px;font-size:13px}
 .day-task-main p{margin:0;font-size:10px;color:var(--muted)}
 .day-badge{display:inline-block;margin-left:6px;padding:2px 6px;border-radius:999px;background:#efe9fb;color:#5f4b96;font-weight:700}
+.parent-header-actions{display:flex;align-items:center;gap:8px}
+.amount-options{display:flex;gap:8px;flex-wrap:wrap}.amount-options button{min-width:58px;height:38px;padding:0 12px;border:1px solid var(--line);background:#fff;border-radius:7px;font-weight:700}.amount-options button.selected{border-color:#303633;box-shadow:0 0 0 2px #303633}

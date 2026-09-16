@@ -539,6 +539,69 @@ assert.match(
 );
 await degraded.close();
 
+// 家长可以直接给当前孩子加分/扣分（家庭总览页右上角「奖励积分」）：加分与任务
+// 审核共用一套账（积分 + 成长能量），扣分只减积分；两者都是 manual 台账，孩子端
+// 下次打开会像任务到账一样弹一次提示。
+await page.getByRole("link", { name: "家庭总览" }).click();
+const beforeAward = await waitForState((s) => s.children.length > 0);
+const target = beforeAward.children.find(
+  (c) => c.id === beforeAward.activeChildId,
+);
+assert.equal(target.name, "米娅");
+await page.getByRole("button", { name: "奖励积分" }).click();
+const pointsModal = page.locator(".form-modal");
+await pointsModal.getByLabel("积分数量").fill("30");
+await pointsModal.getByLabel("原因（可选）").fill("主动整理客厅");
+await page.screenshot({
+  path: ".artifacts/ui/points-award.png",
+  fullPage: true,
+});
+await pointsModal.getByRole("button", { name: "确认奖励" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+const awarded = await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === target.id).pointsBalance ===
+    target.pointsBalance + 30,
+);
+const awardedChild = awarded.children.find((c) => c.id === target.id);
+assert.equal(awardedChild.experience, (target.experience + 6) % 100);
+const awardEntry = awarded.ledger.find(
+  (item) => item.description === "家长奖励：主动整理客厅",
+);
+assert.equal(awardEntry.amount, 30);
+assert.equal(awardEntry.referenceType, "manual");
+// 扣分只减积分，成长能量不动。
+await page.getByRole("button", { name: "奖励积分" }).click();
+const deductModal = page.locator(".form-modal");
+await deductModal.getByRole("button", { name: "扣除积分" }).click();
+await deductModal.getByLabel("积分数量").fill("20");
+await deductModal.getByRole("button", { name: "确认扣除" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+const deducted = await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === target.id).pointsBalance ===
+    target.pointsBalance + 10,
+);
+assert.equal(
+  deducted.children.find((c) => c.id === target.id).experience,
+  awardedChild.experience,
+);
+assert.equal(
+  deducted.ledger.find((item) => item.description === "家长扣除").amount,
+  -20,
+);
+// 孩子端为一笔手动加分弹到账提示，且标题不再是「任务确认完成」。
+await enterChild();
+const manualReward = page.locator(".reward-celebration");
+await manualReward.getByText("家长奖励：主动整理客厅").waitFor();
+assert.ok((await manualReward.innerText()).includes("家长奖励"));
+assert.equal(
+  await manualReward.locator("strong").innerText(),
+  "+30 积分到账！",
+);
+await manualReward.getByRole("button", { name: "关闭积分到账提示" }).click();
+await page.locator(".reward-celebration").waitFor({ state: "detached" });
+
 assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({
@@ -546,6 +609,8 @@ console.log(
     approvedBalance: initialBalance + 20,
     rewardFeedback: true,
     rewardPerTask: true,
+    pointsAward: true,
+    pointsDeduct: true,
     parentPasswordChange: true,
     redeemedBalance: initialBalance - 60,
     persistedAfterReload: true,

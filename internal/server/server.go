@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/argon2"
@@ -99,13 +100,14 @@ type Wish struct {
 	IsActive    bool   `json:"isActive"`
 }
 type Ledger struct {
-	ID          string `json:"id"`
-	ChildID     string `json:"childId"`
-	Amount      int    `json:"amount"`
-	Type        string `json:"type"`
-	ReferenceID string `json:"referenceId"`
-	Description string `json:"description"`
-	CreatedAt   string `json:"createdAt"`
+	ID            string `json:"id"`
+	ChildID       string `json:"childId"`
+	Amount        int    `json:"amount"`
+	Type          string `json:"type"`
+	ReferenceType string `json:"referenceType"`
+	ReferenceID   string `json:"referenceId"`
+	Description   string `json:"description"`
+	CreatedAt     string `json:"createdAt"`
 }
 type Redemption struct {
 	ID            string       `json:"id"`
@@ -278,6 +280,7 @@ func (s *Server) Handler() http.Handler {
 				c.Post("/", s.parentOnly(s.saveChild))
 				c.Put("/{id}", s.parentOnly(s.saveChild))
 				c.Delete("/{id}", s.parentOnly(s.deleteChild))
+				c.Post("/{id}/points", s.parentOnly(s.awardPoints))
 			})
 			a.Route("/tasks", func(t chi.Router) {
 				t.Post("/", s.parentOnly(s.saveTask))
@@ -927,13 +930,13 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 		out.Wishes = append(out.Wishes, v)
 	}
 	rows.Close()
-	rows, err = s.db.QueryContext(ctx, `SELECT id,child_id,amount,entry_type,reference_id,description,created_at FROM point_ledger WHERE family_id=? AND (?='parent' OR child_id=?) ORDER BY created_at`, x.FamilyID, x.ActorType, x.SelectedChildID)
+	rows, err = s.db.QueryContext(ctx, `SELECT id,child_id,amount,entry_type,reference_type,reference_id,description,created_at FROM point_ledger WHERE family_id=? AND (?='parent' OR child_id=?) ORDER BY created_at`, x.FamilyID, x.ActorType, x.SelectedChildID)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var v Ledger
-		if err = rows.Scan(&v.ID, &v.ChildID, &v.Amount, &v.Type, &v.ReferenceID, &v.Description, &v.CreatedAt); err != nil {
+		if err = rows.Scan(&v.ID, &v.ChildID, &v.Amount, &v.Type, &v.ReferenceType, &v.ReferenceID, &v.Description, &v.CreatedAt); err != nil {
 			rows.Close()
 			return out, err
 		}
@@ -1502,6 +1505,93 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]bool{"approved": in.Approved})
+}
+
+// maxPointsAdjustment bounds one manual award or deduction so a mistyped form
+// cannot move a child's balance by an arbitrary amount.
+const maxPointsAdjustment = 500
+
+// awardPoints moves a child's balance outside the task flow. A positive amount
+// credits points and grows experience exactly like an approved task; a negative
+// amount only reduces points_balance, because experience is the total the child
+// earned and never decreases.
+func (s *Server) awardPoints(w http.ResponseWriter, r *http.Request) {
+	x := sess(r)
+	cid := chi.URLParam(r, "id")
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		problem(w, 400, "idempotency_required", "Idempotency-Key is required")
+		return
+	}
+	var in struct {
+		Amount int    `json:"amount"`
+		Note   string `json:"note"`
+	}
+	if decode(r, &in) != nil || in.Amount == 0 || in.Amount > maxPointsAdjustment || in.Amount < -maxPointsAdjustment {
+		problem(w, 400, "invalid_request", "amount must be between -500 and 500, excluding 0")
+		return
+	}
+	note := strings.TrimSpace(in.Note)
+	if utf8.RuneCountInString(note) > 30 {
+		problem(w, 400, "invalid_request", "note must be 30 characters or fewer")
+		return
+	}
+	var prior int
+	if s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE family_id=? AND actor_id=? AND operation='award' AND key=?`, x.FamilyID, x.ActorID, key).Scan(&prior) == nil {
+		writeJSON(w, prior, map[string]bool{"replayed": true})
+		return
+	}
+	tx, err := s.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	var exists int
+	if tx.QueryRow(`SELECT 1 FROM children WHERE id=? AND family_id=?`, cid, x.FamilyID).Scan(&exists) != nil {
+		problem(w, 404, "not_found", "child not found")
+		return
+	}
+	now := nowText(s.now())
+	lid := id("led")
+	desc, entryType := "家长奖励", "earned"
+	if in.Amount < 0 {
+		desc, entryType = "家长扣除", "spent"
+	}
+	if note != "" {
+		desc += "：" + note
+	}
+	if in.Amount > 0 {
+		growth := in.Amount / 5
+		if growth < 1 {
+			growth = 1
+		}
+		_, err = tx.Exec(`UPDATE children SET points_balance=points_balance+?,experience=experience+?,level=1+CAST((experience+?)/100 AS INTEGER) WHERE id=? AND family_id=?`, in.Amount, growth, growth, cid, x.FamilyID)
+	} else {
+		var res sql.Result
+		res, err = tx.Exec(`UPDATE children SET points_balance=points_balance+? WHERE id=? AND family_id=? AND points_balance+?>=0`, in.Amount, cid, x.FamilyID, in.Amount)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n == 0 {
+				problem(w, 409, "insufficient_balance", "child has insufficient points")
+				return
+			}
+		}
+	}
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,?,'manual',?,?,?)`, lid, x.FamilyID, cid, in.Amount, entryType, lid, desc, now)
+	}
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'award',?,200,'{}',?)`, x.FamilyID, x.ActorID, key, now)
+	}
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"id": lid})
 }
 
 type wishInput struct {

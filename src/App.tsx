@@ -485,7 +485,9 @@ function RewardCelebration({
         <Sparkles size={25} />
       </div>
       <div>
-        <span>任务确认完成</span>
+        <span>
+          {reward.referenceType === "manual" ? "家长奖励" : "任务确认完成"}
+        </span>
         <strong>+{reward.amount} 积分到账！</strong>
         <small>{reward.description}</small>
       </div>
@@ -1607,19 +1609,28 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
   const pending = tasks.filter((t) => t.status === "pending_review");
   const done = store.stats.completedTasks;
   const total = store.stats.totalTasks;
+  const [awarding, setAwarding] = useState(false);
   return (
     <div className="parent-content">
       <ParentHeader
         eyebrow="FAMILY DASHBOARD"
         title="家庭总览"
         action={
-          <Link
-            className="outline-button"
-            to="/child"
-            onClick={() => store.actions.enterChild()}
-          >
-            <Sparkles size={16} /> 看看孩子端
-          </Link>
+          <span className="parent-header-actions">
+            <button
+              className="primary-button"
+              onClick={() => setAwarding(true)}
+            >
+              <Coins size={16} /> 奖励积分
+            </button>
+            <Link
+              className="outline-button"
+              to="/child"
+              onClick={() => store.actions.enterChild()}
+            >
+              <Sparkles size={16} /> 看看孩子端
+            </Link>
+          </span>
         }
       />
       <div className="parent-welcome">
@@ -1713,6 +1724,16 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
             </div>
           ))}
       </div>
+      {awarding && (
+        <PointsForm
+          child={store.activeChild}
+          onClose={() => setAwarding(false)}
+          onSubmit={(amount, note) => {
+            store.actions.awardPoints(store.activeChild.id, amount, note);
+            setAwarding(false);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1930,6 +1951,112 @@ function ChildForm({
         </fieldset>
         <button className="wide-primary" type="submit">
           {child ? "保存修改" : "添加孩子"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function PointsForm({
+  child,
+  onClose,
+  onSubmit,
+}: {
+  child: Child;
+  onClose: () => void;
+  onSubmit: (amount: number, note: string) => void;
+}) {
+  const presets = [5, 10, 20, 50];
+  const [mode, setMode] = useState<"add" | "deduct">("add");
+  const [amount, setAmount] = useState("10");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState("");
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="form-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="points-form-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const value = Number(amount);
+          if (!Number.isInteger(value) || value < 1 || value > 500) {
+            setError("请输入 1-500 之间的整数");
+            return;
+          }
+          onSubmit(mode === "add" ? value : -value, note.trim());
+        }}
+      >
+        <div className="form-heading">
+          <div>
+            <span className="eyebrow">POINTS ADJUST</span>
+            <h2 id="points-form-title">给「{child.name}」调整积分</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭积分调整">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="amount-options">
+          {(["add", "deduct"] as const).map((item) => (
+            <button
+              type="button"
+              key={item}
+              className={mode === item ? "selected" : ""}
+              aria-pressed={mode === item}
+              onClick={() => {
+                setMode(item);
+                setError("");
+              }}
+            >
+              {item === "add" ? "增加积分" : "扣除积分"}
+            </button>
+          ))}
+        </div>
+        <label>
+          积分数量
+          <input
+            autoFocus
+            required
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={500}
+            value={amount}
+            onChange={(event) => {
+              setAmount(event.target.value);
+              setError("");
+            }}
+          />
+        </label>
+        <div className="amount-options">
+          {presets.map((item) => (
+            <button
+              type="button"
+              key={item}
+              className={Number(amount) === item ? "selected" : ""}
+              onClick={() => {
+                setAmount(String(item));
+                setError("");
+              }}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+        <label>
+          原因（可选）
+          <input
+            maxLength={30}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="例如：主动帮妈妈拎菜"
+          />
+        </label>
+        <small className="pin-hint">当前可用积分：{child.pointsBalance}</small>
+        {error && <small className="pin-error-text">{error}</small>}
+        <button className="wide-primary" type="submit">
+          {mode === "add" ? "确认奖励" : "确认扣除"}
         </button>
       </form>
     </div>

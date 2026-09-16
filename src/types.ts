@@ -7,6 +7,6 @@ export interface Task { id: string; childId: string; title: string; description:
 export interface Attachment { id?: string; name: string; type: 'image' | 'video'; url?: string; file?: File }
 export interface TaskSubmission { id: string; taskId: string; childId: string; note: string; attachments: Attachment[]; submittedAt: string; reviewedAt?: string; reviewNote?: string }
 export interface Wish { id: string; title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
-export interface PointLedger { id: string; childId: string; amount: number; type: 'earned' | 'spent'; referenceId: string; description: string; createdAt: string }
+export interface PointLedger { id: string; childId: string; amount: number; type: 'earned' | 'spent'; referenceType: 'task' | 'redemption' | 'manual'; referenceId: string; description: string; createdAt: string }
 export interface Redemption { id: string; wishId: string; wishTitle: string; wishIcon: string; wishColor: string; childId: string; pointsCost: number; completedAt?: string; completedNote?: string; attachments: Attachment[]; createdAt: string }
 export interface AppState { version: number; timezone: string; role: Role; activeChildId: string; children: Child[]; tasks: Task[]; submissions: TaskSubmission[]; wishes: Wish[]; ledger: PointLedger[]; redemptions: Redemption[] }

@@ -30,6 +30,7 @@ const messages: Record<string, string> = {
   too_many_requests: "尝试太频繁了，请稍后再试",
   forbidden: "这个操作需要家长密码",
   insufficient_points: "积分不足，无法兑换",
+  insufficient_balance: "孩子当前积分不足，无法扣除",
   wish_unavailable: "这个愿望暂时无法兑换",
   invalid_state: "当前状态不能完成这个操作，请刷新后再试",
   not_found: "内容已经不存在了，请刷新后再试",
@@ -250,6 +251,13 @@ export function useAppStore() {
       ),
     deleteChild: (id: string) =>
       void run(() => request(`/children/${id}`, json("DELETE"))),
+    awardPoints: (childId: string, amount: number, note = "") =>
+      void run(() =>
+        request(
+          `/children/${childId}/points`,
+          json("POST", { amount, note }, true),
+        ),
+      ),
     submitTask: (taskId: string, note: string, attachments: Attachment[]) =>
       void run(() => {
         const body = new FormData();

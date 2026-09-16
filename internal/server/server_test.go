@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -865,5 +866,104 @@ func TestInternalErrorsAreLoggedNotLeakedAndPanicsAreRecovered(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "secret_column") {
 		t.Fatalf("internal error was not logged: %s", logs.String())
+	}
+}
+
+func TestParentPointsAdjustmentIsIdempotentScopedAndCreditsGrowth(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	state := getStateTest(t, h, parent)
+	if len(state.Children) != 1 {
+		t.Fatalf("seeded children=%d, want 1", len(state.Children))
+	}
+	mia := state.Children[0]
+	body := map[string]any{"amount": 30, "note": "主动整理客厅"}
+	w := doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, parent, "award-points-1")
+	if w.Code != 200 {
+		t.Fatalf("award: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, parent)
+	awarded := state.Children[0]
+	if awarded.PointsBalance != mia.PointsBalance+30 {
+		t.Fatalf("balance=%d, want %d", awarded.PointsBalance, mia.PointsBalance+30)
+	}
+	// The API exposes experience modulo 100; an award grows it by max(amount/5, 1).
+	if want := math.Mod(mia.Experience+6, 100); awarded.Experience != want {
+		t.Fatalf("experience=%v, want %v", awarded.Experience, want)
+	}
+	var manual Ledger
+	for _, v := range state.Ledger {
+		if v.ReferenceType == "manual" {
+			manual = v
+		}
+	}
+	if manual.Amount != 30 || manual.Type != "earned" || manual.ChildID != mia.ID || manual.Description != "家长奖励：主动整理客厅" {
+		t.Fatalf("unexpected ledger entry %+v", manual)
+	}
+	// The same key replays: the marker comes back and nothing is credited twice.
+	ledgerCount := len(state.Ledger)
+	w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, parent, "award-points-1")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"replayed":true`) {
+		t.Fatalf("replay: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, parent)
+	if state.Children[0].PointsBalance != mia.PointsBalance+30 || len(state.Ledger) != ledgerCount {
+		t.Fatalf("replayed award credited twice: balance=%d ledger=%d", state.Children[0].PointsBalance, len(state.Ledger))
+	}
+	// A deduction only moves points_balance; experience never decreases.
+	w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", map[string]any{"amount": -20}, parent, "award-points-2")
+	if w.Code != 200 {
+		t.Fatalf("deduct: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, parent)
+	deducted := state.Children[0]
+	if deducted.PointsBalance != mia.PointsBalance+10 || deducted.Experience != awarded.Experience {
+		t.Fatalf("deduct: balance=%d experience=%v", deducted.PointsBalance, deducted.Experience)
+	}
+	// Ledger rows are ordered by created_at, which is not a reliable second-order
+	// key, so match on the description rather than on the last element.
+	var spent Ledger
+	for _, v := range state.Ledger {
+		if v.Description == "家长扣除" {
+			spent = v
+		}
+	}
+	if spent.Amount != -20 || spent.Type != "spent" || spent.ReferenceType != "manual" {
+		t.Fatalf("unexpected deduction entry %+v", spent)
+	}
+	// More than the child owns is refused instead of driving the CHECK negative.
+	w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", map[string]any{"amount": -maxPointsAdjustment}, parent, "award-points-3")
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "insufficient_balance") {
+		t.Fatalf("overdraw: %d %s", w.Code, w.Body.String())
+	}
+	for _, bad := range []int{0, maxPointsAdjustment + 1, -maxPointsAdjustment - 1} {
+		if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", map[string]any{"amount": bad}, parent, "bad-amount"); w.Code != 400 {
+			t.Fatalf("amount %d: %d %s", bad, w.Code, w.Body.String())
+		}
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", map[string]any{"amount": 5, "note": strings.Repeat("长", 31)}, parent, "bad-note"); w.Code != 400 {
+		t.Fatalf("long note: %d %s", w.Code, w.Body.String())
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, parent, ""); w.Code != 400 || !strings.Contains(w.Body.String(), "idempotency_required") {
+		t.Fatalf("missing key: %d %s", w.Code, w.Body.String())
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/children/child_missing/points", body, parent, "award-missing"); w.Code != 404 {
+		t.Fatalf("unknown child: %d %s", w.Code, w.Body.String())
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, childCookie(t, h, mia.ID), "award-child"); w.Code != 403 {
+		t.Fatalf("child actor: %d %s", w.Code, w.Body.String())
+	}
+	// A parent of another family cannot reach this child even with its id.
+	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "2468"}); err != nil {
+		t.Fatal(err)
+	}
+	var otherFamily string
+	if err := s.db.QueryRow(`SELECT id FROM families WHERE code='OTHER'`).Scan(&otherFamily); err != nil {
+		t.Fatal(err)
+	}
+	other := sessionFor(t, s, otherFamily, "parent", "par-other", "")
+	if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, other, "award-other"); w.Code != 404 {
+		t.Fatalf("cross family award: %d %s", w.Code, w.Body.String())
 	}
 }
