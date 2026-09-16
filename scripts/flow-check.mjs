@@ -7,14 +7,17 @@ await mkdir(".artifacts/ui", { recursive: true });
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
 const errors = [];
-page.on("console", (message) => {
-  if (
-    message.type() === "error" &&
-    !message.text().includes("401 (Unauthorized)")
-  )
-    errors.push(message.text());
-});
-page.on("pageerror", (error) => errors.push(error.message));
+function collectErrors(target) {
+  target.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      !message.text().includes("401 (Unauthorized)")
+    )
+      errors.push(message.text());
+  });
+  target.on("pageerror", (error) => errors.push(error.message));
+}
+collectErrors(page);
 
 async function openChildEnd() {
   // The child end is the default view: no login screen, no credential.
@@ -254,6 +257,49 @@ await waitForState((s) => s.children.some((c) => c.name === "安安"));
 await page.getByRole("button", { name: "删除安安" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
 await waitForState((s) => !s.children.some((c) => c.name === "安安"));
+// Both harnesses run on 127.0.0.1, a secure context where crypto.randomUUID
+// always exists, so nothing above reaches the idempotency-key fallback in
+// src/store.ts that plain-HTTP LAN deployments depend on: there the browser
+// reports isSecureContext false and randomUUID is undefined, which used to
+// abort every submit/review/redeem with a TypeError before fetch was called.
+// Deleting the method restores that shape deterministically, and the key must
+// still reach the server, so this cannot silently regress again.
+const degraded = await browser.newPage({
+  viewport: { width: 390, height: 844 },
+});
+collectErrors(degraded);
+await degraded.addInitScript(() => {
+  delete Crypto.prototype.randomUUID;
+});
+await degraded.goto(baseUrl);
+await degraded.locator(".bottom-nav").waitFor();
+assert.equal(
+  await degraded.evaluate(() => typeof crypto.randomUUID),
+  "undefined",
+);
+await degraded.locator(".profile-button").click();
+await degraded
+  .locator(".role-menu")
+  .getByRole("button", { name: /乐乐/ })
+  .click();
+const degradedCard = degraded
+  .locator(".task-card")
+  .filter({ has: degraded.getByRole("button", { name: "完成任务" }) })
+  .first();
+await degradedCard.waitFor();
+await degradedCard.getByRole("button", { name: "完成任务" }).click();
+const degradedSubmit = degraded.waitForResponse((response) =>
+  response.url().includes("/submit"),
+);
+await degradedCard.getByRole("button", { name: "提交给家长确认" }).click();
+const submitted = await degradedSubmit;
+assert.equal(submitted.status(), 200);
+assert.match(
+  submitted.request().headers()["idempotency-key"],
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+);
+await degraded.close();
+
 assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({

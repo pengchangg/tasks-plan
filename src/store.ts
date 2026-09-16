@@ -58,6 +58,22 @@ function describe(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+// crypto.randomUUID is exposed only in a secure context, and the app is also
+// served over plain HTTP on a LAN address, where the browser reports
+// isSecureContext false and the method is undefined. getRandomValues is not
+// gated that way, so build the (v4) UUID from it rather than letting every
+// idempotent write throw before it reaches fetch.
+function idempotencyKey() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const json = (
   method: string,
   value?: unknown,
@@ -65,7 +81,7 @@ const json = (
 ): RequestInit => ({
   method,
   body: value === undefined ? undefined : JSON.stringify(value),
-  headers: idempotent ? { "Idempotency-Key": crypto.randomUUID() } : undefined,
+  headers: idempotent ? { "Idempotency-Key": idempotencyKey() } : undefined,
 });
 
 async function send(path: string, init?: RequestInit) {
@@ -213,7 +229,7 @@ export function useAppStore() {
         return request(`/tasks/${taskId}/submit`, {
           method: "POST",
           body,
-          headers: { "Idempotency-Key": crypto.randomUUID() },
+          headers: { "Idempotency-Key": idempotencyKey() },
         });
       }),
     reviewTask: (taskId: string, approved: boolean, note = "") =>
