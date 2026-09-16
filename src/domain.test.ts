@@ -134,9 +134,15 @@ describe("child profile management", () => {
 
   it("cascades owned data on deletion and preserves the last child", () => {
     const state = freshState();
-    const deleted = deleteChild(state, "mia");
+    const added = saveChild(
+      state,
+      { name: "小安", avatar: "🌈", color: "#67a9dc" },
+      undefined,
+      fixedClock(),
+    );
+    const deleted = deleteChild(added, "mia");
 
-    expect(deleted.activeChildId).toBe("leo");
+    expect(deleted.activeChildId).toBe("child-1");
     expect(deleted.tasks.every((item) => item.childId !== "mia")).toBe(true);
     expect(deleted.submissions.every((item) => item.childId !== "mia")).toBe(
       true,
@@ -145,7 +151,7 @@ describe("child profile management", () => {
     expect(deleted.redemptions.every((item) => item.childId !== "mia")).toBe(
       true,
     );
-    expect(deleteChild(deleted, "leo")).toBe(deleted);
+    expect(deleteChild(deleted, "child-1")).toBe(deleted);
   });
 });
 

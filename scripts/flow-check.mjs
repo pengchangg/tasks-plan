@@ -85,11 +85,23 @@ async function enterParent(
     .click();
   await unlockParent(checkError, /\/parent$/, password, rejected);
 }
+// Shell 的「孩子端」按钮先 navigate 再 POST /auth/child（src/App.tsx 的 goRole），
+// 所以孩子端界面带着上一个会话的 cookie 就渲染出来了。切换后任何一次服务端读取都
+// 必须等它真正落到服务端，否则会拿着刚被删掉的家长会话读到 401。
+async function enterChild() {
+  await page.locator(".profile-button").click();
+  await page
+    .locator(".role-menu")
+    .getByRole("button", { name: /孩子端/ })
+    .click();
+  await waitForState((s) => s.role === "child");
+}
 
 await page.goto(`${baseUrl}/child/tasks`, { waitUntil: "networkidle" });
 await openChildEnd();
 await page.getByText("整理自己的书桌").waitFor();
 let state = await getState();
+assert.equal(state.children.length, 1);
 const initialBalance = state.children.find(
   (c) => c.name === "米娅",
 ).pointsBalance;
@@ -198,11 +210,7 @@ await page.getByRole("button", { name: "删除周末公园探险" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
 await waitForState((s) => !s.wishes.some((w) => w.title === "周末公园探险"));
 
-await page.locator(".profile-button").click();
-await page
-  .locator(".role-menu")
-  .getByRole("button", { name: /孩子端/ })
-  .click();
+await enterChild();
 await page.getByText("+20 积分到账！").waitFor();
 await page.getByRole("link", { name: "愿望", exact: true }).click();
 state = await getState();
@@ -261,11 +269,7 @@ await readingTask.getByRole("button", { name: "退回" }).click();
 await waitForState(
   (s) => s.tasks.find((t) => t.title === "阅读 20 分钟")?.status === "rejected",
 );
-await page.locator(".profile-button").click();
-await page
-  .locator(".role-menu")
-  .getByRole("button", { name: /孩子端/ })
-  .click();
+await enterChild();
 await page.getByRole("link", { name: "愿望", exact: true }).click();
 const reopenRow = page.locator(".star-row").filter({ hasText: "选择一次晚餐" });
 await reopenRow.getByRole("button", { name: "撤销完成" }).click();
@@ -288,8 +292,6 @@ await waitForState(
     ).length === 2,
 );
 
-await switchChild("乐乐");
-await page.getByText("收拾玩具箱").waitFor();
 await enterParent();
 await page.getByRole("link", { name: "孩子管理" }).click();
 await page.getByRole("button", { name: "新增孩子" }).click();
@@ -300,6 +302,15 @@ await page.getByRole("button", { name: "编辑小安" }).click();
 await page.getByLabel("孩子姓名").fill("安安");
 await page.getByRole("button", { name: "保存修改" }).click();
 await waitForState((s) => s.children.some((c) => c.name === "安安"));
+// 演示数据只有一个孩子，切换孩子的覆盖靠家长刚建的这个孩子：孩子端在两个
+// 档案之间各切一次（每次都是 PATCH /session/child，两次目标不同，至少一次
+// 必然是真切换）。
+await enterChild();
+await page.locator(".bottom-nav").waitFor();
+await switchChild("米娅");
+await switchChild("安安");
+await enterParent();
+await page.getByRole("link", { name: "孩子管理" }).click();
 await page.getByRole("button", { name: "删除安安" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
 await waitForState((s) => !s.children.some((c) => c.name === "安安"));
@@ -346,11 +357,7 @@ assert.equal(
 );
 assert.notEqual(weeklyTask.dueDate, familyToday.date);
 
-await page.locator(".profile-button").click();
-await page
-  .locator(".role-menu")
-  .getByRole("button", { name: /孩子端/ })
-  .click();
+await enterChild();
 await switchChild("米娅");
 await page.getByRole("link", { name: "成长", exact: true }).click();
 const dayPanel = page.locator(".day-panel");
@@ -430,11 +437,7 @@ const weeklyPoints = approved.tasks.find(
   (t) => t.title === "每周整理书架",
 ).points;
 
-await page.locator(".profile-button").click();
-await page
-  .locator(".role-menu")
-  .getByRole("button", { name: /孩子端/ })
-  .click();
+await enterChild();
 const celebration = page.locator(".reward-celebration");
 await celebration.getByText("完成「阅读 20 分钟」").waitFor();
 assert.equal(
@@ -484,13 +487,21 @@ await passwordModal.getByRole("button", { name: "保存新密码" }).click();
 await page.getByText("家长密码已更新").waitFor();
 await page.locator(".form-modal").waitFor({ state: "detached" });
 
-await page.locator(".profile-button").click();
-await page
-  .locator(".role-menu")
-  .getByRole("button", { name: /孩子端/ })
-  .click();
+await enterChild();
 await page.locator(".bottom-nav").waitFor();
 await enterParent(true, "1357", "2468");
+// 到这里米娅今天已经没有可提交的任务了，而退化页必须真的提交一次才能证明
+// idempotencyKey 的 UUID 兜底：家长补一条今天的任务给它。
+await page.getByRole("link", { name: "任务管理" }).click();
+await page.getByRole("button", { name: "新建任务" }).click();
+await page.getByLabel("任务名称").fill("倒垃圾");
+await page.getByLabel("重复方式").selectOption("daily");
+await page.getByRole("button", { name: "发布任务" }).click();
+state = await waitForState((s) => s.tasks.some((t) => t.title === "倒垃圾"));
+assert.equal(
+  state.tasks.find((t) => t.title === "倒垃圾").childId,
+  state.children.find((c) => c.name === "米娅").id,
+);
 // Both harnesses run on 127.0.0.1, a secure context where crypto.randomUUID
 // always exists, so nothing above reaches the idempotency-key fallback in
 // src/store.ts that plain-HTTP LAN deployments depend on: there the browser
@@ -511,15 +522,9 @@ assert.equal(
   await degraded.evaluate(() => typeof crypto.randomUUID),
   "undefined",
 );
-await degraded.locator(".profile-button").click();
-await degraded
-  .locator(".role-menu")
-  .getByRole("button", { name: /乐乐/ })
-  .click();
 const degradedCard = degraded
   .locator(".task-card")
-  .filter({ has: degraded.getByRole("button", { name: "完成任务" }) })
-  .first();
+  .filter({ hasText: "倒垃圾" });
 await degradedCard.waitFor();
 await degradedCard.getByRole("button", { name: "完成任务" }).click();
 const degradedSubmit = degraded.waitForResponse((response) =>

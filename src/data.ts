@@ -20,16 +20,6 @@ export const seedState: AppState = {
       pointsBalance: 185,
       streakDays: 6,
     },
-    {
-      id: "leo",
-      name: "乐乐",
-      avatar: "🚀",
-      color: "#55b8a4",
-      level: 2,
-      experience: 38,
-      pointsBalance: 80,
-      streakDays: 2,
-    },
   ],
   tasks: [
     {
@@ -79,18 +69,6 @@ export const seedState: AppState = {
       dueDate: today,
       status: "completed",
       createdAt: daysAgo(8),
-    },
-    {
-      id: "t5",
-      childId: "leo",
-      title: "收拾玩具箱",
-      description: "把玩具放回对应的位置。",
-      category: "生活自理",
-      points: 20,
-      repeatRule: "daily",
-      dueDate: today,
-      status: "todo",
-      createdAt: daysAgo(2),
     },
   ],
   submissions: [

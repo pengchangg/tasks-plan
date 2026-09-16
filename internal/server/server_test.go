@@ -134,7 +134,9 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{DBPath: filepath.Join(dir, "restart.db"), MediaDir: filepath.Join(dir, "media")}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	legacy, err := sql.Open("sqlite", cfg.DBPath)
+	// A database an earlier boot already created: 001_init.sql is re-executed
+	// on every Open, so re-running it must leave an existing store alone.
+	earlier, err := sql.Open("sqlite", cfg.DBPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,18 +144,16 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = legacy.Exec(string(migration)); err == nil {
-		_, err = legacy.Exec(`INSERT INTO families(id,code,name,timezone,created_at) VALUES('family-legacy','LEGACY','Legacy','Asia/Shanghai','2025-01-01T00:00:00Z')`)
-	}
-	if err == nil {
-		// A pre-004 database: children still carry pin_hash, which the pending
-		// migration has to drop.
-		_, err = legacy.Exec(`INSERT INTO children(id,family_id,name,avatar,color,pin_hash,level,experience,created_at) VALUES('child-legacy','family-legacy','Legacy child','x','#000','hash',4,72,'2025-01-01T00:00:00Z')`)
-	}
-	if err != nil {
+	if _, err = earlier.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
-	if err = legacy.Close(); err != nil {
+	if _, err = earlier.Exec(`INSERT INTO families(id,code,name,timezone,created_at) VALUES('family-legacy','LEGACY','Legacy','Asia/Shanghai','2025-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = earlier.Exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,created_at) VALUES('child-legacy','family-legacy','Legacy child','x','#000',4,372,'2025-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err = earlier.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -161,12 +161,33 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The schema of record is one file now, so assert the columns the merged
+	// statements must carry instead of replaying the old ALTER chain.
+	for _, probe := range []struct {
+		table, column string
+		want          int
+	}{
+		{"children", "pin_hash", 0},
+		{"task_templates", "repeat_weekday", 1},
+		{"task_instances", "repeat_weekday", 1},
+		{"redemptions", "completed_at", 1},
+		{"redemptions", "completed_note", 1},
+		{"attachments", "redemption_id", 1},
+	} {
+		var found int
+		if err = s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('`+probe.table+`') WHERE name=?`, probe.column).Scan(&found); err != nil {
+			t.Fatal(err)
+		}
+		if found != probe.want {
+			t.Fatalf("column %s.%s present=%d, want %d", probe.table, probe.column, found, probe.want)
+		}
+	}
 	var before int
 	if err = s.db.QueryRow(`SELECT experience FROM children WHERE id='child-legacy'`).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
 	if before != 372 {
-		t.Fatalf("migrated experience=%d, want 372", before)
+		t.Fatalf("experience=%d, want 372", before)
 	}
 	if err = s.Close(); err != nil {
 		t.Fatal(err)
@@ -414,15 +435,10 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 	h := s.Handler()
 	parent := parentCookie(t, h)
 	state := getStateTest(t, h, parent)
-	var mia, leo Child
-	for _, c := range state.Children {
-		switch c.Name {
-		case "米娅":
-			mia = c
-		case "乐乐":
-			leo = c
-		}
+	if len(state.Children) != 1 {
+		t.Fatalf("seeded children=%d, want 1", len(state.Children))
 	}
+	mia := state.Children[0]
 	var affordable Wish
 	for _, v := range state.Wishes {
 		if v.PointsCost <= mia.PointsBalance {
@@ -430,11 +446,24 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 			break
 		}
 	}
-	if mia.ID == "" || leo.ID == "" || affordable.ID == "" {
-		t.Fatal("missing demo child or affordable wish")
+	if affordable.ID == "" {
+		t.Fatal("missing affordable wish")
 	}
+	// The demo family seeds a single child, so the "another child" checks below
+	// create the second profile through the parent API.
+	w := doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "乐乐", "avatar": "🚀", "color": "#55b8a4"}, parent, "")
+	if w.Code != 200 {
+		t.Fatalf("create second child: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	leo := childCookie(t, h, created.ID)
 	child := childCookie(t, h, mia.ID)
-	w := doJSON(t, h, "POST", "/api/v1/wishes/"+affordable.ID+"/redeem", map[string]any{}, child, "complete-redeem")
+	w = doJSON(t, h, "POST", "/api/v1/wishes/"+affordable.ID+"/redeem", map[string]any{}, child, "complete-redeem")
 	if w.Code != 200 {
 		t.Fatalf("redeem: %d %s", w.Code, w.Body.String())
 	}
@@ -461,7 +490,7 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 	if w = complete(rid, parent, done, nil); w.Code != 403 {
 		t.Fatalf("parent completion: %d %s", w.Code, w.Body.String())
 	}
-	if w = complete(rid, childCookie(t, h, leo.ID), done, nil); w.Code != 404 {
+	if w = complete(rid, leo, done, nil); w.Code != 404 {
 		t.Fatalf("other child completion: %d %s", w.Code, w.Body.String())
 	}
 	if w = complete("red_missing", child, done, nil); w.Code != 404 {
@@ -488,7 +517,7 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 	if served.Code != 200 || served.Body.String() != string(png) || !strings.Contains(served.Header().Get("Content-Type"), "png") {
 		t.Fatalf("evidence media: %d %q %q", served.Code, served.Header().Get("Content-Type"), served.Body.String())
 	}
-	if other := getStateTest(t, h, childCookie(t, h, leo.ID)); len(other.Redemptions) != 0 {
+	if other := getStateTest(t, h, leo); len(other.Redemptions) != 0 {
 		t.Fatalf("other child sees %d redemptions", len(other.Redemptions))
 	}
 	if w = complete(rid, child, map[string]string{"completed": "false"}, nil); w.Code != 204 {
@@ -520,17 +549,28 @@ func TestFamilyIsolationAndLastChildProtection(t *testing.T) {
 	h := s.Handler()
 	cookie := parentCookie(t, h)
 	state := getStateTest(t, h, cookie)
-	if len(state.Children) != 2 {
-		t.Fatalf("children=%d", len(state.Children))
+	if len(state.Children) != 1 {
+		t.Fatalf("seeded children=%d, want 1", len(state.Children))
 	}
-	for len(state.Children) > 1 {
-		w := doJSON(t, h, "DELETE", "/api/v1/children/"+state.Children[len(state.Children)-1].ID, nil, cookie, "")
-		if w.Code != 204 {
+	seeded := state.Children[0].ID
+	w := doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "Second", "avatar": "⭐", "color": "#ffb547"}, cookie, "")
+	if w.Code != 200 {
+		t.Fatalf("create second child: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, cookie)
+	if len(state.Children) != 2 {
+		t.Fatalf("children=%d, want 2", len(state.Children))
+	}
+	for _, c := range state.Children {
+		if c.ID == seeded {
+			continue
+		}
+		if w = doJSON(t, h, "DELETE", "/api/v1/children/"+c.ID, nil, cookie, ""); w.Code != 204 {
 			t.Fatalf("delete: %d %s", w.Code, w.Body.String())
 		}
-		state = getStateTest(t, h, cookie)
 	}
-	w := doJSON(t, h, "DELETE", "/api/v1/children/"+state.Children[0].ID, nil, cookie, "")
+	state = getStateTest(t, h, cookie)
+	w = doJSON(t, h, "DELETE", "/api/v1/children/"+seeded, nil, cookie, "")
 	if w.Code != 409 {
 		t.Fatalf("last child status=%d", w.Code)
 	}
@@ -667,7 +707,7 @@ func TestChildEndIsTheDefaultAndThePasswordGatesTheManagementApi(t *testing.T) {
 		t.Fatalf("child end: %d %s", w.Code, w.Body.String())
 	}
 	child := w.Result().Cookies()[0]
-	if state := getStateTest(t, h, child); state.Role != "child" || len(state.Children) != 2 {
+	if state := getStateTest(t, h, child); state.Role != "child" || len(state.Children) != 1 {
 		t.Fatalf("child state: role=%s children=%d", state.Role, len(state.Children))
 	}
 	if w = doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "小安", "avatar": "⭐", "color": "#ffb547"}, child, ""); w.Code != 403 {

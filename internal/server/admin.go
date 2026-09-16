@@ -85,15 +85,11 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 	if err != nil {
 		return err
 	}
-	leo, err := upsertChild("乐乐", "🚀", "#55b8a4", 2, 138, 80)
-	if err != nil {
-		return err
-	}
 	type td struct {
 		child, title, desc, cat, rule, status string
 		points                                int
 	}
-	tasks := []td{{mia, "整理自己的书桌", "把书本分类放回书架，擦干净桌面。", "生活自理", "daily", "todo", 20}, {mia, "阅读 20 分钟", "选择一本喜欢的书，安静阅读 20 分钟。", "学习成长", "daily", "pending_review", 30}, {mia, "给植物浇水", "观察植物的土壤，适量浇水并收好水壶。", "家庭责任", "daily", "completed", 15}, {mia, "帮忙摆放餐具", "晚餐前帮家人准备好餐具。", "家庭责任", "once", "completed", 15}, {leo, "收拾玩具箱", "把玩具放回对应的位置。", "生活自理", "daily", "todo", 20}}
+	tasks := []td{{mia, "整理自己的书桌", "把书本分类放回书架，擦干净桌面。", "生活自理", "daily", "todo", 20}, {mia, "阅读 20 分钟", "选择一本喜欢的书，安静阅读 20 分钟。", "学习成长", "daily", "pending_review", 30}, {mia, "给植物浇水", "观察植物的土壤，适量浇水并收好水壶。", "家庭责任", "daily", "completed", 15}, {mia, "帮忙摆放餐具", "晚餐前帮家人准备好餐具。", "家庭责任", "once", "completed", 15}}
 	for _, v := range tasks {
 		var exists int
 		if tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM task_templates WHERE family_id=? AND child_id=? AND title=?`, family, v.child, v.title).Scan(&exists); exists > 0 {
