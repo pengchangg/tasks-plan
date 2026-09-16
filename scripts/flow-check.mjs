@@ -55,26 +55,35 @@ async function waitForState(predicate) {
   }
   throw new Error("Timed out waiting for server state");
 }
-async function unlockParent(checkError = false, url = /\/parent$/) {
+async function unlockParent(
+  checkError = false,
+  url = /\/parent$/,
+  password = "2468",
+  rejected = "0000",
+) {
   const modal = page.locator(".pin-modal");
   await modal.waitFor();
   const input = modal.getByLabel("家长密码");
   if (checkError) {
-    await input.fill("wrong-password");
+    await input.fill(rejected);
     await modal.getByRole("button", { name: "验证并进入" }).click();
     await modal.getByText("密码不正确，请重新输入").waitFor();
   }
-  await input.fill("growjoy2468");
+  await input.fill(password);
   await modal.getByRole("button", { name: "验证并进入" }).click();
   await page.waitForURL(url);
 }
-async function enterParent(checkError = false) {
+async function enterParent(
+  checkError = false,
+  password = "2468",
+  rejected = "0000",
+) {
   await page.locator(".profile-button").click();
   await page
     .locator(".role-menu")
     .getByRole("button", { name: /家长端/ })
     .click();
-  await unlockParent(checkError);
+  await unlockParent(checkError, /\/parent$/, password, rejected);
 }
 
 await page.goto(`${baseUrl}/child/tasks`, { waitUntil: "networkidle" });
@@ -449,6 +458,39 @@ await page
   .getByRole("button", { name: "关闭积分到账提示" })
   .click();
 await page.locator(".reward-celebration").waitFor({ state: "detached" });
+// 家长端可以修改家长密码：先要当前密码，改完旧密码立即失效、新密码才能进入。
+await enterParent();
+await page.locator(".profile-button").click();
+await page
+  .locator(".role-menu")
+  .getByRole("button", { name: /修改家长密码/ })
+  .click();
+const passwordModal = page.locator(".form-modal");
+await passwordModal.getByLabel("当前密码").fill("2468");
+await passwordModal.getByLabel("新密码", { exact: true }).fill("1357");
+await passwordModal.getByLabel("确认新密码").fill("1358");
+await passwordModal.getByRole("button", { name: "保存新密码" }).click();
+// 两遍新密码不一致：前端拦截，不发请求，弹窗不关。
+await passwordModal.getByText("两次输入的新密码不一致").waitFor();
+await passwordModal.getByLabel("确认新密码").fill("1357");
+await passwordModal.getByLabel("当前密码").fill("0000");
+await passwordModal.getByRole("button", { name: "保存新密码" }).click();
+await passwordModal.getByText("当前密码不正确，请重新输入").waitFor();
+assert.equal(await passwordModal.getByLabel("当前密码").inputValue(), "");
+// 401 不能被 src/store.ts 的「重开孩子端并重放」吃掉：家长端必须还在。
+await page.locator(".parent-layout").waitFor();
+await passwordModal.getByLabel("当前密码").fill("2468");
+await passwordModal.getByRole("button", { name: "保存新密码" }).click();
+await page.getByText("家长密码已更新").waitFor();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+
+await page.locator(".profile-button").click();
+await page
+  .locator(".role-menu")
+  .getByRole("button", { name: /孩子端/ })
+  .click();
+await page.locator(".bottom-nav").waitFor();
+await enterParent(true, "1357", "2468");
 // Both harnesses run on 127.0.0.1, a secure context where crypto.randomUUID
 // always exists, so nothing above reaches the idempotency-key fallback in
 // src/store.ts that plain-HTTP LAN deployments depend on: there the browser
@@ -499,6 +541,7 @@ console.log(
     approvedBalance: initialBalance + 20,
     rewardFeedback: true,
     rewardPerTask: true,
+    parentPasswordChange: true,
     redeemedBalance: initialBalance - 60,
     persistedAfterReload: true,
     rejectedAndResubmitted: true,

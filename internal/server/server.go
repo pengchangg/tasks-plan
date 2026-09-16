@@ -270,6 +270,10 @@ func (s *Server) Handler() http.Handler {
 			a.Use(s.authenticate)
 			a.Get("/state", s.getState)
 			a.Patch("/session/child", s.selectChild)
+			// 当前密码错误时这条路径回 401，所以它必须留在 /auth/ 前缀下：src/store.ts 的
+			// request() 对非 /auth/ 路径的 401 会先重开孩子端再重放一次，打错一次当前密码就会
+			// 把家长会话降级成孩子会话。
+			a.Post("/auth/parent/password", s.parentOnly(s.changeParentPassword))
 			a.Route("/children", func(c chi.Router) {
 				c.Post("/", s.parentOnly(s.saveChild))
 				c.Put("/{id}", s.parentOnly(s.saveChild))
@@ -422,6 +426,21 @@ func nullString(v string) any {
 		return nil
 	}
 	return v
+}
+
+// validPin reports whether value is exactly four decimal digits: the format
+// every parent credential is set with. Sign-in does not check it, so rows
+// written before this rule keep working.
+func validPin(value string) bool {
+	if len(value) != 4 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 // lookupSession resolves the session cookie without failing the request: the
 // child end is open to the household, so a missing or expired cookie is a
@@ -629,6 +648,68 @@ func (s *Server) selectChild(w http.ResponseWriter, r *http.Request) {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		problem(w, 404, "not_found", "child not found")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+// changeParentPassword replaces the family's parent credential. The password
+// belongs to the family (parentSecrets tries every row), so every parent row
+// is rewritten. Sessions are deliberately left alone.
+func (s *Server) changeParentPassword(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		CurrentPassword string `json:"currentPassword"`
+		NewPassword     string `json:"newPassword"`
+	}
+	if decode(r, &in) != nil {
+		problem(w, 400, "invalid_request", "invalid JSON")
+		return
+	}
+	if !validPin(in.NewPassword) {
+		problem(w, 400, "invalid_request", "new password must be exactly 4 digits")
+		return
+	}
+	family, code, err := s.resolvedFamily(r.Context())
+	if err != nil {
+		s.familyError(w, r, err)
+		return
+	}
+	parents, err := s.parentSecrets(r.Context(), family)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	matched := false
+	for _, candidate := range parents {
+		ok, verr := s.verifyPassword(r.Context(), candidate.hash, in.CurrentPassword)
+		if verr != nil {
+			s.hashFailure(w, r, verr)
+			return
+		}
+		if ok {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		// 与 /auth/parent 共用同一个桶：猜错一次就消耗一次额度，两个入口不会
+		// 变相把攻击者的尝试次数翻倍；正确密码永不消耗，家庭不会被锁在门外。
+		budget := authFailureKey(code, "parent")
+		if !s.authBudgetLeft(budget) {
+			problem(w, 429, "too_many_requests", "too many requests; try again later")
+			return
+		}
+		s.recordAuthFailure(budget)
+		problem(w, 401, "invalid_credentials", "credentials are invalid")
+		return
+	}
+	hash, err := s.hashPassword(r.Context(), in.NewPassword)
+	if err != nil {
+		s.hashFailure(w, r, err)
+		return
+	}
+	if _, err = s.db.ExecContext(r.Context(), `UPDATE parents SET password_hash=? WHERE family_id=?`, hash, family); err != nil {
+		s.internalError(w, r, err)
 		return
 	}
 	w.WriteHeader(204)

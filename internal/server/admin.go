@@ -12,8 +12,8 @@ import (
 type FamilyInput struct{ Code, Name, Timezone, Username, DisplayName, Password string }
 
 func (s *Server) CreateFamily(ctx context.Context, in FamilyInput) error {
-	if in.Code == "" || in.Name == "" || in.Username == "" || len(in.Password) < 8 {
-		return fmt.Errorf("code, name, username and password (minimum 8 characters) are required")
+	if in.Code == "" || in.Name == "" || in.Username == "" || !validPin(in.Password) {
+		return fmt.Errorf("code, name, username and a 4-digit password are required")
 	}
 	if in.Timezone == "" {
 		in.Timezone = "Asia/Shanghai"
@@ -143,7 +143,7 @@ func (s *Server) EnsureDemo(ctx context.Context) error {
 		return err
 	}
 	if n == 0 {
-		if err := s.CreateFamily(ctx, FamilyInput{Code: "DEMO", Name: "演示家庭", Username: "parent", DisplayName: "演示家长", Password: "growjoy2468"}); err != nil {
+		if err := s.CreateFamily(ctx, FamilyInput{Code: "DEMO", Name: "演示家庭", Username: "parent", DisplayName: "演示家长", Password: "2468"}); err != nil {
 			return err
 		}
 	}

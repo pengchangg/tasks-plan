@@ -80,7 +80,7 @@ for (const scenario of scenarios) {
       .getByRole("button", { name: /家长端/ })
       .click();
     const modal = page.locator(".pin-modal");
-    await modal.getByLabel("家长密码").fill("growjoy2468");
+    await modal.getByLabel("家长密码").fill("2468");
     await modal.getByRole("button", { name: "验证并进入" }).click();
     await page.waitForURL(/\/parent$/);
     // Move inside the app: a reload would land back in the child end, which

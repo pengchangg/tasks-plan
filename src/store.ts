@@ -219,6 +219,27 @@ export function useAppStore() {
         return false;
       }
     },
+    changeParentPassword: async (
+      currentPassword: string,
+      newPassword: string,
+    ) => {
+      try {
+        await request(
+          "/auth/parent/password",
+          json("POST", { currentPassword, newPassword }),
+        );
+        setMessage("家长密码已更新");
+        return true;
+      } catch (error) {
+        // 当前密码错误由弹窗自己提示，其余（限流、内部错误）走顶部横幅。
+        if (
+          !(error instanceof RequestError) ||
+          error.code !== "invalid_credentials"
+        )
+          setMessage(describe(error, "无法修改家长密码"));
+        return false;
+      }
+    },
     enterChild: () =>
       void run(() => request("/auth/child", { method: "POST" })),
     setActiveChild: (childId: string) =>

@@ -108,7 +108,7 @@ func admin(args []string) error {
 	name := fs.String("name", "", "family name")
 	user := fs.String("username", "parent", "parent username (recorded only; sign-in uses the password)")
 	display := fs.String("display-name", "家长", "display name")
-	password := fs.String("password", "", "parent password")
+	password := fs.String("password", "", "parent password (exactly 4 digits)")
 	tz := fs.String("timezone", "Asia/Shanghai", "IANA timezone")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err

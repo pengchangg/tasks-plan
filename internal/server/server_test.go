@@ -26,7 +26,7 @@ func testServer(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	if err = s.CreateFamily(context.Background(), FamilyInput{Code: "DEMO", Name: "Demo", Username: "parent", Password: "growjoy2468"}); err != nil {
+	if err = s.CreateFamily(context.Background(), FamilyInput{Code: "DEMO", Name: "Demo", Username: "parent", Password: "2468"}); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.SeedDemo(context.Background(), "DEMO"); err != nil {
@@ -58,7 +58,7 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body any, cookie 
 }
 func parentCookie(t *testing.T, h http.Handler) *http.Cookie {
 	t.Helper()
-	w := doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "growjoy2468"}, nil, "")
+	w := doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "2468"}, nil, "")
 	if w.Code != 200 {
 		t.Fatalf("parent unlock: %d %s", w.Code, w.Body.String())
 	}
@@ -200,7 +200,7 @@ func TestMigrationsAreAppliedExactlyOnceAcrossRestart(t *testing.T) {
 
 func TestRejectsCrossOriginMutation(t *testing.T) {
 	s := testServer(t)
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/parent", bytes.NewBufferString(`{"password":"growjoy2468"}`))
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/parent", bytes.NewBufferString(`{"password":"2468"}`))
 	r.Host = "growjoy.example"
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Origin", "https://evil.example")
@@ -214,7 +214,7 @@ func TestRejectsCrossOriginMutation(t *testing.T) {
 func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {
 	s := testServer(t)
 	s.now = func() time.Time { return time.Date(2025, 1, 6, 0, 30, 0, 0, time.UTC) }
-	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "PACIFIC", Name: "Pacific", Timezone: "America/Los_Angeles", Username: "parent", Password: "anotherpass"}); err != nil {
+	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "PACIFIC", Name: "Pacific", Timezone: "America/Los_Angeles", Username: "parent", Password: "2468"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SeedDemo(context.Background(), "PACIFIC"); err != nil {
@@ -507,7 +507,7 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 
 func TestFamilyIsolationAndLastChildProtection(t *testing.T) {
 	s := testServer(t)
-	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "anotherpass"}); err != nil {
+	if err := s.CreateFamily(context.Background(), FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "2468"}); err != nil {
 		t.Fatal(err)
 	}
 	var otherFamily string
@@ -568,12 +568,94 @@ func TestParentPasswordBudgetThrottlesGuessingWithoutLockingOutTheFamily(t *test
 	}
 	// The correct password is never charged, so guessing cannot lock the
 	// family out of its own parent end.
-	if ok := attempt("growjoy2468"); ok.Code != 200 {
+	if ok := attempt("2468"); ok.Code != 200 {
 		t.Fatalf("correct password blocked by the failure budget: %d %s", ok.Code, ok.Body.String())
 	}
 	// The child end carries no credential and is not part of that budget.
 	if child := doJSON(t, h, "POST", "/api/v1/auth/child", nil, nil, ""); child.Code != 200 {
 		t.Fatalf("child end blocked by the parent budget: %d %s", child.Code, child.Body.String())
+	}
+}
+
+func TestParentPasswordChangeRequiresTheCurrentPasswordAndReplacesTheFamilyCredential(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	change := func(cookie *http.Cookie, current, next string) *httptest.ResponseRecorder {
+		return doJSON(t, h, "POST", "/api/v1/auth/parent/password", map[string]string{"currentPassword": current, "newPassword": next}, cookie, "")
+	}
+	unlock := func(password string) *httptest.ResponseRecorder {
+		return doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": password}, nil, "")
+	}
+	if w := change(nil, "2468", "1357"); w.Code != 401 || !strings.Contains(w.Body.String(), "unauthorized") {
+		t.Fatalf("change without a session: %d %s", w.Code, w.Body.String())
+	}
+	if w := change(childCookie(t, h, ""), "2468", "1357"); w.Code != 403 || !strings.Contains(w.Body.String(), "forbidden") {
+		t.Fatalf("child end changed the parent password: %d %s", w.Code, w.Body.String())
+	}
+	parent := parentCookie(t, h)
+	if w := change(parent, "0000", "1357"); w.Code != 401 || !strings.Contains(w.Body.String(), "invalid_credentials") {
+		t.Fatalf("wrong current password: %d %s", w.Code, w.Body.String())
+	}
+	// The new password is checked before any argon2 comparison, so a malformed
+	// one is refused without spending the failure budget.
+	for _, next := range []string{"123", "12345", "12a4"} {
+		if w := change(parent, "2468", next); w.Code != 400 || !strings.Contains(w.Body.String(), "invalid_request") {
+			t.Fatalf("new password %q: %d %s", next, w.Code, w.Body.String())
+		}
+	}
+	if w := unlock("2468"); w.Code != 200 {
+		t.Fatalf("format rejections locked the family out: %d %s", w.Code, w.Body.String())
+	}
+	if w := change(parent, "2468", "1357"); w.Code != 204 {
+		t.Fatalf("change: %d %s", w.Code, w.Body.String())
+	}
+	if w := unlock("2468"); w.Code != 401 {
+		t.Fatalf("old password still unlocks: %d %s", w.Code, w.Body.String())
+	}
+	if w := unlock("1357"); w.Code != 200 || !strings.Contains(w.Body.String(), `"role":"parent"`) {
+		t.Fatalf("new password refused: %d %s", w.Code, w.Body.String())
+	}
+	ctx := context.Background()
+	var hash string
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM parents WHERE family_id=(SELECT id FROM families WHERE code='DEMO') ORDER BY id LIMIT 1`).Scan(&hash); err != nil {
+		t.Fatal(err)
+	}
+	if hash == "1357" {
+		t.Fatal("the parent password was stored in clear text")
+	}
+	if ok, err := s.verifyPassword(ctx, hash, "1357"); err != nil || !ok {
+		t.Fatalf("stored hash does not verify the new password: ok=%v err=%v", ok, err)
+	}
+	if ok, err := s.verifyPassword(ctx, hash, "2468"); err != nil || ok {
+		t.Fatalf("stored hash still verifies the old password: ok=%v err=%v", ok, err)
+	}
+	// Sessions are deliberately untouched: the parent that changed the password
+	// is not thrown out of the end it is already in.
+	if state := getStateTest(t, h, parent); state.Role != "parent" {
+		t.Fatalf("parent session lost its role: %s", state.Role)
+	}
+	// CreateFamily enforces the same format.
+	if err := s.CreateFamily(ctx, FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "123"}); err == nil {
+		t.Fatal("CreateFamily accepted a 3-digit password")
+	}
+	if err := s.CreateFamily(ctx, FamilyInput{Code: "OTHER", Name: "Other", Username: "parent", Password: "12a4"}); err == nil {
+		t.Fatal("CreateFamily accepted a non-numeric password")
+	}
+	// Sign-in never checks the format, so a credential written before this rule
+	// keeps working: a long-password parent row still unlocks the family.
+	legacy, err := s.hashPassword(ctx, "growjoy2468")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var family string
+	if err = s.db.QueryRowContext(ctx, `SELECT id FROM families WHERE code='DEMO'`).Scan(&family); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.ExecContext(ctx, `INSERT INTO parents(id,family_id,username,display_name,password_hash,created_at) VALUES(?,?,?,?,?,?)`, id("par"), family, "legacy", "Legacy parent", legacy, nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	if w := unlock("growjoy2468"); w.Code != 200 {
+		t.Fatalf("legacy long password refused: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -594,7 +676,7 @@ func TestChildEndIsTheDefaultAndThePasswordGatesTheManagementApi(t *testing.T) {
 	if w = doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "wrong-password"}, child, ""); w.Code != 401 {
 		t.Fatalf("wrong password status=%d", w.Code)
 	}
-	w = doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "growjoy2468"}, child, "")
+	w = doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "2468"}, child, "")
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"role":"parent"`) {
 		t.Fatalf("parent unlock: %d %s", w.Code, w.Body.String())
 	}
@@ -646,7 +728,7 @@ func TestSaturatedHashGateShedsLoad(t *testing.T) {
 	for range argon2Slots {
 		s.hashGate <- struct{}{}
 	}
-	r := httptest.NewRequest("POST", "/api/v1/auth/parent", strings.NewReader(`{"password":"growjoy2468"}`))
+	r := httptest.NewRequest("POST", "/api/v1/auth/parent", strings.NewReader(`{"password":"2468"}`))
 	r.Header.Set("Content-Type", "application/json")
 	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Millisecond)
 	defer cancel()

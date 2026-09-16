@@ -77,6 +77,7 @@ function Shell() {
   const navigate = useNavigate();
   const isParent = location.pathname.startsWith("/parent");
   const [showMenu, setShowMenu] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [parentGate, setParentGate] = useState<{ returnTo: string } | null>(
     null,
   );
@@ -246,6 +247,19 @@ function Shell() {
             >
               ☕ 家长端 <span>管理与鼓励</span>
             </button>
+            {isParent && parentUnlocked && (
+              <>
+                <p className="menu-kicker menu-divider">家长设置</p>
+                <button
+                  onClick={() => {
+                    setShowMenu(false);
+                    setShowPassword(true);
+                  }}
+                >
+                  🔑 修改家长密码 <span>需验证</span>
+                </button>
+              </>
+            )}
           </div>
         )}
       </header>
@@ -253,6 +267,16 @@ function Shell() {
         <ParentPinModal
           onClose={() => setParentGate(null)}
           onConfirm={unlockParent}
+        />
+      )}
+      {isParent && parentUnlocked && showPassword && (
+        <ParentPasswordModal
+          onClose={() => setShowPassword(false)}
+          onChange={async (current, next) => {
+            const ok = await store.actions.changeParentPassword(current, next);
+            if (ok) setShowPassword(false);
+            return ok;
+          }}
         />
       )}
       {store.message && (
@@ -322,6 +346,7 @@ function ParentPinModal({
           id="parent-pin"
           autoFocus
           type="password"
+          inputMode="numeric"
           autoComplete="current-password"
           value={pin}
           onChange={(event) => {
@@ -333,13 +358,109 @@ function ParentPinModal({
         {error && (
           <small className="pin-error-text">密码不正确，请重新输入</small>
         )}
-        <small className="pin-hint">演示密码：growjoy2468</small>
+        <small className="pin-hint">演示密码：2468</small>
         <button
           className="wide-primary"
           type="submit"
-          disabled={pin.length < 8}
+          disabled={pin.length < 4}
         >
           验证并进入
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function ParentPasswordModal({
+  onClose,
+  onChange,
+}: {
+  onClose: () => void;
+  onChange: (current: string, next: string) => Promise<boolean>;
+}) {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [repeat, setRepeat] = useState("");
+  const [error, setError] = useState("");
+  return (
+    <div className="modal-backdrop">
+      <form
+        className="form-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="parent-password-title"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          if (next !== repeat) {
+            setError("两次输入的新密码不一致");
+            return;
+          }
+          if (!(await onChange(current, next))) {
+            setError("当前密码不正确，请重新输入");
+            setCurrent("");
+          }
+        }}
+      >
+        <div className="form-heading">
+          <div>
+            <span className="eyebrow">PARENT PASSWORD</span>
+            <h2 id="parent-password-title">修改家长密码</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="关闭修改密码">
+            <X size={18} />
+          </button>
+        </div>
+        <label>
+          当前密码
+          <input
+            autoFocus
+            type="password"
+            autoComplete="current-password"
+            value={current}
+            onChange={(event) => {
+              setCurrent(event.target.value);
+              setError("");
+            }}
+          />
+        </label>
+        <label>
+          新密码
+          <input
+            type="password"
+            inputMode="numeric"
+            maxLength={4}
+            autoComplete="new-password"
+            value={next}
+            onChange={(event) => {
+              setNext(event.target.value.replace(/\D/g, ""));
+              setError("");
+            }}
+          />
+        </label>
+        <label>
+          确认新密码
+          <input
+            type="password"
+            inputMode="numeric"
+            maxLength={4}
+            autoComplete="new-password"
+            value={repeat}
+            onChange={(event) => {
+              setRepeat(event.target.value.replace(/\D/g, ""));
+              setError("");
+            }}
+          />
+        </label>
+        <small className="pin-hint">新密码为 4 位数字，例如 1357</small>
+        {error && <small className="pin-error-text">{error}</small>}
+        <button
+          className="wide-primary"
+          type="submit"
+          disabled={
+            current.length < 4 || next.length !== 4 || repeat.length !== 4
+          }
+        >
+          保存新密码
         </button>
       </form>
     </div>
