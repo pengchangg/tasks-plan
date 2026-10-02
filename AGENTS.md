@@ -146,7 +146,7 @@ Demo credentials (`serve --demo`): family `DEMO`, parent password `2468`. The ch
 |`src/domain.ts`, `src/types.ts`, `src/data.ts`|The day helpers `Growth` renders from plus `shiftDate` (the stats range dates), wire types + write-input types (`StatsPayload` included), demo seed (the store's first-paint placeholder).|
 |`scripts/with-service.mjs`|Builds the binary, allocates a free port, boots `serve --demo` with temp DB/media + the repo's real `dist/`, polls `/health/ready`, exports `BASE_URL`, then SIGTERMs and deletes the temp dir. It does NOT build the frontend.|
 |`scripts/flow-check.mjs` / `scripts/visual-check.mjs`|Behavioral E2E and visual/overflow gates; both depend on demo data, Chinese accessible names, and CSS class hooks.|
-|`DEPLOY.md`|The deployment manual: runtime shape (single process/replica), host requirements, first-deploy steps (dirs, `admin create-family`, the systemd **user** unit with `GROWJOY_ADDR=0.0.0.0:<port>` + `GROWJOY_SECURE_COOKIES=false`), `make deploy`, the env/CLI surface, plain-HTTP vs reverse-proxy rules, health/log commands, backup/restore, and a troubleshooting table. `README.md` only links to it.|
+|`DEPLOY.md`|The deployment manual: runtime shape (single process/replica), host requirements, first-deploy steps (dirs, `admin create-family`, the systemd **user** unit with `GROWJOY_ADDR=0.0.0.0:<port>` + `GROWJOY_SECURE_COOKIES=false`), `make deploy`, the env/CLI surface, plain-HTTP vs reverse-proxy rules, the Caddy `growjoy.homelab.com` entry, the Caddy Basic-Auth gate in front of the public tunnel and the Cloudflare tunnel runbook, health/log commands, backup/restore, and a troubleshooting table. `README.md` only links to it.|
 
 ## Runtime/Tooling Preferences
 

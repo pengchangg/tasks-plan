@@ -211,12 +211,207 @@ CLI：
 - 该场景下把 `GROWJOY_SECURE_COOKIES=true`。
 - `403 cross_site_request` 来自 `Sec-Fetch-Site: cross-site`，同样说明代理或前端域名配错了。
 
+## 反向代理与公网入口
+
+应用只认一条规则：**浏览器发出的 `Origin` 必须与请求的 `Host` 同源**（见上一节）。因此任何前置（Caddy、Cloudflare 隧道、nginx）只要做到「保留浏览器 Host」即可，不需要 CORS、CSRF token 或任何改写。
+
+### 内网 HTTPS：Caddy（已在 rocky.home 落地）
+
+该主机已有 Caddy 在 `:80/:443` 用 `*.homelab.com` 通配 + `tls internal` 为十几个服务终止 TLS，GrowJoy 按同一约定接入：
+
+```caddyfile
+https://growjoy.homelab.com {
+	tls internal
+	reverse_proxy 127.0.0.1:9080 {
+		header_up Host {host}
+	}
+}
+```
+
+- `*.homelab.com` 已由内网 DNS 解析到 `192.168.0.208`，**不需要新增 DNS 记录**；通配证书已覆盖该名字，不会触发新签发。
+- `header_up Host {host}` 必需：代理改写 Host 会让所有写请求 `403 origin_mismatch`。
+- 与 `https://*.homelab.com` 那条静态托管块共存是安全的——Caddy 按匹配特异性排序，具体主机名优先于通配（`auth`/`page`/`fnos`/`pass` 等既有条目都是这个模式）。
+- 改动步骤：`sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%Y%m%d-%H%M%S)-before-<说明>` → 追加块 → `sudo caddy validate --config /etc/caddy/Caddyfile` → `sudo systemctl reload caddy`（graceful，不断开其它站点连接）。
+
+验证（`--resolve` 绕过 DNS，直接打本机 Caddy）：
+
+```bash
+H=growjoy.homelab.com
+curl -sS -k --resolve $H:443:127.0.0.1 "https://$H/health/live"
+curl -sS -k --resolve $H:443:127.0.0.1 -X POST "https://$H/api/v1/auth/child" -H "Origin: https://$H"   -w ' [%{http_code}]\n'  # 期望 200
+curl -sS -k --resolve $H:443:127.0.0.1 -X POST "https://$H/api/v1/auth/child" -H "Origin: https://evil.example" -w ' [%{http_code}]\n'  # 期望 403 origin_mismatch
+```
+
+第二条是正控（Host 保真），第三条是负控（CSRF 机制未失效）。浏览器访问需要客户端信任 Caddy 的内部 CA，在 macOS 上查：
+
+```bash
+security find-certificate -a -c "Caddy Local Authority" /Library/Keychains/System.keychain | grep -c alis
+```
+
+### 公网入口：Cloudflare 隧道
+
+用 Cloudflare 命名隧道把服务暴露到公网 HTTPS 域名，进程仍留在本机；再叠加 Cloudflare Access 做第一道门。
+
+**当前状态（2026-10-02 已上线）**
+
+|项|内容|
+|---|---|
+|隧道|`growjoy`，UUID `60949464-6946-4f53-99f0-dd99eb63f52e`，凭据 `~/.cloudflared/60949464-…json`（0600）|
+|配置|`~/.cloudflared/growjoy.yml`，`protocol: http2`，`growjoy.moxao.cn → http://127.0.0.1:9081`（**不是** 9080，见下「公网侧密码保护」），兜底 `http_status:404`|
+|服务|`cloudflared-growjoy.service` 已 `enabled` + `active`。启动瞬间会并行尝试 4 条 HA 连接、同一边缘被重复占用时先报 `already connected to this server, trying another …`，因此启动后约 90 秒内有 12 条 WRN/ERR，随后 4 条连接（connIndex 0–3）全部 `Registered tunnel connection` 并**完全静默**（实测此后无任何 WRN/ERR）。2026.9.3 没有 `ha-connections` 旋钮（`tunnel run --help` 与全局 `--help` 都没有），不要去加未验证的配置键|
+|DNS|`growjoy.moxao.cn` CNAME → `60949464-….cfargotunnel.com`（zone `moxao.cn`，zoneID `9f89216ca6167c0afb4b753f2c79bae5`）|
+|实测|无凭据 `/health/live`、`/`、写请求一律 **401 `Www-Authenticate: Basic realm="restricted"`**；带凭据 `/health/live` 200、`/health/ready` 200、`/` 200、资源 200、同源 POST **200**、错误 Origin **403 `origin_mismatch`**；错误口令 401；`http://` → **301 https**。真实浏览器（带 HTTP 凭据）：孩子端渲染 + 家长 `1357` 进 `/parent`，console/page error 全空、无失败请求|
+|出口|`region{1,2}.v2.argotunnel.com:7844` TCP 可达；**QUIC/UDP 不可用，必须 `protocol: http2`**——默认 QUIC 下连接器从未注册、边缘一直回 Cloudflare **1033**（日志 `Failed to dial a quic connection … timeout`，precheck 结论 `suggested_protocol=http2`）|
+|Host|**不要设 `httpHostHeader`**：cloudflared 保留浏览器 Host，这正是 `sameOrigin` 需要的（正控 200 / 负控 403 已实证）|
+|⚠️ Access|**尚未配置**。cert 派生出的 token 只能**读** Access（`GET …/access/apps` 200）不能**写**（`POST` → `403 code 1010`；`/user`、`members`、`access/organizations` 均权限不足），所以这一步只能在 dashboard 做——见下文 |
+
+⚠️ 不要跑 `cloudflared service install`：那会装成 root 系统服务，与用户单元冲突。
+
+### 公网侧密码保护（Caddy Basic Auth）
+
+**先澄清一件事：cloudflared 本身没有密码保护功能。** 全量 `--help`（顶层 / `tunnel` / `tunnel run` / `tunnel ingress` / `access`）里没有任何 auth/basic/password 开关，ingress 只支持 `hostname`/`path`/`service` 三个键；cloudflared 自己的帮助文本就把「保护内网资源、按用户与应用鉴权」指向 **Cloudflare Access**。所以「密码门」只有两条路：
+
+|方案|性质|谁能落地|
+|---|---|---|
+|**Cloudflare Access**|Cloudflare 原生：邮箱一次性验证码 / SSO、按人身份、可叠 MFA 与 Access 会话|只能在 dashboard 建（cert 派生 token 无 Access 写权限，`POST …/access/apps` → `403 code 1010`）|
+|**Caddy Basic Auth** ✅ 已落地|HTTP 基本认证，一个共享账号密码|本机即可，已配置并实测|
+
+已落地的实现（`/etc/caddy/Caddyfile` 末尾）：隧道不再直接打 9080，而是先过一层带 Basic Auth 的本地站点：
+
+```caddyfile
+http://:9081 {
+	bind 127.0.0.1
+	basic_auth {
+		yang <bcrypt 哈希>
+	}
+	reverse_proxy 127.0.0.1:9080 {
+		header_up Host {host}      # Basic Auth 不解析 Host，应用仍需看到公网 Host
+	}
+}
+```
+
+- **口令不入库**：本文件会进 git，所以这里只留用户名 `yang`，密码请存在家人口令管理器里；Caddyfile 里只有 bcrypt 哈希。改用户名只需替换 `basic_auth` 块那一行的第一个字段（哈希可复用）。
+- 改密码：`sudo -n /usr/bin/caddy hash-password --plaintext '新密码'` 取哈希替换那一行，再 `sudo systemctl reload caddy`（graceful，不影响其它站点）。
+- 关掉这一层：把 `~/.cloudflared/growjoy.yml` 里的 `service:` 改回 `http://127.0.0.1:9080` 并 `systemctl --user restart cloudflared-growjoy`；或直接删掉 Caddyfile 里上面那段（改前先按主机的备份习惯 `sudo cp` 一份）。
+- **内网两条入口不过这一层**：`https://growjoy.homelab.com`（Caddy :443）与 `http://192.168.0.208:9080` 都直连 9080，行为与之前一致（实测各 200）。
+- 安全性质（诚实说清）：这是**共享口令**，没有按人身份、没有 MFA、也没有二次校验失败限流；它的价值是把公网入口从「只要 4 位 PIN」抬到「共享密码 + 4 位 PIN」两层。要按人身份与一次性验证码，请上 Access——两者可以叠加（Access 在最外层，Basic Auth 仍是隧道源站的第一道门）。
+
+验证（从能解析公网名的机器上跑；主机自身的内网 DNS 不解析 `moxao.cn`）：
+
+```bash
+H=https://growjoy.moxao.cn
+curl -sS -o /dev/null -D - "$H/health/live" | grep -iE '^HTTP|^www-authenticate'   # 401 + Basic realm="restricted"
+curl -sS -o /dev/null -w '%{http_code}\n' -u 'yang:<密码>' "$H/health/live"      # 200
+curl -sS -u 'yang:<密码>' -X POST "$H/api/v1/auth/child" -H "Origin: $H" -w ' [%{http_code}]\n'   # 200（Host 保真）
+```
+
+**尚未完成：Access（只有 dashboard 能做）**
+
+Zero Trust → **Access → Applications → Add an application → Self-hosted**：
+
+|字段|值|
+|---|---|
+|Application name|`GrowJoy`|
+|Session Duration|按需，例如 `24 hours`（家庭场景可给 `1 week`）|
+|Public hostname|Subdomain `growjoy`，Domain `moxao.cn`，Path 留空|
+|Policy|Name `family`，Action **Allow**，Include → **Emails** → 家人邮箱（多个逗号分隔）|
+
+若账号从未开过 Zero Trust，第一步会要求先选一个 team name（团队域名 `<team>.cloudflareaccess.com`），免费版上限 50 用户。保存后用无痕窗口验证：必须先出现 Access 的邮箱验证码页、**看不到** GrowJoy 界面。**在这之前，公网入口唯一的门是 4 位家长 PIN**（失败限流：10 次失败后每 30 秒恢复 1 次），想零窗口就先停连接器：
+
+```bash
+systemctl --user disable --now cloudflared-growjoy   # 立刻断开公网；Access 建好后 enable --now 回来
+```
+
+**从零重建（换机器/换域名时）**
+
+1. 授权（回调走 `login.cloudflareaccess.org`，**不需要端口转发**）：
+
+```bash
+pkill -f "cloudflared tunnel login" || true
+cloudflared tunnel login                       # 打开打印出的 URL → 登录 → 选择 zone
+ls -l ~/.cloudflared/cert.pem                  # 授权成功后必须出现
+```
+
+2. 建隧道 + 写配置（`HOST` 只改这一行）：
+
+```bash
+TUNNEL=growjoy
+HOST=growjoy.<你的域名>
+
+cloudflared tunnel create "$TUNNEL" 2>/dev/null || true
+UUID=$(cloudflared tunnel list -o json | python3 -c "import json,sys;print(next(t['id'] for t in json.load(sys.stdin) if t['name']=='$TUNNEL'))")
+ls -l "$HOME/.cloudflared/$UUID.json"
+
+cat > ~/.cloudflared/growjoy.yml <<EOF
+tunnel: $UUID
+credentials-file: $HOME/.cloudflared/$UUID.json
+protocol: http2
+ingress:
+  - hostname: $HOST
+    service: http://127.0.0.1:9080
+  - service: http_status:404
+EOF
+
+cloudflared --config ~/.cloudflared/growjoy.yml tunnel ingress validate
+cloudflared --config ~/.cloudflared/growjoy.yml tunnel ingress rule "https://$HOST/health/live"   # 应匹配 http://127.0.0.1:9080
+```
+
+3. （推荐）**先**在 dashboard 配好 Access，**再**路由 DNS，这样公网可达的那一刻就有第一道门，不存在「只有 4 位 PIN」的窗口。跳过也行——PIN 的失败限流（10 次失败后每 30 秒恢复 1 次）仍在挡暴力破解。
+
+4. 路由 DNS + 启用服务：
+
+```bash
+cloudflared tunnel route dns "$TUNNEL" "$HOST"
+systemctl --user enable --now cloudflared-growjoy
+systemctl --user status cloudflared-growjoy -n 20     # 必须出现 Registered tunnel connection
+```
+
+日志注意：这台主机**没有用户级 journal 文件**，`journalctl --user -u cloudflared-growjoy` 是空的，用 `systemctl --user status cloudflared-growjoy -f` 或 `sudo journalctl _SYSTEMD_USER_UNIT=cloudflared-growjoy.service -f`。
+
+5. 公网验证（期望值与临时隧道实测一致）：
+
+```bash
+HOST=growjoy.<你的域名>
+curl -sS "https://$HOST/health/live"                                                                    # {"status":"ok","version":"..."}
+curl -sS -o /dev/null -w '%{http_code}\n' "https://$HOST/health/ready"                                  # 200
+curl -sS -X POST "https://$HOST/api/v1/auth/child" -H "Origin: https://$HOST"        -w ' [%{http_code}]\n'  # 200
+curl -sS -X POST "https://$HOST/api/v1/auth/child" -H "Origin: https://evil.example" -w ' [%{http_code}]\n'  # 403 origin_mismatch
+```
+
+6. Access 应用（Zero Trust → **Access → Applications → Add an application → Self-hosted**）：
+
+|字段|值|
+|---|---|
+|Application name|`GrowJoy`|
+|Session Duration|按需，例如 `24 hours`（家庭场景可给 `1 week`）|
+|Public hostname|Subdomain `growjoy`，Domain `<你的域名>`，Path 留空|
+|Policy|Name `family`，Action **Allow**，Include → **Emails** → 家人邮箱|
+
+保存后用无痕窗口验证：必须先出现 Access 的邮箱验证码页、**看不到** GrowJoy 界面；通过 Access 之后才是应用自己的家长 PIN（两层）。
+
+7. 回滚：
+
+```bash
+systemctl --user disable --now cloudflared-growjoy     # 断开公网入口
+cloudflared tunnel delete growjoy
+# DNS 记录在 dashboard 删（cloudflared 只能建 CNAME，没有删 DNS 的子命令）
+```
+
+内网 `https://growjoy.homelab.com` 不受隧道影响，始终可用。
+
+**Cookie 模式**：隧道上线后仍然可以保持 `GROWJOY_SECURE_COOKIES=false`，让 `http://192.168.0.208:9080` 与公网域名两条入口都能保留登录态（cookie 按域名隔离，互不干扰）；代价是会话 cookie 未标 `Secure`，明文 HTTP 下也会发送。要收紧到只走 HTTPS（此时 LAN IP 那条入口将不再保留登录态、必须统一走域名）：
+
+```bash
+sed -i 's/^Environment=GROWJOY_SECURE_COOKIES=false/Environment=GROWJOY_SECURE_COOKIES=true/' ~/.config/systemd/user/growjoy.service
+systemctl --user daemon-reload && systemctl --user restart growjoy
+```
+
 ## 运行与观测
 
 ```bash
 # 存活与版本（version 来自 -ldflags "-X main.version=..."，未注入时为 dev）
 curl -sS http://192.168.0.208:9080/health/live
-# {"status":"ok","version":"1c123d0"}
+# {"status":"ok","version":"<git describe --always --dirty>"}
 
 # 就绪：数据库可答 + 所服务家庭的时区能加载，否则 503
 curl -sS -o /dev/null -w '%{http_code}\n' http://192.168.0.208:9080/health/ready
