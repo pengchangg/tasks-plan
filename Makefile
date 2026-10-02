@@ -5,7 +5,15 @@ SHELL := /bin/bash
 DEV_LOG := data/dev-server.log
 DEV_BIN := data/growjoy-dev
 
-.PHONY: help install build dev server web run preview vet fmt test test-go test-web check check-flow check-ui logs stop clean distclean
+# 远程部署（make deploy）的目标。DEPLOY_HOST 需支持免密 ssh；
+# DEPLOY_URL 必须指向 DEPLOY_HOST 上 GROWJOY_ADDR 实际监听的地址。
+DEPLOY_HOST ?= rocky.home
+DEPLOY_DIR ?= /home/pengchang/growjoy
+DEPLOY_URL ?= http://192.168.0.208:9080
+DEPLOY_UNIT ?= growjoy
+DEPLOY_STAGE ?= /tmp/growjoy-deploy
+
+.PHONY: help install build dev server web run preview vet fmt test test-go test-web check check-flow check-ui deploy logs stop clean distclean
 
 help: ## 显示全部可用命令
 	@echo "GrowJoy 可用命令："
@@ -69,6 +77,36 @@ check-flow: ## Playwright 行为门（自带 build，需先装 Chromium）
 
 check-ui: ## Playwright 视觉/溢出门（自带 build）
 	npm run check:ui
+
+deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd64 + rsync + 重启用户服务 + 健康校验
+	@command -v npm >/dev/null 2>&1 || { echo "✗ 未找到 npm：需要 Node.js 22.22.2+"; exit 1; }
+	@[ -d node_modules ] || { echo "✗ 依赖未安装，先运行: make install"; exit 1; }
+	@set -euo pipefail; \
+	VERSION=$$(git describe --always --dirty); \
+	echo "▶ 构建 SPA（dist/）与 linux/amd64 二进制（version=$${VERSION}）"; \
+	npm run build; \
+	mkdir -p $(DEPLOY_STAGE); \
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$${VERSION}" -o $(DEPLOY_STAGE)/growjoy ./cmd/growjoy; \
+	file $(DEPLOY_STAGE)/growjoy | grep -q 'ELF 64-bit.*x86-64' || { echo "✗ 产物不是 linux/amd64 ELF"; exit 1; }; \
+	echo "▶ 传输 dist/ 与二进制到 $(DEPLOY_HOST):$(DEPLOY_DIR)"; \
+	ssh $(DEPLOY_HOST) 'mkdir -p $(DEPLOY_DIR)/bin $(DEPLOY_DIR)/dist'; \
+	rsync -a --delete -e ssh dist/ $(DEPLOY_HOST):$(DEPLOY_DIR)/dist/; \
+	rsync -a -e ssh $(DEPLOY_STAGE)/growjoy $(DEPLOY_HOST):$(DEPLOY_DIR)/bin/growjoy; \
+	ssh $(DEPLOY_HOST) 'chmod +x $(DEPLOY_DIR)/bin/growjoy && systemctl --user restart $(DEPLOY_UNIT)'; \
+	echo "▶ 等待 $(DEPLOY_URL)/health/ready"; \
+	CODE=; \
+	for i in $$(seq 1 60); do \
+	  CODE=$$(curl -sS -o /dev/null -w '%{http_code}' $(DEPLOY_URL)/health/ready 2>/dev/null || true); \
+	  if [ "$$CODE" = "200" ]; then break; fi; \
+	  sleep 0.5; \
+	done; \
+	if [ "$$CODE" != "200" ]; then echo "✗ /health/ready 未就绪（HTTP $${CODE:-无响应}）：ssh $(DEPLOY_HOST) 'systemctl --user status $(DEPLOY_UNIT)'"; exit 1; fi; \
+	LIVE=$$(curl -sS $(DEPLOY_URL)/health/live); \
+	echo "$$LIVE"; \
+	case "$$LIVE" in \
+	  *"\"version\":\"$${VERSION}\""*) echo "✔ 已部署并复检通过：$(DEPLOY_URL) version=$${VERSION}";; \
+	  *) echo "✗ 远端版本与本次构建不一致（期望 $${VERSION}）"; exit 1;; \
+	esac
 
 logs: ## 跟随后端开发日志
 	tail -f $(DEV_LOG)

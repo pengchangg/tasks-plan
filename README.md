@@ -26,7 +26,7 @@ make          # 列出全部常用命令
 make dev      # 后端 :8080 + 前端 :5173（等价于上面两条命令）
 ```
 
-其余常用目标：`make install`、`make build`、`make test`、`make check`（完整 CI 门）、`make run`（构建后由 Go 单进程服务 `dist/`）、`make check-flow`、`make check-ui`、`make stop`（清理占用 :8080 的残留后端）、`make clean`。
+其余常用目标：`make install`、`make build`、`make test`、`make check`（完整 CI 门）、`make run`（构建后由 Go 单进程服务 `dist/`）、`make check-flow`、`make check-ui`、`make deploy`（构建并部署到远程主机）、`make stop`（清理占用 :8080 的残留后端）、`make clean`。
 
 `npm run dev:server` 会幂等创建演示家庭。应用默认停在孩子端，进入家长端只需要家长密码：
 
@@ -93,6 +93,30 @@ GROWJOY_SECURE_COOKIES=true \
 ```
 
 `backup` 用 `VACUUM INTO` 取数据库一致性快照，因此可以在服务运行时执行；输出目录里已存在 `growjoy.db` 或 `media.tar` 时会拒绝覆盖，请换一个目录。`gc --media` 只处理文件名形如 `media_<32位hex>.<扩展名>` 的上传文件，其他文件一律不动；数据库里一条附件记录都没有时会拒绝删除（通常是 `GROWJOY_DB` 指错了库），确认无误后加 `--force`。
+
+## 远程部署
+
+`make deploy` 把新版本推到一台已在运行的远程主机（默认 `rocky.home`）：本地构建 `dist/` 并交叉编译 `linux/amd64` 静态二进制，rsync 到远端 `bin/` 与 `dist/`，重启 systemd 用户服务，最后轮询 `/health/ready` 并核对 `/health/live` 的版本号等于本地 `git describe --always --dirty`，任一步失败即以非零码退出。
+
+```bash
+make deploy
+make deploy DEPLOY_HOST=user@host DEPLOY_URL=http://host:9080 DEPLOY_DIR=/home/user/growjoy
+```
+
+可覆盖的变量：`DEPLOY_HOST`（默认 `rocky.home`，需免密 ssh）、`DEPLOY_DIR`（默认 `/home/pengchang/growjoy`）、`DEPLOY_URL`（默认 `http://192.168.0.208:9080`，必须指向 `GROWJOY_ADDR` 实际监听的地址）、`DEPLOY_UNIT`（默认 `growjoy`）、`DEPLOY_STAGE`（默认 `/tmp/growjoy-deploy`，交叉编译产物的暂存目录，不落在仓库里）。
+
+它只覆盖 `bin/` 与 `dist/`，不碰 `data/`，因此数据库与上传文件在升级后保持原样。首次部署仍需手工准备一次（远端目录、systemd 用户服务、`admin create-family` 建家庭）：
+
+```bash
+ssh rocky.home 'mkdir -p ~/growjoy/bin ~/growjoy/dist'
+ssh rocky.home 'GROWJOY_DB=$HOME/growjoy/data/growjoy.db GROWJOY_MEDIA=$HOME/growjoy/data/media \
+  ~/growjoy/bin/growjoy admin create-family --code HOME --name 我们的家 \
+  --username parent --display-name 家长 --password 1357 --timezone Asia/Shanghai'
+```
+
+远端日志用 `ssh rocky.home 'systemctl --user status growjoy -n 50'`（跟随时加 `-f`）查看；若该主机没有用户级 journal 文件，`journalctl --user -u growjoy` 会是空的，此时改用 `sudo journalctl _SYSTEMD_USER_UNIT=growjoy.service`。
+
+明文 HTTP 直连（不套反向代理）时端口要写成 `GROWJOY_ADDR=0.0.0.0:9080` 且 `GROWJOY_SECURE_COOKIES=false`：前者只绑回环则局域网访问不到，后者设为 `true` 会让浏览器在 HTTP 下不回传 `growjoy_session`，每个请求都会重开会话。这种实例只应留在局域网或 Tailscale 内，不要映射到公网。
 
 ## 访问限制与清理
 

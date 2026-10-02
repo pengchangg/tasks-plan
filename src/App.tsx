@@ -469,7 +469,6 @@ function ParentPinModal({
         {error && (
           <small className="pin-error-text">密码不正确，请重新输入</small>
         )}
-        <small className="pin-hint">演示密码：2468</small>
         <button
           className="wide-primary"
           type="submit"
