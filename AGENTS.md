@@ -7,7 +7,7 @@ GrowJoy (`growjoy`): a family growth-task + points-reward H5 app. One Go binary 
 - Purpose: parents define tasks/rewards; children submit evidence, earn points, redeem wishes. Per-family multi-tenant, single process, single replica (one SQLite file + one media dir on one persistent volume).
 - Two runtimes, one deployable: Go 1.22 chi service (`cmd/growjoy`, `internal/server`) + React 19/Vite SPA (`src/`) that the same binary serves from `dist/`.
 - The served family is never requested by the client: `resolvedFamily` takes the oldest `families` row, so the app is single-family in practice. `POST /auth/child` answers 409 `no_family` when the database has no family.
-- Gate list enforced by CI (`.github/workflows/ci.yml`, push to `main` / every PR / manual): `go vet ./...` + `go test ./...` → `npm ci` + `npm test` + `npm run build` → `npm run check:flow` + `npm run check:ui`. No linter, formatter, Makefile or Dockerfile exists — match surrounding formatting by hand.
+- Gate list enforced by CI (`.github/workflows/ci.yml`, push to `main` / every PR / manual): `go vet ./...` + `go test ./...` → `npm ci` + `npm test` + `npm run build` → `npm run check:flow` + `npm run check:ui`. No linter, formatter or Dockerfile exists, and CI drives the npm/go commands directly; the root `Makefile` only wraps them for local use (`make help` lists every target, `make dev` runs the Go server and Vite together). Match surrounding formatting by hand.
 
 ## Architecture & Data Flow
 
@@ -93,7 +93,8 @@ flowchart LR
 |`npm run test:go` / `go test ./...`|Go tests (one package: `internal/server`).|
 |`npm run check:flow`|`npm run build` then Playwright E2E against a real throwaway server: full child/parent journey with API-state assertions.|
 |`npm run check:ui`|`npm run build` then 11-scenario screenshot/overflow gate → `.artifacts/ui/*.png`.|
-|`npm run preview`|Static preview of `dist/` (default `:4173`); serves no `/api` proxy, so the harnesses cannot pass against it.|
+| `npm run preview` | Static preview of `dist/` (default `:4173`); serves no `/api` proxy, so the harnesses cannot pass against it. |
+| `make dev` | Wrapper: builds `data/growjoy-dev` and runs `serve --demo` on `127.0.0.1:8080` alongside `npm run dev` (`http://localhost:5173`), one Ctrl-C stops both. `make` / `make help` lists every target. |
 |`go build -o growjoy ./cmd/growjoy`|CLI binary for `admin create-family` / `seed-demo`; writes an untracked binary at the repo root (`.gitignore` has no entry for it).|
 
 Demo credentials (`serve --demo`): family `DEMO`, parent password `2468`. The child end needs no credential and is the app's default view; `/parent` is gated by the password on every visit. Three pinning traps: the server serves whatever currently sits in `dist/` (editing `src/` requires `npm run build`; no HMR through Go), the dev proxy hardcodes port 8080 — moving `GROWJOY_ADDR` requires editing `vite.config.mjs` too, and the proxy must keep `changeOrigin: false` or every POST is rejected with `403 origin_mismatch` (`check:*` scripts are immune: ephemeral port via `BASE_URL`).

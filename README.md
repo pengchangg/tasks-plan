@@ -17,7 +17,16 @@ npm run dev:server
 npm run dev
 ```
 
-打开 `http://127.0.0.1:5173`。Vite 会将 `/api` 代理到 `127.0.0.1:8080`。
+打开 `http://localhost:5173`（Vite 默认只监听 `localhost`，macOS 上解析为 IPv6 `::1`，用 `127.0.0.1` 会连不上）。Vite 会将 `/api` 代理到 `127.0.0.1:8080`。
+
+也可以用一个命令同时启动两端，Ctrl-C 一并退出：
+
+```bash
+make          # 列出全部常用命令
+make dev      # 后端 :8080 + 前端 :5173（等价于上面两条命令）
+```
+
+其余常用目标：`make install`、`make build`、`make test`、`make check`（完整 CI 门）、`make run`（构建后由 Go 单进程服务 `dist/`）、`make check-flow`、`make check-ui`、`make stop`（清理占用 :8080 的残留后端）、`make clean`。
 
 `npm run dev:server` 会幂等创建演示家庭。应用默认停在孩子端，进入家长端只需要家长密码：
 
