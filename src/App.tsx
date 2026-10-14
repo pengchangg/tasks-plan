@@ -729,6 +729,7 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
           <small>天连续</small>
         </div>
       </div>
+      <TodayHomework store={store} />
       <section
         className="companion-banner"
         style={{ "--companion": child.color } as React.CSSProperties}
@@ -1356,6 +1357,76 @@ function HomeworkViewer({
   );
 }
 
+// 作业卡片 + 全屏灯箱：孩子端首页的「今日作业」模块与 /child/homework 共用同一份实现，
+// 灯箱顺序是页面内全部媒体（先摊平再按下标定位）。
+function HomeworkDay({ items, title }: { items: Homework[]; title: string }) {
+  const [viewing, setViewing] = useState<number | null>(null);
+  const media = items.flatMap((item) => item.media);
+  return (
+    <>
+      {items.map((item) => (
+        <article className="homework-card" key={item.id}>
+          <span className={`subject-chip ${subjectClass(item.subject)}`}>
+            <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
+            {item.subject}
+          </span>
+          {item.description && <p className="homework-desc">{item.description}</p>}
+          {item.media.length > 0 && (
+            <div className="media-grid">
+              {item.media.map((attachment) => (
+                <button
+                  type="button"
+                  key={attachment.id}
+                  className="homework-thumb"
+                  aria-label={`查看${attachment.name}`}
+                  onClick={() => setViewing(media.indexOf(attachment))}
+                >
+                  {attachment.type === "video" ? (
+                    <video src={attachment.url} muted preload="metadata" />
+                  ) : (
+                    <img src={attachment.url} alt={attachment.name} loading="lazy" />
+                  )}
+                  {attachment.type === "video" && <span className="media-badge">▶</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </article>
+      ))}
+      {items.length === 0 && (
+        <EmptyState icon="🎉" title={title} text="可以休息一下啦" />
+      )}
+      {viewing !== null && media.length > 0 && (
+        <HomeworkViewer
+          items={media}
+          index={viewing}
+          onIndex={setViewing}
+          onClose={() => setViewing(null)}
+        />
+      )}
+    </>
+  );
+}
+
+// 首页模块：孩子一进 app 就看到今天的作业与每日谚语（PRD §3.3 的「main 顶部、作业列表
+// 上方」）。它永远看今天——刚在作业页翻到别的日期时，回到首页不能显示那一天。
+function TodayHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
+  const loadDate = store.actions.setHomeworkDate;
+  useEffect(() => {
+    if (store.homework.date !== store.today) loadDate(store.today);
+  }, [store.homework.date, store.today, loadDate]);
+  return (
+    <section className="homework-module">
+      <SectionTitle title="今日作业" action="按日期查看" to="/child/homework" />
+      <ProverbBanner date={store.today} />
+      <HomeworkDay
+        items={store.homework.date === store.today ? store.homework.items : []}
+        title="今日暂无作业"
+      />
+    </section>
+  );
+}
+
 function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
   const date = store.homework.date || store.today;
   const isToday = date === store.today;
@@ -1364,10 +1435,7 @@ function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
     // 第一次进入时 homework.date 还是空串，用家庭本地的今天补上。
     if (!store.homework.date) loadDate(store.today);
   }, [store.homework.date, store.today, loadDate]);
-  const [viewing, setViewing] = useState<number | null>(null);
   const items = store.homework.items;
-  // 灯箱按「页面内全部媒体」的顺序切换，所以先摊平再按下标定位。
-  const media = items.flatMap((item) => item.media);
   return (
     <div className="content-wrap homework-page">
       <div className="homework-head">
@@ -1402,46 +1470,10 @@ function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
         </div>
       </div>
       <ProverbBanner date={date} />
-      {items.map((item) => (
-        <article className="homework-card" key={item.id}>
-          <span className={`subject-chip ${subjectClass(item.subject)}`}>
-            <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
-            {item.subject}
-          </span>
-          {item.description && <p className="homework-desc">{item.description}</p>}
-          {item.media.length > 0 && (
-            <div className="media-grid">
-              {item.media.map((attachment) => (
-                <button
-                  type="button"
-                  key={attachment.id}
-                  className="homework-thumb"
-                  aria-label={`查看${attachment.name}`}
-                  onClick={() => setViewing(media.indexOf(attachment))}
-                >
-                  {attachment.type === "video" ? (
-                    <video src={attachment.url} muted preload="metadata" />
-                  ) : (
-                    <img src={attachment.url} alt={attachment.name} loading="lazy" />
-                  )}
-                  {attachment.type === "video" && <span className="media-badge">▶</span>}
-                </button>
-              ))}
-            </div>
-          )}
-        </article>
-      ))}
-      {items.length === 0 && (
-        <EmptyState icon="🎉" title="今日暂无作业" text="可以休息一下啦" />
-      )}
-      {viewing !== null && media.length > 0 && (
-        <HomeworkViewer
-          items={media}
-          index={viewing}
-          onIndex={setViewing}
-          onClose={() => setViewing(null)}
-        />
-      )}
+      <HomeworkDay
+        items={items}
+        title={isToday ? "今日暂无作业" : "这一天没有作业"}
+      />
     </div>
   );
 }

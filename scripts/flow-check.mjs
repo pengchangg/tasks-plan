@@ -727,6 +727,13 @@ assert.ok((await homeworkRow.innerText()).includes("抄写第三课生字各三�
 assert.ok((await homeworkRow.innerText()).includes("2 个附件"));
 
 await enterChild();
+// 首页（/）就有今日作业模块：录入的作业不点 tab 也看得见，谚语横幅跟着一起上首页。
+const homeModule = page.locator(".homework-module");
+await homeModule
+  .locator(".homework-card")
+  .filter({ hasText: "抄写第三课生字各三遍" })
+  .waitFor();
+assert.ok((await homeModule.locator(".proverb-banner").innerText()).includes("每日谚语"));
 await page.getByRole("link", { name: "作业" }).click();
 await page.waitForURL(/\/child\/homework$/);
 const banner = page.locator(".proverb-banner");
@@ -810,6 +817,22 @@ await page
 assert.ok(
   (await page.locator(".homework-head h1").innerText()).includes("今日作业"),
 );
+// 首页模块永远看今天：刚在作业页翻到前一天，回首页看到的仍是今天的作业；模块的
+// 「按日期查看」把用户送到作业页。
+await page.getByRole("button", { name: "前一天" }).click();
+await page.locator(".empty-state").waitFor();
+await page.getByRole("link", { name: "今日", exact: true }).click();
+await page.waitForURL(/\/child$/);
+await page
+  .locator(".homework-module .homework-card")
+  .filter({ hasText: "抄写第三课生字各三遍" })
+  .waitFor();
+await page.getByRole("link", { name: "按日期查看" }).click();
+await page.waitForURL(/\/child\/homework$/);
+await page
+  .locator(".homework-card")
+  .filter({ hasText: "抄写第三课生字各三遍" })
+  .waitFor();
 
 await enterParent(false, "1357");
 await page.getByRole("link", { name: "作业管理" }).click();
@@ -828,11 +851,17 @@ await page.getByRole("button", { name: "删除语文" }).click();
 await page.getByRole("button", { name: "确认删除" }).click();
 await page.getByText("作业已删除").waitFor();
 await page.locator(".homework-admin-row").waitFor({ state: "detached" });
-// 孩子端这一天跟着空了。
+// 孩子端这一天跟着空了，首页模块也回到空状态。
 await enterChild();
 await page.getByRole("link", { name: "作业" }).click();
 await page.waitForURL(/\/child\/homework$/);
 await page.locator(".empty-state").waitFor();
+await page.getByRole("link", { name: "今日", exact: true }).click();
+await page.waitForURL(/\/child$/);
+const emptyHomeModule = page.locator(".homework-module .empty-state");
+await emptyHomeModule.waitFor();
+assert.ok((await emptyHomeModule.innerText()).includes("今日暂无作业"));
+assert.ok((await page.locator(".homework-module").innerText()).includes("按日期查看"));
 
 assert.deepEqual(errors, []);
 console.log(
@@ -865,6 +894,7 @@ console.log(
     growthBackfill: true,
     statsRange: true,
     homework: true,
+    homeworkOnHome: true,
     homeworkViewer: true,
     homeworkDateNav: true,
     homeworkFont: true,

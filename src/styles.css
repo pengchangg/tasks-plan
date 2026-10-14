@@ -82,6 +82,7 @@
 .amount-options{display:flex;gap:8px;flex-wrap:wrap}.amount-options button{min-width:58px;height:38px;padding:0 12px;border:1px solid var(--line);background:#fff;border-radius:7px;font-weight:700}.amount-options button.selected{border-color:#303633;box-shadow:0 0 0 2px #303633}
 
 .homework-head{margin-bottom:16px}.homework-head h1{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:26px}.homework-head p{color:var(--muted);font-size:14px;margin:0}
+.homework-module{margin-bottom:10px}.homework-module>.section-title{margin-top:0}
 .today-badge{padding:3px 9px;border-radius:999px;background:var(--yellow);color:#6b4a06;font-size:11px;font-weight:800}
 .homework-date-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
 .homework-date-bar button{padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper);font-size:12px}
