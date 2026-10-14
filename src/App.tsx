@@ -11,6 +11,8 @@ import {
 } from "react-router-dom";
 import {
   BarChart3,
+  BookOpen,
+  ChevronLeft,
   ChevronRight,
   ClipboardCheck,
   Coins,
@@ -36,9 +38,12 @@ import {
 import { useAppStore } from "./store";
 import { dayActivity, dayDigest, familyDate, shiftDate } from "./domain";
 import type { DayActivity, DayEntry } from "./domain";
+import { proverbForDate } from "./proverbs";
 import type {
   Attachment,
   Child,
+  Homework,
+  HomeworkDraft,
   PointLedger,
   Redemption,
   RepeatRule,
@@ -50,6 +55,37 @@ import type {
 import "./styles.css";
 
 const categories = ["全部", "生活自理", "学习成长", "家庭责任"];
+// 作业的学科固定 10 项，与 internal/server/homework.go 的 homeworkSubjects 同名同序；
+// 顺序就是表单里的单选顺序，也决定孩子端 chip 的 emoji 与配色。
+const homeworkSubjects = [
+  "语文",
+  "数学",
+  "英语",
+  "科学",
+  "道德与法治",
+  "音乐",
+  "美术",
+  "体育",
+  "劳动",
+  "其他",
+];
+const subjectEmoji: Record<string, string> = {
+  语文: "📖",
+  数学: "🧮",
+  英语: "🔤",
+  科学: "🔬",
+  道德与法治: "⚖️",
+  音乐: "🎵",
+  美术: "🎨",
+  体育: "⚽",
+  劳动: "🧹",
+  其他: "📚",
+};
+// 列表里不认识的学科（历史数据、后来加过的学科）回退到「其他」的图标与配色：
+// 服务端写入时只接受上面 10 个值，渲染这边仍然容错。
+function subjectClass(subject: string): string {
+  return homeworkSubjects.includes(subject) ? `subject-${subject}` : "subject-default";
+}
 // 与服务端的 statsMaxRangeDays 同值：只用于自定义区间日期输入的 min。
 const statsMaxRangeDays = 92;
 const statsRanges = [
@@ -616,6 +652,7 @@ function ChildLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
         <Routes>
           <Route path="/child" element={<ChildHome store={store} />} />
           <Route path="/child/tasks" element={<ChildTasks store={store} />} />
+          <Route path="/child/homework" element={<ChildHomework store={store} />} />
           <Route path="/child/wishes" element={<ChildWishes store={store} />} />
           <Route path="/child/growth" element={<Growth store={store} />} />
           <Route path="*" element={<Navigate to="/child" replace />} />
@@ -642,6 +679,13 @@ function ChildNav() {
       >
         <ListChecks size={20} />
         <span>任务</span>
+      </Link>
+      <Link
+        className={location.pathname.includes("homework") ? "active" : ""}
+        to="/child/homework"
+      >
+        <BookOpen size={20} />
+        <span>作业</span>
       </Link>
       <Link
         className={location.pathname.includes("wishes") ? "active" : ""}
@@ -1193,6 +1237,215 @@ function ChildWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
     </div>
   );
 }
+function ProverbBanner({ date }: { date: string }) {
+  const proverb = proverbForDate(date);
+  const chars = [...proverb.text];
+  // pinyin 与 text 逐字符对齐：token 等于该位置的字符就说明它是标点，不包 <ruby>。
+  const tokens = proverb.pinyin.split(" ");
+  return (
+    <section className="proverb-banner">
+      <span className="proverb-label">每日谚语</span>
+      <p className="proverb-text">
+        {chars.map((char, index) =>
+          tokens[index] === char ? (
+            <span key={index}>{char}</span>
+          ) : (
+            <ruby key={index}>
+              {char}
+              <rt>{tokens[index]}</rt>
+            </ruby>
+          ),
+        )}
+      </p>
+    </section>
+  );
+}
+
+function HomeworkViewer({
+  items,
+  index,
+  onIndex,
+  onClose,
+}: {
+  items: Attachment[];
+  index: number;
+  onIndex: (index: number) => void;
+  onClose: () => void;
+}) {
+  const dialog = useDialog(onClose);
+  const startX = useRef<number | null>(null);
+  // 滑动本身也会在背景上冒泡出一次 click；标记一下就吞掉那一次，避免划过就关掉。
+  const swiped = useRef(false);
+  const item = items[index];
+  const step = (delta: number) =>
+    onIndex((index + delta + items.length) % items.length);
+  useEffect(() => {
+    // 有则尝试进入浏览器全屏；无头浏览器或无权限时静默放弃。
+    void document.documentElement.requestFullscreen?.().catch(() => {});
+    return () => {
+      if (document.fullscreenElement) void document.exitFullscreen?.().catch(() => {});
+    };
+  }, []);
+  return (
+    <div
+      className="modal-backdrop homework-viewer"
+      ref={dialog}
+      onClick={() => {
+        if (swiped.current) {
+          swiped.current = false;
+          return;
+        }
+        onClose();
+      }}
+    >
+      <figure
+        className="viewer-stage"
+        onClick={(event) => event.stopPropagation()}
+        onTouchStart={(event) => {
+          startX.current = event.touches[0]?.clientX ?? null;
+          swiped.current = false;
+        }}
+        onTouchEnd={(event) => {
+          const dx = (event.changedTouches[0]?.clientX ?? 0) - (startX.current ?? 0);
+          startX.current = null;
+          if (Math.abs(dx) < 50) return;
+          swiped.current = true;
+          step(dx < 0 ? 1 : -1);
+        }}
+      >
+        {item.type === "video" ? (
+          <video className="media-video" src={item.url} controls autoPlay />
+        ) : (
+          <img src={item.url} alt={item.name} />
+        )}
+        <figcaption>{item.name}</figcaption>
+        <span className="viewer-count">
+          {index + 1} / {items.length}
+        </span>
+      </figure>
+      {items.length > 1 && (
+        <>
+          <button
+            type="button"
+            className="viewer-nav prev"
+            aria-label="上一张"
+            onClick={(event) => {
+              event.stopPropagation();
+              step(-1);
+            }}
+          >
+            <ChevronLeft size={26} />
+          </button>
+          <button
+            type="button"
+            className="viewer-nav next"
+            aria-label="下一张"
+            onClick={(event) => {
+              event.stopPropagation();
+              step(1);
+            }}
+          >
+            <ChevronRight size={26} />
+          </button>
+        </>
+      )}
+      <button className="modal-close" aria-label="关闭预览" onClick={onClose}>
+        <X size={18} />
+      </button>
+    </div>
+  );
+}
+
+function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
+  const date = store.homework.date || store.today;
+  const isToday = date === store.today;
+  const loadDate = store.actions.setHomeworkDate;
+  useEffect(() => {
+    // 第一次进入时 homework.date 还是空串，用家庭本地的今天补上。
+    if (!store.homework.date) loadDate(store.today);
+  }, [store.homework.date, store.today, loadDate]);
+  const [viewing, setViewing] = useState<number | null>(null);
+  const items = store.homework.items;
+  // 灯箱按「页面内全部媒体」的顺序切换，所以先摊平再按下标定位。
+  const media = items.flatMap((item) => item.media);
+  return (
+    <div className="content-wrap homework-page">
+      <div className="homework-head">
+        <span className="eyebrow">HOMEWORK</span>
+        <h1>
+          {isToday ? "今日作业" : `${Number(date.slice(5, 7))}月${Number(date.slice(8))}日 · 作业`}
+          {isToday && <span className="today-badge">今天</span>}
+        </h1>
+        <p>老师布置的作业都在这里，看完就开始吧。</p>
+        <div className="homework-date-bar">
+          <button type="button" onClick={() => loadDate(shiftDate(date, -1))}>
+            前一天
+          </button>
+          <input
+            type="date"
+            aria-label="选择日期"
+            value={date}
+            onChange={(event) => event.target.value && loadDate(event.target.value)}
+          />
+          <button type="button" onClick={() => loadDate(shiftDate(date, 1))}>
+            后一天
+          </button>
+          {!isToday && (
+            <button
+              type="button"
+              className="today-button"
+              onClick={() => loadDate(store.today)}
+            >
+              回到今天
+            </button>
+          )}
+        </div>
+      </div>
+      <ProverbBanner date={date} />
+      {items.map((item) => (
+        <article className="homework-card" key={item.id}>
+          <span className={`subject-chip ${subjectClass(item.subject)}`}>
+            <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
+            {item.subject}
+          </span>
+          {item.description && <p className="homework-desc">{item.description}</p>}
+          {item.media.length > 0 && (
+            <div className="media-grid">
+              {item.media.map((attachment) => (
+                <button
+                  type="button"
+                  key={attachment.id}
+                  className="homework-thumb"
+                  aria-label={`查看${attachment.name}`}
+                  onClick={() => setViewing(media.indexOf(attachment))}
+                >
+                  {attachment.type === "video" ? (
+                    <video src={attachment.url} muted preload="metadata" />
+                  ) : (
+                    <img src={attachment.url} alt={attachment.name} loading="lazy" />
+                  )}
+                  {attachment.type === "video" && <span className="media-badge">▶</span>}
+                </button>
+              ))}
+            </div>
+          )}
+        </article>
+      ))}
+      {items.length === 0 && (
+        <EmptyState icon="🎉" title="今日暂无作业" text="可以休息一下啦" />
+      )}
+      {viewing !== null && media.length > 0 && (
+        <HomeworkViewer
+          items={media}
+          index={viewing}
+          onIndex={setViewing}
+          onClose={() => setViewing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function WishMini({ wish, balance }: { wish: Wish; balance: number }) {
   return (
     <Link
@@ -1637,6 +1890,11 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
             label="愿望管理"
           />
           <SideLink
+            to="/parent/homework"
+            icon={<BookOpen size={18} />}
+            label="作业管理"
+          />
+          <SideLink
             to="/parent/stats"
             icon={<BarChart3 size={18} />}
             label="成长统计"
@@ -1671,6 +1929,10 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
           <Route
             path="/parent/wishes"
             element={<ParentWishes store={store} />}
+          />
+          <Route
+            path="/parent/homework"
+            element={<ParentHomework store={store} />}
           />
           <Route path="/parent/stats" element={<ParentStats store={store} />} />
           <Route path="*" element={<Navigate to="/parent" replace />} />
@@ -2728,6 +2990,291 @@ function ParentWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
     </div>
   );
 }
+function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
+  const date = store.homework.date || store.today;
+  const loadDate = store.actions.setHomeworkDate;
+  useEffect(() => {
+    if (!store.homework.date) loadDate(store.today);
+  }, [store.homework.date, store.today, loadDate]);
+  const [editing, setEditing] = useState<Homework | "new" | null>(null);
+  const [deleting, setDeleting] = useState<Homework | null>(null);
+  return (
+    <div className="parent-content">
+      <PageHeading
+        eyebrow="HOMEWORK ADMIN"
+        title="作业管理"
+        description="把老师布置的作业拍下来，孩子打开平板就能看到。"
+      />
+      <div className="homework-toolbar">
+        <input
+          type="date"
+          aria-label="作业日期"
+          value={date}
+          onChange={(event) => event.target.value && loadDate(event.target.value)}
+        />
+        <button
+          type="button"
+          className="primary-button"
+          onClick={() => setEditing("new")}
+        >
+          <Plus size={15} />
+          新增作业
+        </button>
+      </div>
+      {store.homework.items.map((item) => (
+        <div className="homework-admin-row" key={item.id}>
+          <span className={`subject-chip ${subjectClass(item.subject)}`}>
+            <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
+            {item.subject}
+          </span>
+          <span className="homework-media-count">{item.media.length} 个附件</span>
+          <div className="homework-admin-actions">
+            <button
+              type="button"
+              aria-label={`编辑${item.subject}`}
+              onClick={() => setEditing(item)}
+            >
+              <Pencil size={16} />
+            </button>
+            <button
+              type="button"
+              aria-label={`删除${item.subject}`}
+              onClick={() => setDeleting(item)}
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+          {item.description && <p className="homework-desc">{item.description}</p>}
+        </div>
+      ))}
+      {store.homework.items.length === 0 && (
+        <EmptyState
+          icon="📚"
+          title="这条日期还没有作业"
+          text="点「新增作业」把老师布置的内容记下来"
+        />
+      )}
+      {editing && (
+        <HomeworkForm
+          homework={editing === "new" ? null : editing}
+          date={editing === "new" ? date : editing.date}
+          onClose={() => setEditing(null)}
+          onSave={(draft) => {
+            store.actions.saveHomework(
+              draft,
+              editing === "new" ? undefined : editing.id,
+            );
+            setEditing(null);
+          }}
+        />
+      )}
+      {deleting && (
+        <ConfirmModal
+          title="删除这条作业？"
+          text="删除后图片和视频也会一起移除。"
+          confirm="确认删除"
+          onClose={() => setDeleting(null)}
+          onConfirm={() => {
+            store.actions.deleteHomework(deleting.id);
+            setDeleting(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function HomeworkForm({
+  homework,
+  date,
+  onClose,
+  onSave,
+}: {
+  homework: Homework | null;
+  date: string;
+  onClose: () => void;
+  onSave: (draft: HomeworkDraft) => void;
+}) {
+  const dialog = useDialog(onClose);
+  const [value, setValue] = useState(date);
+  const [subject, setSubject] = useState(
+    homework
+      ? homeworkSubjects.includes(homework.subject)
+        ? homework.subject
+        : "其他"
+      : "语文",
+  );
+  const [description, setDescription] = useState(homework?.description ?? "");
+  const [files, setFiles] = useState<File[]>([]);
+  const [previews, setPreviews] = useState<string[]>([]);
+  const [removed, setRemoved] = useState<string[]>([]);
+  const [error, setError] = useState("");
+  // 预览用的是 blob URL，卸载时必须逐个回收（删除单项时也立刻回收；重复回收无害）。
+  const created = useRef<string[]>([]);
+  useEffect(
+    () => () => {
+      for (const url of created.current) URL.revokeObjectURL(url);
+    },
+    [],
+  );
+  const kept = (homework?.media ?? []).filter(
+    (media) => !removed.includes(media.id ?? ""),
+  );
+  const pick = (picked: FileList | null) => {
+    if (!picked || picked.length === 0) return;
+    const added = [...picked];
+    const urls = added.map((file) => URL.createObjectURL(file));
+    created.current.push(...urls);
+    setFiles((current) => [...current, ...added]);
+    setPreviews((current) => [...current, ...urls]);
+  };
+  const drop = (index: number) => {
+    URL.revokeObjectURL(previews[index]);
+    setFiles((current) => current.filter((_, i) => i !== index));
+    setPreviews((current) => current.filter((_, i) => i !== index));
+  };
+  return (
+    <div className="modal-backdrop" ref={dialog}>
+      <form
+        className="form-modal homework-form"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="homework-form-title"
+        onSubmit={(event) => {
+          event.preventDefault();
+          // 描述与图片/视频至少填一项（PRD §3.2）。
+          if (!description.trim() && kept.length + files.length === 0) {
+            setError("请填写文字描述或选择图片或视频");
+            return;
+          }
+          onSave({
+            date: value,
+            subject,
+            description: description.trim(),
+            files,
+            removeMedia: removed,
+          });
+        }}
+      >
+        <div className="form-heading">
+          <div>
+            <span className="eyebrow">
+              {homework ? "EDIT HOMEWORK" : "NEW HOMEWORK"}
+            </span>
+            <h2 id="homework-form-title">
+              {homework ? "编辑作业" : "新增作业"}
+            </h2>
+          </div>
+          <button type="button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <label>
+          日期
+          <input
+            type="date"
+            required
+            value={value}
+            onChange={(event) => setValue(event.target.value)}
+          />
+        </label>
+        <div className="form-field">
+          <span>学科</span>
+          <div className="subject-picker" role="group" aria-label="学科">
+            {homeworkSubjects.map((name) => (
+              <button
+                type="button"
+                key={name}
+                aria-pressed={name === subject}
+                className={`subject-option ${subjectClass(name)}${name === subject ? " active" : ""}`}
+                onClick={() => setSubject(name)}
+              >
+                <span>{subjectEmoji[name]}</span>
+                {name}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label>
+          文字描述
+          <textarea
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder="抄写老师布置的作业内容…"
+          />
+        </label>
+        <div className="form-field">
+          <span>图片 / 视频</span>
+          <label className="upload-card">
+            <input
+              type="file"
+              accept="image/*,video/*"
+              multiple
+              hidden
+              onChange={(event) => pick(event.target.files)}
+            />
+            <ImageIcon size={22} />
+            <span>
+              {files.length
+                ? `已选 ${files.length} 个文件 · 点击更换`
+                : "点击选择图片或视频"}
+            </span>
+          </label>
+          {(kept.length > 0 || files.length > 0) && (
+            <div className="upload-previews">
+              {kept.map((media) => (
+                <div className="upload-preview" key={media.id}>
+                  {media.type === "video" ? (
+                    <video src={media.url} muted preload="metadata" />
+                  ) : (
+                    <img src={media.url} alt={media.name} />
+                  )}
+                  <button
+                    type="button"
+                    className="upload-remove"
+                    aria-label={`删除${media.name}`}
+                    onClick={() =>
+                      setRemoved((current) => [...current, media.id ?? ""])
+                    }
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+              {files.map((file, index) => (
+                <div className="upload-preview" key={`${file.name}-${index}`}>
+                  {file.type.startsWith("video") ? (
+                    <video src={previews[index]} muted preload="metadata" />
+                  ) : (
+                    <img src={previews[index]} alt={file.name} />
+                  )}
+                  <button
+                    type="button"
+                    className="upload-remove"
+                    aria-label={`删除${file.name}`}
+                    onClick={() => drop(index)}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={onClose}>
+            取消
+          </button>
+          <button className="wide-primary" type="submit">
+            保存作业
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function WishForm({
   wish,
   onClose,

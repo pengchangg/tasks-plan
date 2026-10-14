@@ -6,6 +6,7 @@ const outputDir = ".artifacts/ui";
 const scenarios = [
   { name: "child-375", path: "/child", width: 375, height: 812 },
   { name: "child-390", path: "/child/tasks", width: 390, height: 844 },
+  { name: "homework-390", path: "/child/homework", width: 390, height: 844 },
   { name: "parent-mobile", path: "/parent", width: 390, height: 844 },
   {
     name: "tasks-mobile",
@@ -27,6 +28,12 @@ const scenarios = [
   },
   { name: "parent-desktop", path: "/parent/stats", width: 1440, height: 1000 },
   {
+    name: "homework-desktop",
+    path: "/parent/homework",
+    width: 1440,
+    height: 1000,
+  },
+  {
     name: "tasks-desktop",
     path: "/parent/tasks",
     width: 1440,
@@ -45,6 +52,7 @@ const scenarios = [
 const childLinks = {
   "/child": null,
   "/child/tasks": "任务",
+  "/child/homework": "作业",
   "/child/growth": "成长",
 };
 
@@ -53,6 +61,7 @@ const parentLinks = {
   "/parent/children": "孩子管理",
   "/parent/tasks": "任务管理",
   "/parent/wishes": "愿望管理",
+  "/parent/homework": "作业管理",
   "/parent/stats": "成长统计",
 };
 

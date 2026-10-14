@@ -1,0 +1,4 @@
+CREATE TABLE homework(id TEXT PRIMARY KEY, family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE, date TEXT NOT NULL, subject TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE INDEX idx_homework_family_date ON homework(family_id,date,created_at);
+CREATE TABLE homework_media(id TEXT PRIMARY KEY, family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE, homework_id TEXT NOT NULL REFERENCES homework(id) ON DELETE CASCADE, original_name TEXT NOT NULL, storage_name TEXT NOT NULL UNIQUE, media_type TEXT NOT NULL CHECK(media_type IN ('image','video')), mime_type TEXT NOT NULL, size_bytes INTEGER NOT NULL, sort INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+CREATE INDEX idx_homework_media_homework ON homework_media(family_id,homework_id,sort);

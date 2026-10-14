@@ -24,3 +24,12 @@ export interface StatsPayload { from: string; to: string; totalTasks: number; co
 export interface ChildInput { name: string; avatar: string; color: string }
 export interface TaskInput { childId: string; title: string; description: string; category: string; points: number; repeatRule: RepeatRule; repeatWeekday: number }
 export interface WishInput { title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
+
+// GET /api/v1/homework/?date= 的载荷：某一天的作业，按录入顺序。
+export interface Homework { id: string; date: string; subject: string; description: string; createdAt: string; media: Attachment[] }
+export interface HomeworkDay { date: string; items: Homework[] }
+
+// 作业的写请求不是 JSON 而是 multipart，所以它不对应某个 Go 的 input struct
+// （服务端那条路径没有 decode()）：date/subject/description 是普通字段，
+// files 以重复的 files 字段提交，removeMedia 以重复的 remove_media 字段提交。
+export interface HomeworkDraft { date: string; subject: string; description: string; files: File[]; removeMedia: string[] }

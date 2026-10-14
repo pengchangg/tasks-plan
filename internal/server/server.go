@@ -383,6 +383,13 @@ func (s *Server) Handler() http.Handler {
 				v.Delete("/{id}", s.parentOnly(s.deleteWish))
 				v.Post("/{id}/redeem", s.redeemWish)
 			})
+			a.Route("/homework", func(hw chi.Router) {
+				hw.Get("/", s.getHomework)
+				hw.Post("/", s.parentOnly(s.saveHomework))
+				hw.Put("/{id}", s.parentOnly(s.saveHomework))
+				hw.Delete("/{id}", s.parentOnly(s.deleteHomework))
+				hw.Delete("/{id}/media/{mediaID}", s.parentOnly(s.deleteHomeworkMedia))
+			})
 			a.Patch("/redemptions/{id}", s.completeRedemption)
 			a.Get("/media/{id}", s.media)
 			a.Get("/stats", s.stats)
@@ -2057,6 +2064,11 @@ func (s *Server) media(w http.ResponseWriter, r *http.Request) {
 	var storage, name, mimeType string
 	var created string
 	err := s.db.QueryRow(`SELECT storage_name,original_name,mime_type,created_at FROM attachments WHERE id=? AND family_id=?`, chi.URLParam(r, "id"), x.FamilyID).Scan(&storage, &name, &mimeType, &created)
+	if err != nil {
+		// 作业媒体不与 attachments 共用一张表（attachments 的 submission/redemption
+		// 二选一约束容不下第三个所有者），所以这里退一步查作业表。
+		err = s.db.QueryRow(`SELECT storage_name,original_name,mime_type,created_at FROM homework_media WHERE id=? AND family_id=?`, chi.URLParam(r, "id"), x.FamilyID).Scan(&storage, &name, &mimeType, &created)
+	}
 	if err != nil {
 		problem(w, 404, "not_found", "media not found")
 		return

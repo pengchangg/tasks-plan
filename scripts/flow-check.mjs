@@ -692,6 +692,148 @@ assert.equal(
 await manualReward.getByRole("button", { name: "关闭积分到账提示" }).click();
 await page.locator(".reward-celebration").waitFor({ state: "detached" });
 
+// ── 家庭作业：家长录入（学科 + 文字 + 图片）→ 孩子端当天可见、谚语带拼音、灯箱可左右
+// 切换（含首尾循环与滑动）→ 家长改删。家长密码此刻已经是上面改过的 1357。
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "作业管理" }).click();
+await page.waitForURL(/\/parent\/homework$/);
+await page.getByRole("button", { name: "新增作业" }).click();
+const homeworkModal = page.locator(".form-modal");
+await homeworkModal.waitFor();
+await homeworkModal.getByRole("button", { name: "语文" }).click();
+await homeworkModal.getByLabel("文字描述").fill("抄写第三课生字各三遍，明天听写。");
+await homeworkModal.locator('input[type="file"]').setInputFiles([
+  { name: "homework-a.png", mimeType: "image/png", buffer: proofPng },
+  { name: "homework-b.png", mimeType: "image/png", buffer: proofPng },
+]);
+await homeworkModal.getByText("已选 2 个文件 · 点击更换").waitFor();
+// 提交前的本地预览必须真的解出选中的图（PRD §3.2 的实时预览），顺便保证截图不是空框。
+await assertRealImage(
+  homeworkModal.locator(".upload-preview img").first(),
+  proofSize,
+);
+await page.screenshot({
+  path: ".artifacts/ui/homework-form.png",
+  fullPage: true,
+});
+await homeworkModal.getByRole("button", { name: "保存作业" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+await page.getByText("作业已保存").waitFor();
+const homeworkRow = page
+  .locator(".homework-admin-row")
+  .filter({ hasText: "语文" });
+await homeworkRow.waitFor();
+assert.ok((await homeworkRow.innerText()).includes("抄写第三课生字各三遍"));
+assert.ok((await homeworkRow.innerText()).includes("2 个附件"));
+
+await enterChild();
+await page.getByRole("link", { name: "作业" }).click();
+await page.waitForURL(/\/child\/homework$/);
+const banner = page.locator(".proverb-banner");
+await banner.waitFor();
+assert.ok((await banner.innerText()).includes("每日谚语"));
+assert.ok((await banner.locator("rt").first().innerText()).length > 0);
+// 霞鹜文楷是自托管分包：字体真的从 /fonts 加载出来，check() 才是 true。
+await page.evaluate(() => document.fonts.ready);
+assert.equal(
+  await page.evaluate(() => document.fonts.check('16px "LXGW WenKai GB"')),
+  true,
+);
+const homeworkCard = page
+  .locator(".homework-card")
+  .filter({ hasText: "抄写第三课生字各三遍" });
+await homeworkCard.waitFor();
+assert.ok(
+  (await homeworkCard.locator(".subject-chip").innerText()).includes("语文"),
+);
+assert.ok(
+  (await homeworkCard.locator(".homework-desc").innerText()).includes(
+    "抄写第三课生字各三遍",
+  ),
+);
+const homeworkThumb = homeworkCard.locator(".homework-thumb img").first();
+await assertRealImage(homeworkThumb, proofSize);
+const viewer = page.locator(".homework-viewer");
+const viewerCount = async () =>
+  (await viewer.locator(".viewer-count").innerText()).trim();
+const fireTouch = async (type, x) => {
+  await page.evaluate(
+    ([kind, clientX]) => {
+      const stage = document.querySelector(".homework-viewer .viewer-stage");
+      const event = new Event(kind, { bubbles: true });
+      Object.defineProperty(event, "touches", {
+        value: [{ clientX, clientY: 300 }],
+      });
+      Object.defineProperty(event, "changedTouches", {
+        value: [{ clientX, clientY: 300 }],
+      });
+      stage.dispatchEvent(event);
+    },
+    [type, x],
+  );
+};
+await homeworkThumb.click();
+await viewer.waitFor();
+assert.equal(await viewerCount(), "1 / 2");
+await viewer.getByRole("button", { name: "下一张" }).click();
+assert.equal(await viewerCount(), "2 / 2");
+// 首尾循环：最后一张再往后回到第一张。
+await viewer.getByRole("button", { name: "下一张" }).click();
+assert.equal(await viewerCount(), "1 / 2");
+await fireTouch("touchstart", 320);
+await fireTouch("touchend", 180);
+assert.equal(await viewerCount(), "2 / 2");
+await fireTouch("touchstart", 180);
+await fireTouch("touchend", 320);
+assert.equal(await viewerCount(), "1 / 2");
+// 触摸滑动之后浏览器还会补一次 click：那一次必须被吞掉，否则一划就关。
+await page.evaluate(() => {
+  document
+    .querySelector(".homework-viewer")
+    .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+});
+assert.ok(await viewer.isVisible());
+await viewer.getByRole("button", { name: "关闭预览" }).click();
+await viewer.waitFor({ state: "detached" });
+// 日期导航：前一天没有作业 → 空状态，标题改成日期，但谚语仍然在。
+await page.getByRole("button", { name: "前一天" }).click();
+await page.locator(".empty-state").waitFor();
+assert.ok(
+  (await page.locator(".homework-head h1").innerText()).includes("· 作业"),
+);
+assert.ok(await page.locator(".proverb-banner").isVisible());
+await page.getByRole("button", { name: "回到今天" }).click();
+await page
+  .locator(".homework-card")
+  .filter({ hasText: "抄写第三课生字各三遍" })
+  .waitFor();
+assert.ok(
+  (await page.locator(".homework-head h1").innerText()).includes("今日作业"),
+);
+
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "作业管理" }).click();
+await page.waitForURL(/\/parent\/homework$/);
+await page.getByRole("button", { name: "编辑语文" }).click();
+const editHomeworkModal = page.locator(".form-modal");
+await editHomeworkModal.getByRole("button", { name: "删除homework-a.png" }).click();
+await editHomeworkModal.getByRole("button", { name: "保存作业" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+await page.getByText("作业已保存").waitFor();
+await page
+  .locator(".homework-admin-row")
+  .filter({ hasText: "1 个附件" })
+  .waitFor();
+await page.getByRole("button", { name: "删除语文" }).click();
+await page.getByRole("button", { name: "确认删除" }).click();
+await page.getByText("作业已删除").waitFor();
+await page.locator(".homework-admin-row").waitFor({ state: "detached" });
+// 孩子端这一天跟着空了。
+await enterChild();
+await page.getByRole("link", { name: "作业" }).click();
+await page.waitForURL(/\/child\/homework$/);
+await page.locator(".empty-state").waitFor();
+
 assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({
@@ -722,6 +864,10 @@ console.log(
     growthDayStats: true,
     growthBackfill: true,
     statsRange: true,
+    homework: true,
+    homeworkViewer: true,
+    homeworkDateNav: true,
+    homeworkFont: true,
     consoleErrors: errors.length,
   }),
 );

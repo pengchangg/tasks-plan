@@ -3,8 +3,10 @@ module growjoy
 go 1.22
 
 require (
+	github.com/disintegration/imaging v1.6.2
 	github.com/go-chi/chi/v5 v5.2.1
 	golang.org/x/crypto v0.33.0
+	golang.org/x/image v0.23.0
 	modernc.org/sqlite v1.36.1
 )
 

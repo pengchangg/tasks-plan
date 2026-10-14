@@ -6,6 +6,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"io"
 	"log/slog"
 	"math"
@@ -1263,5 +1267,355 @@ func TestParentPointsAdjustmentIsIdempotentScopedAndCreditsGrowth(t *testing.T) 
 	other := sessionFor(t, s, otherFamily(t, s, "OTHER", "Asia/Shanghai"), "parent", "par-other", "")
 	if w = doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", body, other, "award-other"); w.Code != 404 {
 		t.Fatalf("cross family award: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// homeworkFile keeps the upload order deterministic: multipartRequest takes a
+// map, and the order the parts arrive in is the order the media renders in.
+type homeworkFile struct {
+	name    string
+	content []byte
+}
+
+func homeworkRequest(t *testing.T, method, path string, cookie *http.Cookie, fields [][2]string, files []homeworkFile) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, field := range fields {
+		if err := writer.WriteField(field[0], field[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range files {
+		part, err := writer.CreateFormFile("files", file.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = part.Write(file.content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(method, path, &body)
+	r.Header.Set("Content-Type", writer.FormDataContentType())
+	if cookie != nil {
+		r.AddCookie(cookie)
+	}
+	return r
+}
+
+func runHomework(t *testing.T, h http.Handler, method, path string, cookie *http.Cookie, fields [][2]string, files []homeworkFile) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, homeworkRequest(t, method, path, cookie, fields, files))
+	return rec
+}
+
+// solidPNG is a decodable image: pngMagic is only a header, and the homework
+// pipeline really decodes whatever it is handed.
+func solidPNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			img.Set(x, y, color.RGBA{R: 40, G: 120, B: 200, A: 255})
+		}
+	}
+	var out bytes.Buffer
+	if err := png.Encode(&out, img); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+// jpegWithOrientation builds a width×height JPEG and splices an APP1/EXIF
+// segment holding only the orientation tag right after the SOI marker — the
+// layout imaging.readOrientation expects (MM byte order, single IFD0 entry).
+func jpegWithOrientation(t *testing.T, width, height int, orientation uint16) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := range height {
+		for x := range width {
+			img.Set(x, y, color.RGBA{R: 200, G: 40, B: 40, A: 255})
+		}
+	}
+	var raw bytes.Buffer
+	if err := jpeg.Encode(&raw, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	ifd := []byte{0x00, 0x01,
+		0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, byte(orientation), 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00}
+	exif := append([]byte("Exif\x00\x00MM\x00*\x00\x00\x00\x08"), ifd...)
+	app1 := append([]byte{0xff, 0xe1, byte((len(exif) + 2) >> 8), byte(len(exif) + 2)}, exif...)
+	out := append([]byte{0xff, 0xd8}, app1...)
+	return append(out, raw.Bytes()[2:]...)
+}
+
+// fakeMP4 is the smallest body isMP4 accepts: a 24-byte ftyp box.
+func fakeMP4() []byte {
+	out := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'm', 'p', '4', '2',
+		'm', 'p', '4', '2', 'i', 's', 'o', 'm', 0x00, 0x00, 0x00, 0x01}
+	return out
+}
+
+func homeworkDay(t *testing.T, h http.Handler, cookie *http.Cookie, date string) HomeworkDay {
+	t.Helper()
+	w := doJSON(t, h, "GET", "/api/v1/homework/?date="+date, nil, cookie, "")
+	if w.Code != 200 {
+		t.Fatalf("homework day: %d %s", w.Code, w.Body.String())
+	}
+	var day HomeworkDay
+	if err := json.NewDecoder(w.Body).Decode(&day); err != nil {
+		t.Fatal(err)
+	}
+	return day
+}
+
+func TestHomeworkStoresNormalizedMediaAndServesItToBothEnds(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	child := childCookie(t, h, "")
+	date := "2026-05-04"
+	clip := fakeMP4()
+	w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", date}, {"subject", "语文"}, {"description", "抄写第三课生字各三遍"},
+	}, []homeworkFile{
+		{name: "portrait.jpg", content: jpegWithOrientation(t, 40, 20, 6)},
+		{name: "flat.png", content: solidPNG(t, 8, 8)},
+		{name: "wide.png", content: solidPNG(t, 2600, 4)},
+		{name: "clip.mp4", content: clip},
+	})
+	if w.Code != 200 {
+		t.Fatalf("create homework: %d %s", w.Code, w.Body.String())
+	}
+	day := homeworkDay(t, h, parent, date)
+	if len(day.Items) != 1 {
+		t.Fatalf("items=%d, want 1", len(day.Items))
+	}
+	if day.Date != date || day.Items[0].Subject != "语文" || day.Items[0].Description != "抄写第三课生字各三遍" {
+		t.Fatalf("unexpected item: %+v", day.Items[0])
+	}
+	media := day.Items[0].Media
+	if len(media) != 4 {
+		t.Fatalf("media=%d, want 4", len(media))
+	}
+	for i, want := range []string{"portrait.jpg", "flat.png", "wide.png", "clip.mp4"} {
+		if media[i].Name != want {
+			t.Fatalf("media[%d].name=%q, want %q", i, media[i].Name, want)
+		}
+		if !strings.HasPrefix(media[i].URL, "/api/v1/media/") {
+			t.Fatalf("media[%d].url=%q", i, media[i].URL)
+		}
+	}
+	if media[0].Type != "image" || media[1].Type != "image" || media[2].Type != "image" || media[3].Type != "video" {
+		t.Fatalf("unexpected media types: %+v", media)
+	}
+	fetch := func(url string, cookie *http.Cookie) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest("GET", url, nil)
+		r.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec
+	}
+	decode := func(rec *httptest.ResponseRecorder) image.Image {
+		t.Helper()
+		img, format, err := image.Decode(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("stored media is not decodable: %v", err)
+		}
+		if format != "jpeg" {
+			t.Fatalf("stored image format=%q, want jpeg", format)
+		}
+		return img
+	}
+	// The child end reads the same media the parent uploaded.
+	portrait := fetch(media[0].URL, child)
+	if portrait.Code != 200 || !strings.Contains(portrait.Header().Get("Content-Type"), "image/jpeg") {
+		t.Fatalf("portrait: %d %q", portrait.Code, portrait.Header().Get("Content-Type"))
+	}
+	rotated := decode(portrait)
+	if rotated.Bounds().Dx() != 20 || rotated.Bounds().Dy() != 40 {
+		t.Fatalf("EXIF orientation not applied: %dx%d, want 20x40", rotated.Bounds().Dx(), rotated.Bounds().Dy())
+	}
+	// A PNG is re-encoded as JPEG too, and neither image is ever enlarged.
+	flat := fetch(media[1].URL, child)
+	if flat.Code != 200 || !strings.Contains(flat.Header().Get("Content-Type"), "image/jpeg") {
+		t.Fatalf("flat png: %d %q", flat.Code, flat.Header().Get("Content-Type"))
+	}
+	if bounds := decode(flat).Bounds(); bounds.Dx() != 8 || bounds.Dy() != 8 {
+		t.Fatalf("small image was resized: %dx%d, want 8x8", bounds.Dx(), bounds.Dy())
+	}
+	// Anything past 2560 on the longest edge is scaled down, aspect ratio kept.
+	wide := decode(fetch(media[2].URL, child))
+	if wide.Bounds().Dx() != homeworkMaxEdge || wide.Bounds().Dy() != 3 {
+		t.Fatalf("wide image %dx%d, want %dx3", wide.Bounds().Dx(), wide.Bounds().Dy(), homeworkMaxEdge)
+	}
+	// Videos are stored byte for byte, no transcoding.
+	video := fetch(media[3].URL, child)
+	if video.Code != 200 || !strings.Contains(video.Header().Get("Content-Type"), "video/mp4") {
+		t.Fatalf("video: %d %q", video.Code, video.Header().Get("Content-Type"))
+	}
+	if !bytes.Equal(video.Body.Bytes(), clip) {
+		t.Fatalf("video bytes changed: %d bytes, want %d", video.Body.Len(), len(clip))
+	}
+	// Another family sees neither the entry nor its media.
+	foreign := sessionFor(t, s, otherFamily(t, s, "OTHER", "Asia/Shanghai"), "parent", "par-other", "")
+	if other := homeworkDay(t, h, foreign, date); len(other.Items) != 0 {
+		t.Fatalf("other family sees %d items", len(other.Items))
+	}
+	if other := fetch(media[0].URL, foreign); other.Code != 404 {
+		t.Fatalf("cross family media: %d", other.Code)
+	}
+}
+
+func TestHomeworkIsParentOnlyAndValidatesSubjectEditAndDelete(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	child := childCookie(t, h, "")
+	date := "2026-05-05"
+	fields := func(description string) [][2]string {
+		return [][2]string{{"date", date}, {"subject", "数学"}, {"description", description}}
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", child, fields("写口算"), nil); w.Code != 403 {
+		t.Fatalf("child create: %d %s", w.Code, w.Body.String())
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{{"date", date}, {"subject", "体育课"}, {"description", "跳绳"}}, nil); w.Code != 400 {
+		t.Fatalf("unknown subject: %d %s", w.Code, w.Body.String())
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{{"date", "2026-13-01"}, {"subject", "数学"}, {"description", "写口算"}}, nil); w.Code != 400 {
+		t.Fatalf("bad date: %d %s", w.Code, w.Body.String())
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{{"date", date}, {"subject", "数学"}}, nil); w.Code != 400 {
+		t.Fatalf("empty homework: %d %s", w.Code, w.Body.String())
+	}
+	w := runHomework(t, h, "POST", "/api/v1/homework/", parent, fields("写口算"), nil)
+	if w.Code != 200 {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	// A second entry carries the media this test edits and deletes.
+	w = runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", date}, {"subject", "语文"}, {"description", "抄写生字"},
+	}, []homeworkFile{{name: "a.png", content: solidPNG(t, 6, 6)}})
+	if w.Code != 200 {
+		t.Fatalf("create with media: %d %s", w.Code, w.Body.String())
+	}
+	var withMedia struct {
+		ID      string   `json:"id"`
+		Skipped []string `json:"skipped"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&withMedia); err != nil {
+		t.Fatal(err)
+	}
+	day := homeworkDay(t, h, parent, date)
+	if len(day.Items) != 2 || day.Items[0].ID != created.ID || day.Items[1].ID != withMedia.ID {
+		t.Fatalf("unexpected day: %+v", day.Items)
+	}
+	if len(day.Items[1].Media) != 1 || day.Items[1].Media[0].Name != "a.png" {
+		t.Fatalf("unexpected media: %+v", day.Items[1].Media)
+	}
+	first := day.Items[1].Media[0].ID
+	// Editing replaces one attachment with another in a single request.
+	w = runHomework(t, h, "PUT", "/api/v1/homework/"+withMedia.ID, parent, [][2]string{
+		{"date", date}, {"subject", "语文"}, {"description", "抄写生字两遍"}, {"remove_media", first},
+	}, []homeworkFile{{name: "b.png", content: solidPNG(t, 7, 7)}})
+	if w.Code != 200 {
+		t.Fatalf("edit: %d %s", w.Code, w.Body.String())
+	}
+	day = homeworkDay(t, h, parent, date)
+	if len(day.Items[1].Media) != 1 || day.Items[1].Media[0].Name != "b.png" {
+		t.Fatalf("edit did not replace the media: %+v", day.Items[1].Media)
+	}
+	second := day.Items[1].Media[0].ID
+	r := httptest.NewRequest("GET", "/api/v1/media/"+first, nil)
+	r.AddCookie(parent)
+	served := httptest.NewRecorder()
+	h.ServeHTTP(served, r)
+	if served.Code != 404 {
+		t.Fatalf("removed media is still served: %d", served.Code)
+	}
+	// An edit may not empty the entry: no description and no surviving media.
+	if w = runHomework(t, h, "PUT", "/api/v1/homework/"+withMedia.ID, parent, [][2]string{
+		{"date", date}, {"subject", "语文"}, {"remove_media", second},
+	}, nil); w.Code != 400 {
+		t.Fatalf("emptied homework: %d %s", w.Code, w.Body.String())
+	}
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+withMedia.ID+"/media/"+second, parent, nil, nil); w.Code != 204 {
+		t.Fatalf("delete media: %d %s", w.Code, w.Body.String())
+	}
+	if day = homeworkDay(t, h, parent, date); len(day.Items[1].Media) != 0 || day.Items[1].Description != "抄写生字两遍" {
+		t.Fatalf("media survived deletion: %+v", day.Items[1])
+	}
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+withMedia.ID+"/media/"+second, parent, nil, nil); w.Code != 404 {
+		t.Fatalf("re-delete media: %d %s", w.Code, w.Body.String())
+	}
+	// Unsupported content is skipped and reported instead of failing the batch.
+	w = runHomework(t, h, "POST", "/api/v1/homework/", parent, fields("读课文"), []homeworkFile{
+		{name: "notes.txt", content: []byte("plain text")},
+	})
+	if w.Code != 200 {
+		t.Fatalf("skipped upload: %d %s", w.Code, w.Body.String())
+	}
+	var skipped struct {
+		Skipped []string `json:"skipped"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&skipped); err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped.Skipped) != 1 || skipped.Skipped[0] != "notes.txt" {
+		t.Fatalf("skipped=%+v, want [notes.txt]", skipped.Skipped)
+	}
+	// Everything below belongs to another family and must stay unreachable.
+	other := otherFamily(t, s, "OTHER", "Asia/Shanghai")
+	foreign := sessionFor(t, s, other, "parent", "par-other", "")
+	w = runHomework(t, h, "POST", "/api/v1/homework/", foreign, fields("别人的作业"), nil)
+	if w.Code != 200 {
+		t.Fatalf("foreign create: %d %s", w.Code, w.Body.String())
+	}
+	var foreignCreated struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&foreignCreated); err != nil {
+		t.Fatal(err)
+	}
+	if w = runHomework(t, h, "PUT", "/api/v1/homework/"+foreignCreated.ID, parent, fields("改别人的作业"), nil); w.Code != 404 {
+		t.Fatalf("cross family edit: %d %s", w.Code, w.Body.String())
+	}
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+foreignCreated.ID, parent, nil, nil); w.Code != 404 {
+		t.Fatalf("cross family delete: %d %s", w.Code, w.Body.String())
+	}
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+foreignCreated.ID+"/media/hm_missing", parent, nil, nil); w.Code != 404 {
+		t.Fatalf("cross family media delete: %d %s", w.Code, w.Body.String())
+	}
+	// Deleting an entry cascades its media rows and removes the files.
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+created.ID, parent, nil, nil); w.Code != 204 {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+	if day = homeworkDay(t, h, parent, date); len(day.Items) != 2 || day.Items[0].ID == created.ID {
+		t.Fatalf("deleted entry still listed: %+v", day.Items)
+	}
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+created.ID, parent, nil, nil); w.Code != 404 {
+		t.Fatalf("re-delete: %d %s", w.Code, w.Body.String())
+	}
+	if w = runHomework(t, h, "DELETE", "/api/v1/homework/"+withMedia.ID, parent, nil, nil); w.Code != 204 {
+		t.Fatalf("delete media entry: %d %s", w.Code, w.Body.String())
+	}
+	var stored int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM homework_media WHERE homework_id=?`, withMedia.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 0 {
+		t.Fatalf("media rows survived the cascade: %d", stored)
 	}
 }

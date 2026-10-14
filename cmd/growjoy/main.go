@@ -253,15 +253,16 @@ func tarMedia(w io.Writer, dir string) error {
 }
 
 // mediaName is the shape uploads are written under: id("media") plus the
-// extension inspectUpload returns. Anything else in the media directory — a
-// subdirectory, an editor's backup, a .DS_Store — is not ours to delete.
-var mediaName = regexp.MustCompile(`^media_[0-9a-f]{32}\.(jpg|png|webp|mp4|webm)$`)
+// extension inspectUpload or inspectHomeworkUpload returns. Anything else in
+// the media directory — a subdirectory, an editor's backup, a .DS_Store — is
+// not ours to delete.
+var mediaName = regexp.MustCompile(`^media_[0-9a-f]{32}\.(jpg|png|webp|mp4|mov|m4v|webm)$`)
 
-// gc reclaims files in the media directory that no attachments row references.
-// They are the residue of a child or task deleted while an upload was in
-// flight. It only ever reports unless --delete is given, and it refuses to
-// delete anything when the database holds no attachments at all, because that
-// usually means GROWJOY_DB points at the wrong file.
+// gc reclaims files in the media directory that no attachments or homework_media
+// row references. They are the residue of a child, task or homework deleted
+// while an upload was in flight. It only ever reports unless --delete is given,
+// and it refuses to delete anything when the database holds no attachments at
+// all, because that usually means GROWJOY_DB points at the wrong file.
 func gc(args []string) error {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
 	media := fs.Bool("media", false, "collect orphaned media files")
@@ -279,23 +280,25 @@ func gc(args []string) error {
 	}
 	defer app.Close()
 	known := map[string]struct{}{}
-	rows, err := app.DB().Query(`SELECT storage_name FROM attachments`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var name string
-		if err = rows.Scan(&name); err != nil {
+	for _, table := range []string{"attachments", "homework_media"} {
+		rows, err := app.DB().Query(`SELECT storage_name FROM ` + table)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var name string
+			if err = rows.Scan(&name); err != nil {
+				rows.Close()
+				return err
+			}
+			known[name] = struct{}{}
+		}
+		if err = rows.Err(); err != nil {
 			rows.Close()
 			return err
 		}
-		known[name] = struct{}{}
-	}
-	if err = rows.Err(); err != nil {
 		rows.Close()
-		return err
 	}
-	rows.Close()
 	mediaDir := env("GROWJOY_MEDIA", "data/media")
 	entries, err := os.ReadDir(mediaDir)
 	if err != nil {

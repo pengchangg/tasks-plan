@@ -6,6 +6,8 @@ import type {
   AppState,
   Attachment,
   Child,
+  HomeworkDay,
+  HomeworkDraft,
   StatsPayload,
   TaskSubmission,
   Wish,
@@ -134,6 +136,11 @@ export function useAppStore() {
     daily: [],
     categories: [],
   });
+  // 作业按日期浏览：date 为空表示还没加载过，页面挂载时用家庭本地的今天填上。
+  const [homework, setHomework] = useState<HomeworkDay>({
+    date: "",
+    items: [],
+  });
 
   const refresh = useCallback(async () => {
     const [stateResponse, statsResponse] = await Promise.all([
@@ -142,6 +149,17 @@ export function useAppStore() {
     ]);
     setState((await stateResponse.json()) as AppState);
     setStats(await statsResponse.json());
+  }, []);
+
+  // 作业与任务不同：它按「看的是哪一天」取，所以载荷不进 /state，而是单独一个端点，
+  // 由 homework.date 决定当前这一天。失败时保留上一次的内容并提示。
+  const loadHomework = useCallback(async (date: string) => {
+    try {
+      const response = await request(`/homework/?date=${date}`);
+      setHomework((await response.json()) as HomeworkDay);
+    } catch (error) {
+      setMessage(describe(error, "加载作业失败"));
+    }
   }, []);
 
   // connect opens the child end, the app's default view. It runs on every page
@@ -351,6 +369,48 @@ export function useAppStore() {
       };
       void run(() => request(`/wishes/${id}`, json("PUT", body)));
     },
+    setHomeworkDate: (date: string) => void loadHomework(date),
+    // 作业是 multipart 写入：字段名与 Go 侧的 FormValue/Value 一一对应，files 与
+    // remove_media 都是可重复字段。成功提示在操作内部 setMessage，否则会被 run 的
+    // 通用失败文案/空文案覆盖。
+    saveHomework: (draft: HomeworkDraft, id?: string) =>
+      void run(async () => {
+        const body = new FormData();
+        body.set("date", draft.date);
+        body.set("subject", draft.subject);
+        body.set("description", draft.description);
+        for (const file of draft.files) body.append("files", file);
+        for (const mediaId of draft.removeMedia) {
+          body.append("remove_media", mediaId);
+        }
+        const response = await request(`/homework/${id ?? ""}`, {
+          method: id ? "PUT" : "POST",
+          body,
+        });
+        const saved = (await response.json()) as {
+          id: string;
+          skipped?: string[];
+        };
+        // 表单里的日期可能被改过，列表跟着它走。
+        await loadHomework(draft.date);
+        setMessage(
+          saved.skipped?.length
+            ? `已保存，但跳过了 ${saved.skipped.length} 个不支持的文件：${saved.skipped.join("、")}`
+            : "作业已保存",
+        );
+      }),
+    deleteHomework: (id: string) =>
+      void run(async () => {
+        await request(`/homework/${id}`, json("DELETE"));
+        await loadHomework(homework.date);
+        setMessage("作业已删除");
+      }),
+    deleteHomeworkMedia: (homeworkId: string, mediaId: string) =>
+      void run(async () => {
+        await request(`/homework/${homeworkId}/media/${mediaId}`, json("DELETE"));
+        await loadHomework(homework.date);
+        setMessage("附件已删除");
+      }),
   };
   return {
     state,
@@ -363,6 +423,8 @@ export function useAppStore() {
     connected,
     message,
     stats,
+    today,
+    homework,
     dismissMessage: () => setMessage(""),
   };
 }
