@@ -103,7 +103,7 @@
 .homework-thumb{position:relative;padding:0;border:1px solid var(--line);border-radius:6px;background:#000;overflow:hidden;aspect-ratio:1;display:grid;place-items:center}
 .homework-thumb img,.homework-thumb video{width:100%;height:100%;object-fit:cover;display:block}
 .media-badge{position:absolute;right:6px;bottom:6px;width:22px;height:22px;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;font-size:11px;display:grid;place-items:center}
-.homework-viewer{padding:0;place-items:stretch}
+.homework-viewer{padding:0;place-items:stretch;overflow:hidden}
 .viewer-stage{margin:0;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:56px 20px 24px}
 .viewer-stage img{max-width:100%;max-height:calc(100vh - 180px);border-radius:8px;display:block}
 .viewer-stage .media-video{max-width:min(100%,760px);max-height:calc(100vh - 180px);width:auto}
@@ -111,6 +111,11 @@
 .viewer-count{color:#fff;font-size:11px;opacity:.75}
 .viewer-nav{position:absolute;top:50%;transform:translateY(-50%);width:42px;height:42px;border-radius:50%;background:rgba(255,255,255,.9);display:grid;place-items:center;z-index:2}
 .viewer-nav.prev{left:12px}.viewer-nav.next{right:12px}
+.zoomable-image{touch-action:none;cursor:grab;user-select:none;-webkit-user-drag:none;-webkit-touch-callout:none}
+.zoomable-image.grabbing{cursor:grabbing}
+.zoom-controls{position:absolute;top:13px;right:56px;display:flex;gap:6px;z-index:2}
+.zoom-controls button{width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.92);box-shadow:0 4px 14px rgba(0,0,0,.28);display:grid;place-items:center;border:0;color:var(--ink)}
+.zoom-controls button:disabled{opacity:.4;cursor:default}
 .homework-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:14px 0 18px}
 .homework-toolbar input[type=date]{padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper);font-size:12px}
 .homework-admin-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:var(--paper);margin-bottom:10px}

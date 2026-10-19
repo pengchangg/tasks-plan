@@ -26,6 +26,7 @@ import {
   MessageSquare,
   Pencil,
   Plus,
+  RotateCcw,
   Sparkles,
   Star,
   Trash2,
@@ -34,6 +35,8 @@ import {
   Users,
   Video,
   X,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 import { useAppStore } from "./store";
 import { dayActivity, dayDigest, familyDate, shiftDate } from "./domain";
@@ -1262,6 +1265,213 @@ function ProverbBanner({ date }: { date: string }) {
   );
 }
 
+// 图片缩放灯箱的共享实现：双指捏合/双击/按钮缩放 + 缩放后单指拖动平移。
+// shortcut: 绕图片中心缩放、不做捏合焦点跟随，平移可补偿；放大状态随图片切换重置（父级用 key）。
+function ZoomableImage({
+  src,
+  alt,
+  onScaleChange,
+}: {
+  src?: string;
+  alt: string;
+  onScaleChange?: (scale: number) => void;
+}) {
+  const [scale, setScaleState] = useState(1);
+  const [offset, setOffsetState] = useState({ x: 0, y: 0 });
+  const [grabbing, setGrabbing] = useState(false);
+  // 手势读最新的 scale/offset，避免闭包拿到旧值。
+  const scaleRef = useRef(1);
+  const offsetRef = useRef({ x: 0, y: 0 });
+  const pinch = useRef<{ dist: number; scale: number } | null>(null);
+  const pan = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(
+    null,
+  );
+  const tap = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const lastTap = useRef(0);
+  // 触摸双击之后浏览器可能补一次 dblclick，别让它把缩放又切回去。
+  const touchToggle = useRef(0);
+
+  const setZoom = (next: number) => {
+    const clamped = Math.min(5, Math.max(1, next));
+    scaleRef.current = clamped;
+    setScaleState(clamped);
+    if (clamped <= 1) {
+      offsetRef.current = { x: 0, y: 0 };
+      setOffsetState({ x: 0, y: 0 });
+    }
+    onScaleChange?.(clamped);
+  };
+  const panTo = (x: number, y: number) => {
+    offsetRef.current = { x, y };
+    setOffsetState({ x, y });
+  };
+  const reset = () => setZoom(1);
+  const zoomBy = (factor: number) => setZoom(scaleRef.current * factor);
+  const toggle = () => (scaleRef.current > 1 ? reset() : setZoom(2.5));
+
+  const onTouchStart = (event: React.TouchEvent) => {
+    if ((event.target as HTMLElement).closest(".zoom-controls")) return;
+    if (event.touches.length === 2) {
+      const [a, b] = [event.touches[0], event.touches[1]];
+      pinch.current = {
+        dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY),
+        scale: scaleRef.current,
+      };
+      tap.current = null;
+      return;
+    }
+    const t = event.touches[0];
+    tap.current = { x: t.clientX, y: t.clientY, moved: false };
+    pan.current =
+      scaleRef.current > 1
+        ? {
+            sx: t.clientX,
+            sy: t.clientY,
+            ox: offsetRef.current.x,
+            oy: offsetRef.current.y,
+          }
+        : null;
+    setGrabbing(scaleRef.current > 1);
+  };
+  const onTouchMove = (event: React.TouchEvent) => {
+    if (pinch.current && event.touches.length === 2) {
+      const [a, b] = [event.touches[0], event.touches[1]];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      setZoom(pinch.current.scale * (dist / Math.max(1, pinch.current.dist)));
+      return;
+    }
+    if (pan.current && event.touches.length === 1) {
+      const t = event.touches[0];
+      panTo(
+        pan.current.ox + (t.clientX - pan.current.sx),
+        pan.current.oy + (t.clientY - pan.current.sy),
+      );
+      if (tap.current) tap.current.moved = true;
+      return;
+    }
+    if (tap.current && event.touches.length === 1) {
+      const t = event.touches[0];
+      if (
+        Math.abs(t.clientX - tap.current.x) > 10 ||
+        Math.abs(t.clientY - tap.current.y) > 10
+      )
+        tap.current.moved = true;
+    }
+  };
+  const onTouchEnd = (event: React.TouchEvent) => {
+    if (pinch.current && event.touches.length < 2) {
+      pinch.current = null;
+      return;
+    }
+    if (pan.current && event.touches.length === 0) {
+      const wasTap = tap.current && !tap.current.moved;
+      pan.current = null;
+      setGrabbing(false);
+      if (!wasTap) {
+        tap.current = null;
+        return;
+      }
+      // 放大状态下没拖动 = 一次 tap，继续走双击判定。
+    }
+    if (tap.current && event.touches.length === 0) {
+      const t = tap.current;
+      tap.current = null;
+      setGrabbing(false);
+      if (t.moved) return;
+      const now = Date.now();
+      if (now - lastTap.current < 300) {
+        lastTap.current = 0;
+        touchToggle.current = now;
+        toggle();
+      } else {
+        lastTap.current = now;
+      }
+    }
+  };
+  const onMouseDown = (event: React.MouseEvent) => {
+    if ((event.target as HTMLElement).closest(".zoom-controls")) return;
+    if (scaleRef.current > 1) {
+      pan.current = {
+        sx: event.clientX,
+        sy: event.clientY,
+        ox: offsetRef.current.x,
+        oy: offsetRef.current.y,
+      };
+      setGrabbing(true);
+    }
+  };
+  const onMouseMove = (event: React.MouseEvent) => {
+    if (pan.current && grabbing)
+      panTo(
+        pan.current.ox + (event.clientX - pan.current.sx),
+        pan.current.oy + (event.clientY - pan.current.sy),
+      );
+  };
+  const onMouseUp = () => {
+    pan.current = null;
+    setGrabbing(false);
+  };
+
+  return (
+    <>
+      <img
+        className={`zoomable-image${grabbing ? " grabbing" : ""}`}
+        src={src}
+        alt={alt}
+        draggable={false}
+        data-scale={Math.round(scale * 100) / 100}
+        style={{
+          transform: `translate(${offset.x}px,${offset.y}px) scale(${scale})`,
+        }}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
+        onWheel={(event) => {
+          if ((event.target as HTMLElement).closest(".zoom-controls")) return;
+          zoomBy(event.deltaY < 0 ? 1.25 : 1 / 1.25);
+        }}
+        onDoubleClick={() => {
+          if (Date.now() - touchToggle.current < 500) return;
+          toggle();
+        }}
+      />
+      <div
+        className="zoom-controls"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          type="button"
+          aria-label="放大"
+          onClick={() => zoomBy(1.25)}
+          disabled={scale >= 5}
+        >
+          <ZoomIn size={18} />
+        </button>
+        <button
+          type="button"
+          aria-label="缩小"
+          onClick={() => zoomBy(1 / 1.25)}
+          disabled={scale <= 1}
+        >
+          <ZoomOut size={18} />
+        </button>
+        <button
+          type="button"
+          aria-label="重置"
+          onClick={reset}
+          disabled={scale === 1}
+        >
+          <RotateCcw size={18} />
+        </button>
+      </div>
+    </>
+  );
+}
+
 function HomeworkViewer({
   items,
   index,
@@ -1277,6 +1487,8 @@ function HomeworkViewer({
   const startX = useRef<number | null>(null);
   // 滑动本身也会在背景上冒泡出一次 click；标记一下就吞掉那一次，避免划过就关掉。
   const swiped = useRef(false);
+  // 放大后单指拖动是平移，不再触发上一张/下一张。
+  const scaleRef = useRef(1);
   const item = items[index];
   const step = (delta: number) =>
     onIndex((index + delta + items.length) % items.length);
@@ -1307,9 +1519,10 @@ function HomeworkViewer({
           swiped.current = false;
         }}
         onTouchEnd={(event) => {
-          const dx = (event.changedTouches[0]?.clientX ?? 0) - (startX.current ?? 0);
+          const dx =
+            (event.changedTouches[0]?.clientX ?? 0) - (startX.current ?? 0);
           startX.current = null;
-          if (Math.abs(dx) < 50) return;
+          if (scaleRef.current > 1 || Math.abs(dx) < 50) return;
           swiped.current = true;
           step(dx < 0 ? 1 : -1);
         }}
@@ -1317,7 +1530,14 @@ function HomeworkViewer({
         {item.type === "video" ? (
           <video className="media-video" src={item.url} controls autoPlay />
         ) : (
-          <img src={item.url} alt={item.name} />
+          <ZoomableImage
+            key={item.id}
+            src={item.url}
+            alt={item.name}
+            onScaleChange={(scale) => {
+              scaleRef.current = scale;
+            }}
+          />
         )}
         <figcaption>{item.name}</figcaption>
         <span className="viewer-count">
@@ -2635,7 +2855,7 @@ function MediaGallery({ attachments }: { attachments: Attachment[] }) {
             aria-label={preview.name}
             onClick={(event) => event.stopPropagation()}
           >
-            <img src={preview.url} alt={preview.name} />
+            <ZoomableImage src={preview.url} alt={preview.name} />
             <figcaption>{preview.name}</figcaption>
           </figure>
           <button

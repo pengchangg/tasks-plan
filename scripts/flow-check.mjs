@@ -800,6 +800,14 @@ await page.evaluate(() => {
     .dispatchEvent(new MouseEvent("click", { bubbles: true }));
 });
 assert.ok(await viewer.isVisible());
+// 缩放按钮：放大后 data-scale > 1，重置回到 1。
+const zoomScale = () =>
+  viewer.locator(".zoomable-image").evaluate((img) => Number(img.getAttribute("data-scale")));
+assert.equal(await zoomScale(), 1);
+await viewer.getByRole("button", { name: "放大" }).click();
+assert.ok((await zoomScale()) > 1);
+await viewer.getByRole("button", { name: "重置" }).click();
+assert.equal(await zoomScale(), 1);
 await viewer.getByRole("button", { name: "关闭预览" }).click();
 await viewer.waitFor({ state: "detached" });
 // 日期导航：前一天没有作业 → 空状态，标题改成日期，但谚语仍然在。
