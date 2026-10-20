@@ -17,7 +17,7 @@ import type {
 const emptyChild: Child = {
   id: "",
   name: "孩子",
-  avatar: "✦",
+  avatar: "🌻",
   color: "#ffb547",
   level: 1,
   experience: 0,
@@ -124,7 +124,18 @@ export function useAppStore() {
   const [state, setState] = useState<AppState>({ ...seedState, role: "child" });
   const [ready, setReady] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [message, setMessage] = useState("");
+  // 成功和失败共用一条横幅，但样式必须不同：保存成功不该长得像报错。
+  const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(
+    null,
+  );
+  const setMessage = useCallback(
+    (text: string) => setNotice(text ? { text, ok: false } : null),
+    [],
+  );
+  const setOkMessage = useCallback(
+    (text: string) => setNotice({ text, ok: true }),
+    [],
+  );
   // 家庭总览用默认区间（最近 7 天）；成长统计页按自己选的区间单独取，不覆盖它。
   const [stats, setStats] = useState<StatsPayload>({
     from: "",
@@ -280,7 +291,7 @@ export function useAppStore() {
           "/auth/parent/password",
           json("POST", { currentPassword, newPassword }),
         );
-        setMessage("家长密码已更新");
+        setOkMessage("家长密码已更新");
         return true;
       } catch (error) {
         // 当前密码错误由弹窗自己提示，其余（限流、内部错误）走顶部横幅。
@@ -398,7 +409,7 @@ export function useAppStore() {
         };
         // 表单里的日期可能被改过，列表跟着它走。
         await loadHomework(draft.date);
-        setMessage(
+        setOkMessage(
           saved.skipped?.length
             ? `已保存，但跳过了 ${saved.skipped.length} 个不支持的文件：${saved.skipped.join("、")}`
             : "作业已保存",
@@ -408,13 +419,13 @@ export function useAppStore() {
       void run(async () => {
         await request(`/homework/${id}`, json("DELETE"));
         await loadHomework(homework.date);
-        setMessage("作业已删除");
+        setOkMessage("作业已删除");
       }),
     deleteHomeworkMedia: (homeworkId: string, mediaId: string) =>
       void run(async () => {
         await request(`/homework/${homeworkId}/media/${mediaId}`, json("DELETE"));
         await loadHomework(homework.date);
-        setMessage("附件已删除");
+        setOkMessage("附件已删除");
       }),
   };
   return {
@@ -426,10 +437,11 @@ export function useAppStore() {
     actions,
     ready,
     connected,
-    message,
+    message: notice?.text ?? "",
+    messageOk: notice?.ok ?? false,
     stats,
     today,
     homework,
-    dismissMessage: () => setMessage(""),
+    dismissMessage: () => setNotice(null),
   };
 }

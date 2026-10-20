@@ -116,12 +116,37 @@ const statusLabel = {
   completed: "已完成",
   rejected: "再试一次",
 };
+// 分类图标用 lucide 而不是 ✎/⌂/✦ 这类字形：缺字体的系统会把它们画成空方块。
 const taskSymbol = (category: string) =>
-  category === "学习成长" ? "✎" : category === "家庭责任" ? "⌂" : "✦";
+  category === "学习成长" ? (
+    <BookOpen size={19} />
+  ) : category === "家庭责任" ? (
+    <Home size={19} />
+  ) : (
+    <Sparkles size={18} />
+  );
 const dateText = (date: string) =>
   date === new Date().toISOString().slice(0, 10)
     ? "今天"
     : date.slice(5).replace("-", "月") + "日";
+
+// favicon.svg 里同一个四角星。文字字形 ✦ 在不少系统字体里不存在，会渲染成空方块。
+function StarMark({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 64 64"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path
+        d="M32 9Q31.81 32.19 55 32Q31.81 31.81 32 55Q32.19 31.81 9 32Q32.19 32.19 32 9Z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
 
 // 弹窗的统一键盘行为：Esc 关闭、打开时把焦点移进对话框、关闭后还给触发元素、
 // Tab 在对话框内循环。作用域是 .modal-backdrop——所有弹窗都挂在同一层包裹里。
@@ -189,7 +214,7 @@ class AppErrorBoundary extends Component<{ children: ReactNode }, { failed: bool
     return (
       <div className="boot-screen">
         <div className="boot-panel">
-          <span className="brand-mark">✦</span>
+          <span className="brand-mark"><StarMark /></span>
           <h1>页面出了点问题</h1>
           <p>刷新一下就能回到成长空间。</p>
           <button
@@ -330,8 +355,7 @@ function Shell() {
     return (
       <main className="boot-screen">
         <div className="boot-panel">
-          <span className="brand-mark">✦</span>
-          <span className="eyebrow">GROWJOY FAMILY</span>
+          <span className="brand-mark"><StarMark /></span>
           <h1>无法进入成长空间</h1>
           <p>{store.message || "请确认服务已经启动。"}</p>
           <button
@@ -347,7 +371,7 @@ function Shell() {
     <div className={`app-shell ${isParent ? "parent-shell" : "child-shell"}`}>
       <header className="topbar">
         <Link to={isParent ? "/parent" : "/child"} className="brand">
-          <span className="brand-mark">✦</span>
+          <span className="brand-mark"><StarMark /></span>
           <span>小小成长家</span>
         </Link>
         <div className="top-actions">
@@ -438,7 +462,10 @@ function Shell() {
         />
       )}
       {store.message && (
-        <div className="app-toast" role="alert">
+        <div
+          className={store.messageOk ? "app-toast ok" : "app-toast"}
+          role={store.messageOk ? "status" : "alert"}
+        >
           <span>{store.message}</span>
           <button onClick={store.dismissMessage} aria-label="关闭提示">
             <X size={15} />
@@ -497,7 +524,6 @@ function ParentPinModal({
         <div className="pin-icon">
           <KeyRound size={27} />
         </div>
-        <span className="eyebrow">PARENT ACCESS</span>
         <h2 id="parent-pin-title">进入家长端</h2>
         <p>请输入家长密码，孩子无法直接进入管理页面。</p>
         <label htmlFor="parent-pin">家长密码</label>
@@ -562,7 +588,6 @@ function ParentPasswordModal({
       >
         <div className="form-heading">
           <div>
-            <span className="eyebrow">PARENT PASSWORD</span>
             <h2 id="parent-password-title">修改家长密码</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭修改密码">
@@ -731,7 +756,7 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
             {new Date().getMonth() + 1}月{new Date().getDate()}日
           </p>
           <h1>
-            嗨，{child.name} <span className="wave">✦</span>
+            嗨，{child.name} <span className="wave"><StarMark size={22} /></span>
           </h1>
           <p className="muted">今天也一起收集小小成就吧</p>
         </div>
@@ -742,11 +767,32 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
         </div>
       </div>
       <TodayHomework store={store} />
+      <SectionTitle title="今天要做什么" action="查看全部" to="/child/tasks" />
+      <div className="task-list">
+        {tasks.slice(0, 3).map((task) => (
+          <TaskCard
+            key={task.id}
+            task={task}
+            submission={store.latestSubmissions.get(task.id)}
+            onSubmit={store.actions.submitTask}
+          />
+        ))}
+      </div>
+      {pending > 0 && (
+        <div className="notice-card">
+          <Sparkles size={18} />
+          <div>
+            <strong>有 {pending} 个任务正在等待确认</strong>
+            <span>完成得很棒，等家长来看看吧</span>
+          </div>
+          <Link to="/child/tasks">查看</Link>
+        </div>
+      )}
       <section
         className="companion-banner"
         style={{ "--companion": child.color } as React.CSSProperties}
       >
-        <div className="sun-dots">✦</div>
+        <div className="sun-dots" aria-hidden="true"><StarMark size={23} /></div>
         <div className="companion-copy">
           <span className="pill light-pill">成长伙伴 · Lv.{child.level}</span>
           <h2>
@@ -783,27 +829,6 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
           <span>今日完成</span>
         </div>
       </section>
-      <SectionTitle title="今天要做什么" action="查看全部" to="/child/tasks" />
-      <div className="task-list">
-        {tasks.slice(0, 3).map((task) => (
-          <TaskCard
-            key={task.id}
-            task={task}
-            submission={store.latestSubmissions.get(task.id)}
-            onSubmit={store.actions.submitTask}
-          />
-        ))}
-      </div>
-      {pending > 0 && (
-        <div className="notice-card">
-          <Sparkles size={18} />
-          <div>
-            <strong>有 {pending} 个任务正在等待确认</strong>
-            <span>完成得很棒，等家长来看看吧</span>
-          </div>
-          <Link to="/child/tasks">查看</Link>
-        </div>
-      )}
       <SectionTitle title="愿望小铺" action="全部愿望" to="/child/wishes" />
       <div className="wish-strip">
         {store.state.wishes.slice(0, 3).map((wish) => (
@@ -988,7 +1013,6 @@ function ChildTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="content-wrap">
       <PageHeading
-        eyebrow="MY TASKS"
         title="我的任务"
         description="每完成一件小事，离愿望就更近一步。"
       />
@@ -1014,7 +1038,11 @@ function ChildTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
         ))}
       </div>
       {tasks.length === 0 && (
-        <EmptyState icon="✦" title="这里还没有任务" text="去找家长安排一个吧" />
+        <EmptyState
+          icon={<StarMark size={22} />}
+          title="这里还没有任务"
+          text="去找家长安排一个吧"
+        />
       )}
     </div>
   );
@@ -1173,7 +1201,7 @@ function StarWishList({
   if (items.length === 0)
     return (
       <EmptyState
-        icon="✦"
+        icon={<StarMark size={22} />}
         title="星愿清单还是空的"
         text={onToggle ? "去愿望小铺兑换第一个心愿吧" : "孩子还没有兑换过心愿"}
       />
@@ -1196,7 +1224,6 @@ function ChildWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="content-wrap">
       <PageHeading
-        eyebrow="WISH SHOP"
         title="愿望小铺"
         description="用努力换来真正想要的东西。"
       />
@@ -1588,7 +1615,15 @@ function HomeworkViewer({
 
 // 作业卡片 + 全屏灯箱：孩子端首页的「今日作业」模块与 /child/homework 共用同一份实现，
 // 灯箱顺序是页面内全部媒体（先摊平再按下标定位）。
-function HomeworkDay({ items, title }: { items: Homework[]; title: string }) {
+function HomeworkDay({
+  items,
+  title,
+  compact = false,
+}: {
+  items: Homework[];
+  title: string;
+  compact?: boolean;
+}) {
   const [viewing, setViewing] = useState<number | null>(null);
   const media = items.flatMap((item) => item.media);
   return (
@@ -1623,7 +1658,12 @@ function HomeworkDay({ items, title }: { items: Homework[]; title: string }) {
         </article>
       ))}
       {items.length === 0 && (
-        <EmptyState icon="🎉" title={title} text="可以休息一下啦" />
+        <EmptyState
+          icon="🎉"
+          title={title}
+          text="可以休息一下啦"
+          compact={compact}
+        />
       )}
       {viewing !== null && media.length > 0 && (
         <HomeworkViewer
@@ -1651,6 +1691,7 @@ function TodayHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
       <HomeworkDay
         items={store.homework.date === store.today ? store.homework.items : []}
         title="今日暂无作业"
+        compact
       />
     </section>
   );
@@ -1668,7 +1709,6 @@ function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="content-wrap homework-page">
       <div className="homework-head">
-        <span className="eyebrow">HOMEWORK</span>
         <h1>
           {isToday ? "今日作业" : `${Number(date.slice(5, 7))}月${Number(date.slice(8))}日 · 作业`}
           {isToday && <span className="today-badge">今天</span>}
@@ -1809,7 +1849,6 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="content-wrap">
       <PageHeading
-        eyebrow="MY GROWTH"
         title="成长足迹"
         description="每一个小小坚持，都值得被看见。"
       />
@@ -1842,7 +1881,6 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
       <section className="chart-panel growth-calendar">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">DATE STATS</span>
             <h2>成长日历</h2>
           </div>
           <div className="calendar-nav">
@@ -1872,7 +1910,6 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
       <section className="chart-panel day-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">DAY DETAIL</span>
             <h2>
               {selected === today ? "今天" : `${selectedMonth}月${selectedDay}日`}{" "}
               · 周{weekday}
@@ -1894,7 +1931,7 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
         </div>
         {digest.scheduled.length === 0 && digest.backfilled.length === 0 ? (
           <EmptyState
-            icon="✦"
+            icon={<StarMark size={22} />}
             title="这一天没有任务记录"
             text="换一个日期看看吧"
           />
@@ -1922,7 +1959,6 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
       <section className="achievement">
         <div className="achievement-badge">🌱</div>
         <div>
-          <span className="eyebrow">NEW ACHIEVEMENT</span>
           <h3>连续坚持 5 天</h3>
           <p>再坚持一天，就能解锁新的徽章啦！</p>
         </div>
@@ -2046,17 +2082,14 @@ function Metric({
   );
 }
 function PageHeading({
-  eyebrow,
   title,
   description,
 }: {
-  eyebrow: string;
   title: string;
   description: string;
 }) {
   return (
     <div className="page-heading">
-      <span className="eyebrow">{eyebrow}</span>
       <h1>{title}</h1>
       <p>{description}</p>
     </div>
@@ -2066,13 +2099,15 @@ function EmptyState({
   icon,
   title,
   text,
+  compact = false,
 }: {
-  icon: string;
+  icon: ReactNode;
   title: string;
   text: string;
+  compact?: boolean;
 }) {
   return (
-    <div className="empty-state">
+    <div className={compact ? "empty-state compact" : "empty-state"}>
       <span>{icon}</span>
       <h3>{title}</h3>
       <p>{text}</p>
@@ -2134,31 +2169,37 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
             to="/parent"
             icon={<LayoutDashboard size={18} />}
             label="家庭总览"
+            short="总览"
           />
           <SideLink
             to="/parent/children"
             icon={<Users size={18} />}
             label="孩子管理"
+            short="孩子"
           />
           <SideLink
             to="/parent/tasks"
             icon={<ClipboardCheck size={18} />}
             label="任务管理"
+            short="任务"
           />
           <SideLink
             to="/parent/wishes"
             icon={<Gift size={18} />}
             label="愿望管理"
+            short="愿望"
           />
           <SideLink
             to="/parent/homework"
             icon={<BookOpen size={18} />}
             label="作业管理"
+            short="作业"
           />
           <SideLink
             to="/parent/stats"
             icon={<BarChart3 size={18} />}
             label="成长统计"
+            short="统计"
           />
         </nav>
         <div className="sidebar-bottom">
@@ -2206,33 +2247,35 @@ function SideLink({
   to,
   icon,
   label,
+  short,
 }: {
   to: string;
   icon: React.ReactNode;
   label: string;
+  short: string;
 }) {
   const location = useLocation();
   return (
     <Link className={location.pathname === to ? "active" : ""} to={to}>
       {icon}
-      <span>{label}</span>
+      <span className="nav-label">{label}</span>
+      <span className="nav-short" aria-hidden="true">
+        {short}
+      </span>
       <ChevronRight size={14} />
     </Link>
   );
 }
 function ParentHeader({
-  eyebrow,
   title,
   action,
 }: {
-  eyebrow: string;
   title: string;
   action?: React.ReactNode;
 }) {
   return (
     <div className="parent-header">
       <div>
-        <span className="eyebrow">{eyebrow}</span>
         <h1>{title}</h1>
       </div>
       {action}
@@ -2248,7 +2291,6 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="parent-content">
       <ParentHeader
-        eyebrow="FAMILY DASHBOARD"
         title="家庭总览"
         action={
           <span className="parent-header-actions">
@@ -2381,7 +2423,6 @@ function ParentChildren({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="parent-content">
       <ParentHeader
-        eyebrow="CHILD PROFILES"
         title="孩子管理"
         action={
           <button className="primary-button" onClick={() => setShowForm(true)}>
@@ -2536,7 +2577,6 @@ function ChildForm({
       >
         <div className="form-heading">
           <div>
-            <span className="eyebrow">CHILD PROFILE</span>
             <h2 id="child-form-title">{child ? "编辑孩子档案" : "添加一个孩子"}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭孩子表单">
@@ -2551,6 +2591,7 @@ function ChildForm({
           孩子姓名
           <input
             required
+            autoFocus
             maxLength={12}
             value={name}
             onChange={(event) => setName(event.target.value)}
@@ -2630,7 +2671,6 @@ function PointsForm({
       >
         <div className="form-heading">
           <div>
-            <span className="eyebrow">POINTS ADJUST</span>
             <h2 id="points-form-title">给「{child.name}」调整积分</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭积分调整">
@@ -2720,7 +2760,6 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="parent-content">
       <ParentHeader
-        eyebrow="TASK MANAGEMENT"
         title="任务管理"
         action={
           <button
@@ -3042,7 +3081,6 @@ function TaskForm({
       >
         <div className="form-heading">
           <div>
-            <span className="eyebrow">{task ? "EDIT TASK" : "NEW TASK"}</span>
             <h2 id="task-form-title">{task ? "编辑任务信息" : "创建一个新任务"}</h2>
           </div>
           <button type="button" onClick={onClose}>
@@ -3053,6 +3091,7 @@ function TaskForm({
           任务名称
           <input
             required
+            autoFocus
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="例如：整理自己的书桌"
@@ -3141,7 +3180,6 @@ function ParentWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="parent-content">
       <ParentHeader
-        eyebrow="WISH MANAGEMENT"
         title="愿望管理"
         action={
           <button
@@ -3262,7 +3300,6 @@ function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="parent-content">
       <PageHeading
-        eyebrow="HOMEWORK ADMIN"
         title="作业管理"
         description="把老师布置的作业拍下来，孩子打开平板就能看到。"
       />
@@ -3419,9 +3456,6 @@ function HomeworkForm({
       >
         <div className="form-heading">
           <div>
-            <span className="eyebrow">
-              {homework ? "EDIT HOMEWORK" : "NEW HOMEWORK"}
-            </span>
             <h2 id="homework-form-title">
               {homework ? "编辑作业" : "新增作业"}
             </h2>
@@ -3435,6 +3469,7 @@ function HomeworkForm({
           <input
             type="date"
             required
+            autoFocus
             value={value}
             onChange={(event) => setValue(event.target.value)}
           />
@@ -3574,7 +3609,6 @@ function WishForm({
       >
         <div className="form-heading">
           <div>
-            <span className="eyebrow">{wish ? "EDIT WISH" : "NEW WISH"}</span>
             <h2 id="wish-form-title">{wish ? "编辑愿望信息" : "添加一个愿望"}</h2>
           </div>
           <button type="button" onClick={onClose}>
@@ -3585,6 +3619,7 @@ function WishForm({
           愿望名称
           <input
             required
+            autoFocus
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             placeholder="例如：周末看一部电影"
@@ -3682,7 +3717,6 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <div className="parent-content">
       <ParentHeader
-        eyebrow="GROWTH REPORT"
         title="成长统计"
         action={
           <div className="range-picker">
@@ -3752,7 +3786,7 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
       </div>
       {empty ? (
         <EmptyState
-          icon="✦"
+          icon={<StarMark size={22} />}
           title="这段时间还没有记录"
           text="换个日期范围，或者先去确认孩子的任务吧"
         />
@@ -3761,21 +3795,25 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
           <section className="chart-panel parent-chart">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">TASK COMPLETION</span>
                 <h2>任务完成趋势</h2>
               </div>
               <span>{rangeLabel}</span>
             </div>
-            <div className="bar-chart tall">
+            <div className="bar-chart">
               {stats.daily.map((day, index) => (
                 <div className="bar-col" key={day.date}>
-                  <div
-                    className="bar filled"
-                    title={`${day.date} 完成 ${day.completed} 个任务`}
-                    style={{
-                      height: `${day.completed === 0 ? 0 : Math.max(12, (day.completed / maxCompleted) * 100)}%`,
-                    }}
-                  />
+                  <span className="bar-value">
+                    {stats.daily.length <= 14 ? day.completed : ""}
+                  </span>
+                  <div className="bar-track">
+                    <div
+                      className={`bar${day.completed ? " filled" : ""}`}
+                      title={`${day.date} 完成 ${day.completed} 个任务`}
+                      style={{
+                        height: `${(day.completed / maxCompleted) * 100}%`,
+                      }}
+                    />
+                  </div>
                   {index % labelStep === 0 || index === stats.daily.length - 1 ? (
                     <small>{day.label}</small>
                   ) : (
@@ -3788,7 +3826,6 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
           <section className="category-panel">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">BY CATEGORY</span>
                 <h2>完成分布</h2>
               </div>
             </div>
