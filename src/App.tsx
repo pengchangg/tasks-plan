@@ -26,6 +26,7 @@ import {
   MessageSquare,
   Pencil,
   Plus,
+  RefreshCw,
   RotateCcw,
   Sparkles,
   Star,
@@ -350,6 +351,14 @@ function Shell() {
           <span>小小成长家</span>
         </Link>
         <div className="top-actions">
+          <button
+            className="icon-button refresh-button"
+            aria-label="刷新"
+            title="刷新"
+            onClick={() => store.actions.refresh()}
+          >
+            <RefreshCw size={18} />
+          </button>
           <button
             className="icon-button menu-button"
             aria-label="打开菜单"

@@ -238,6 +238,11 @@ export function useAppStore() {
 
   const actions = {
     reconnect: connect,
+    // 手动刷新：run 会重拉 /state 与 /stats，这里顺带把当前浏览的作业日期也重载一遍。
+    refresh: () =>
+      void run(async () => {
+        if (homework.date) await loadHomework(homework.date);
+      }),
     // 成长统计页按区间读取。失败时返回 null，页面保留上一次的数字，
     // 不把总览的 7 天口径改掉。
     loadStats: async (from: string, to: string) => {
