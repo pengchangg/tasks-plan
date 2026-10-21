@@ -8,25 +8,13 @@ on:
 jobs:
   deploy:
     name: Build and deploy
-    runs-on: ubuntu-latest
+    # 自建镜像（debian13 runner 本地 localhost/gha-deploy:1）已预装 Go / Node / rsync / curl / openssh-client
+    runs-on: deploy
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Install from lockfile
         run: npm ci
-      - name: Install deploy tooling
-        run: |
-          if command -v apt-get >/dev/null 2>&1; then
-            apt-get update
-            apt-get install -y --no-install-recommends \
-              rsync file curl openssh-client
-          fi
       - name: Configure SSH
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
