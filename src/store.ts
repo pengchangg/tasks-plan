@@ -250,8 +250,11 @@ export function useAppStore() {
   const actions = {
     reconnect: connect,
     // 手动刷新：run 会重拉 /state 与 /stats，这里顺带把当前浏览的作业日期也重载一遍。
+    // 数据通常和屏幕上一样，所以要给一句「已刷新」，否则按钮看起来没反应。
+    // 提示放在作业重载之前，它失败时能用错误信息覆盖掉这句成功提示。
     refresh: () =>
       void run(async () => {
+        setOkMessage("已刷新");
         if (homework.date) await loadHomework(homework.date);
       }),
     // 成长统计页按区间读取。失败时返回 null，页面保留上一次的数字，
