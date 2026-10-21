@@ -871,6 +871,18 @@ await emptyHomeModule.waitFor();
 assert.ok((await emptyHomeModule.innerText()).includes("今日暂无作业"));
 assert.ok((await page.locator(".homework-module").innerText()).includes("按日期查看"));
 
+// 顶栏刷新：数据往往和屏幕上一样，所以必须给一句回执，否则按钮看起来没反应；
+// 这条提示只认「已刷新」自己，2 秒后自收（别把后来换成别的提示的消息一起清掉）。
+const refreshed = page.waitForResponse((response) =>
+  response.url().includes("/api/v1/state"),
+);
+await page.getByRole("button", { name: "刷新" }).click();
+assert.equal((await refreshed).status(), 200);
+const refreshedToast = page.getByRole("status").filter({ hasText: "已刷新" });
+await refreshedToast.waitFor();
+await refreshedToast.waitFor({ state: "detached", timeout: 3000 });
+assert.ok(page.url().endsWith("/child"));
+
 assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({
@@ -906,6 +918,7 @@ console.log(
     homeworkViewer: true,
     homeworkDateNav: true,
     homeworkFont: true,
+    refreshButton: true,
     consoleErrors: errors.length,
   }),
 );
