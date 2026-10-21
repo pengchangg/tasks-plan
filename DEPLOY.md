@@ -1,6 +1,6 @@
 # GrowJoy 部署手册
 
-面向「一台常驻 Linux 主机 + 家庭局域网访问」的部署。本手册描述的实例已实际部署并验证过：`ssh rocky.home`（`192.168.0.208`，Rocky Linux 10.2 x86_64，用户 `pengchang`），访问地址 `http://192.168.0.208:9080`。
+面向「一台常驻 Linux 主机 + 家庭局域网访问」的部署。本手册描述的实例已实际部署并验证过：`192.168.0.208`（Rocky Linux 10.2 x86_64，用户 `pengchang`），访问地址 `http://192.168.0.208:9080`。构建机与目标机是同一台，`make deploy` 经 `ssh localhost` 自部署，所以本机公钥要写进 `~/.ssh/authorized_keys`（`ssh-copy-id localhost`，或 `cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys`）。主机名 `rocky.home` 已不再解析，命令里的 `<host>` 一律用 `localhost` 或该 IP。
 
 ## 运行时形态
 
@@ -155,7 +155,7 @@ make deploy
 
 ```
 ▶ 构建 SPA（dist/）与 linux/amd64 二进制（version=1c123d0）
-▶ 传输 dist/ 与二进制到 rocky.home:/home/pengchang/growjoy
+▶ 传输 dist/ 与二进制到 localhost:/home/pengchang/growjoy
 ▶ 等待 http://192.168.0.208:9080/health/ready
 {"status":"ok","version":"1c123d0"}
 ✔ 已部署并复检通过：http://192.168.0.208:9080 version=1c123d0
@@ -165,7 +165,7 @@ make deploy
 
 |变量|默认值|说明|
 |---|---|---|
-|`DEPLOY_HOST`|`rocky.home`|需免密 ssh 的目标|
+|`DEPLOY_HOST`|`localhost`|需免密 ssh 的目标；本机自部署即 `localhost`，换成别的机器写 `user@host`|
 |`DEPLOY_DIR`|`/home/pengchang/growjoy`|远端安装根目录|
 |`DEPLOY_URL`|`http://192.168.0.208:9080`|必须是 `GROWJOY_ADDR` 实际监听的地址，用来自检|
 |`DEPLOY_UNIT`|`growjoy`|systemd 用户单元名|
@@ -215,7 +215,7 @@ CLI：
 
 应用只认一条规则：**浏览器发出的 `Origin` 必须与请求的 `Host` 同源**（见上一节）。因此任何前置（Caddy、Cloudflare 隧道、nginx）只要做到「保留浏览器 Host」即可，不需要 CORS、CSRF token 或任何改写。
 
-### 内网 HTTPS：Caddy（已在 rocky.home 落地）
+### 内网 HTTPS：Caddy（已在本机落地）
 
 该主机已有 Caddy 在 `:80/:443` 用 `*.homelab.com` 通配 + `tls internal` 为十几个服务终止 TLS，GrowJoy 按同一约定接入：
 
@@ -417,11 +417,11 @@ curl -sS http://192.168.0.208:9080/health/live
 curl -sS -o /dev/null -w '%{http_code}\n' http://192.168.0.208:9080/health/ready
 
 # 自启与运行状态
-ssh rocky.home 'systemctl --user is-enabled growjoy; systemctl --user is-active growjoy; loginctl show-user pengchang -p Linger'
+ssh localhost 'systemctl --user is-enabled growjoy; systemctl --user is-active growjoy; loginctl show-user pengchang -p Linger'
 
 # 日志
-ssh rocky.home 'systemctl --user status growjoy -n 50'      # 跟随时加 -f
-ssh rocky.home 'sudo journalctl _SYSTEMD_USER_UNIT=growjoy.service -n 50 --no-pager'
+ssh localhost 'systemctl --user status growjoy -n 50'      # 跟随时加 -f
+ssh localhost 'sudo journalctl _SYSTEMD_USER_UNIT=growjoy.service -n 50 --no-pager'
 ```
 
 日志注意：这台主机**没有用户级 journal 文件**，`journalctl --user -u growjoy` 只会返回 `No journal files were found`。用 `systemctl --user status growjoy`（即 systemd 直接输出的那几行）或上面的 `_SYSTEMD_USER_UNIT=` 形式。启动日志里 `INFO serving family code=...` 说明本次实际服务的家庭码。
@@ -431,7 +431,7 @@ ssh rocky.home 'sudo journalctl _SYSTEMD_USER_UNIT=growjoy.service -n 50 --no-pa
 ## 备份与恢复
 
 ```bash
-ssh rocky.home 'GROWJOY_DB=$HOME/growjoy/data/growjoy.db \
+ssh localhost 'GROWJOY_DB=$HOME/growjoy/data/growjoy.db \
   GROWJOY_MEDIA=$HOME/growjoy/data/media \
   ~/growjoy/bin/growjoy backup --out $HOME/growjoy/backup-$(date +%F)'
 ```
@@ -441,11 +441,11 @@ ssh rocky.home 'GROWJOY_DB=$HOME/growjoy/data/growjoy.db \
 恢复（备份文件就在同一台主机上，直接在远端替换即可）：
 
 ```bash
-ssh rocky.home 'systemctl --user stop growjoy'
-ssh rocky.home 'set -e; cd $HOME/growjoy; cp backup-2026-10-02/growjoy.db data/growjoy.db; \
+ssh localhost 'systemctl --user stop growjoy'
+ssh localhost 'set -e; cd $HOME/growjoy; cp backup-2026-10-02/growjoy.db data/growjoy.db; \
   rm -f data/growjoy.db-wal data/growjoy.db-shm; \
   tar -C data/media -xf backup-2026-10-02/media.tar'
-ssh rocky.home 'systemctl --user start growjoy'
+ssh localhost 'systemctl --user start growjoy'
 ```
 
 恢复期间先停服务再替换文件，避免进程继续写入。`rm -f` 那一步是兜底：`systemctl --user stop` 会给 SQLite 收尾，实测停服后 `-wal`/`-shm` 已自行消失；只有在进程被强杀（OOM、`kill -9`）时才可能留下残留文件。残留本身不会污染数据——实测把另一份数据库的 `-wal` 放在替换后的库旁边，服务照常启动、返回的是替换后库的内容、日志无报错（SQLite 会忽略不属于当前库的 WAL）——删掉只是为了不留没用的旧文件。随后的 `/health/ready` 返回 200 即恢复完成。本手册的实例**没有配置任何定时备份**，需要就自己加 cron 或 systemd timer。

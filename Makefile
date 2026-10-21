@@ -5,9 +5,9 @@ SHELL := /bin/bash
 DEV_LOG := data/dev-server.log
 DEV_BIN := data/growjoy-dev
 
-# 远程部署（make deploy）的目标。DEPLOY_HOST 需支持免密 ssh；
-# DEPLOY_URL 必须指向 DEPLOY_HOST 上 GROWJOY_ADDR 实际监听的地址。
-DEPLOY_HOST ?= rocky.home
+# 部署（make deploy）的目标：本机就是目标机（192.168.0.208），所以经 localhost 自 ssh，
+# 本机公钥需在 ~/.ssh/authorized_keys 里；DEPLOY_URL 必须指向 GROWJOY_ADDR 实际监听的地址。
+DEPLOY_HOST ?= localhost
 DEPLOY_DIR ?= /home/pengchang/growjoy
 DEPLOY_URL ?= http://192.168.0.208:9080
 DEPLOY_UNIT ?= growjoy
