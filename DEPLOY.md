@@ -162,11 +162,19 @@ INFO GrowJoy listening addr=0.0.0.0:9080
 
 部署与 `make deploy` 一样**不**改远端 `data/`、不建家庭、不动 unit 文件。
 
-### 里手镜像与缓存
+### 镜像与缓存
 
 `runs-on: deploy` 指向自建镜像 `localhost/gha-deploy:1`（debian13），已预装 Go、Node、`rsync`、`curl`、`openssh-client`，因此工作流里没有 `setup-go`/`setup-node`，也没有 apt 安装步骤。镜像不在仓库里维护，换机器或升级 Go/Node 时要自己重建并重新打标签，否则 job 会一直排队等不到匹配的 runner。
 
-仓库内还开了两层缓存（`.gitea/workflows/deploy.yml`）：`~/go/pkg/mod` + `~/.cache/go-build`（key 按 `go.sum`）与 `~/.npm`（按 `package-lock.json`）；`npm ci` 带 `--prefer-offline`，命中时不走网络。首次运行仍是冷的，且 `actions/cache` 不可用时只告警不阻断部署。
+仓库内开了三层编译缓存（`.gitea/workflows/deploy.yml`）：
+
+|缓存|路径|key|
+|---|---|---|
+|Go 模块 + 编译产物|`~/go/pkg/mod`、`~/.cache/go-build`|`go.sum`|
+|Node 依赖 + tsc 增量信息|`node_modules`、`*.tsbuildinfo`|`package-lock.json`|
+|npm tarball|`~/.npm`|`package-lock.json`|
+
+`node_modules` 命中时直接跳过 `npm ci`（key 精确匹配 lockfile）；未命中则 `npm ci --prefer-offline`，由 tarball 缓存避免走网络。`*.tsbuildinfo` 让 `tsc -b` 只重查改动的文件（内容哈希失效，代码变了不会误跳）。首次运行仍是冷的，且 `actions/cache` 不可用时只告警不阻断部署。
 
 Runner 侧还有三处开关（需在 runner 主机改它的 `config.yaml` 并重启，仓库改不到）：
 

@@ -14,8 +14,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      # 镜像里已装 Go / Node，但工具链自带缓存；这两层管模块与编译、npm tarball。
-      # shortcut: 缓存服务不可达时只告警不失败（continue-on-error）。
+      # 编译缓存：Go 的 ~/.cache/go-build + 模块，Node 的 node_modules + tsc 增量信息。
+      # shortcut: 缓存服务不可达时只告警不失败（continue-on-error），回退到全量安装/编译。
       - name: Cache Go modules and build cache
         uses: actions/cache@v4
         continue-on-error: true
@@ -25,6 +25,16 @@ jobs:
             ~/.cache/go-build
           key: go-${{ hashFiles('go.sum') }}
           restore-keys: go-
+      - name: Cache node_modules and tsc info
+        id: node-deps
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            node_modules
+            *.tsbuildinfo
+          key: node-deps-${{ hashFiles('package-lock.json') }}
+          restore-keys: node-deps-
       - name: Cache npm tarballs
         uses: actions/cache@v4
         continue-on-error: true
@@ -33,6 +43,7 @@ jobs:
           key: npm-${{ hashFiles('package-lock.json') }}
           restore-keys: npm-
       - name: Install from lockfile
+        if: steps.node-deps.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
       - name: Configure SSH
         env:
