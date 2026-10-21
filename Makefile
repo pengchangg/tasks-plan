@@ -13,7 +13,7 @@ DEPLOY_URL ?= http://192.168.0.208:9080
 DEPLOY_UNIT ?= growjoy
 DEPLOY_STAGE ?= /tmp/growjoy-deploy
 
-.PHONY: help install build dev server web run preview vet fmt test test-go test-web check check-flow check-ui deploy logs stop clean distclean
+.PHONY: help install build dev server web run preview vet fmt test test-go test-web check check-flow check-ui precommit install-hooks deploy logs stop clean distclean
 
 help: ## 显示全部可用命令
 	@echo "GrowJoy 可用命令："
@@ -70,13 +70,19 @@ test-go: ## Go 测试（-race，与 CI 一致）
 test-web: ## 前端单元测试（vitest）
 	npm test
 
-check: test check-flow check-ui ## 完整 CI 门（含两个 Playwright 门）
+check: test check-flow check-ui ## 完整检查（vet/test/build + 两个 Playwright 门）
 
 check-flow: ## Playwright 行为门（自带 build，需先装 Chromium）
 	npm run check:flow
 
 check-ui: ## Playwright 视觉/溢出门（自带 build）
 	npm run check:ui
+
+precommit: test build ## 提交前快速门（vet + go test -race + npm test + build，不含两个 Playwright 门）
+
+install-hooks: ## 安装提交前钩子（.githooks/pre-commit → make precommit）
+	git config core.hooksPath .githooks
+	@echo "✔ 已启用 .githooks/pre-commit（提交前跑 make test build）"
 
 deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd64 + rsync + 重启用户服务 + 健康校验
 	@command -v npm >/dev/null 2>&1 || { echo "✗ 未找到 npm：需要 Node.js 22.22.2+"; exit 1; }

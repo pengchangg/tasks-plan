@@ -1,5 +1,7 @@
 # GrowJoy
 
+[![部署状态](https://gitea.homelab.com/pengchang/task-plan/actions/workflows/deploy.yml/badge.svg?branch=main)](https://gitea.homelab.com/pengchang/task-plan/actions)
+
 面向家庭的成长任务与积分奖励 H5。Go 服务同源提供 React 应用、SQLite 业务数据、认证会话和受保护的提交附件。
 
 ## 开发环境
@@ -26,7 +28,7 @@ make          # 列出全部常用命令
 make dev      # 后端 :8080 + 前端 :5173（等价于上面两条命令）
 ```
 
-其余常用目标：`make install`、`make build`、`make test`、`make check`（完整 CI 门）、`make run`（构建后由 Go 单进程服务 `dist/`）、`make check-flow`、`make check-ui`、`make deploy`（构建并部署到远程主机）、`make stop`（清理占用 :8080 的残留后端）、`make clean`。
+其余常用目标：`make install`、`make build`、`make test`、`make check`（完整检查，含两个 Playwright 门）、`make run`（构建后由 Go 单进程服务 `dist/`）、`make check-flow`、`make check-ui`、`make deploy`（构建并部署到远程主机）、`make stop`（清理占用 :8080 的残留后端）、`make clean`。
 
 `npm run dev:server` 会幂等创建演示家庭。应用默认停在孩子端，进入家长端只需要家长密码：
 
@@ -131,4 +133,4 @@ npm run check:ui
 
 两个 Playwright 命令会各自创建临时 SQLite 数据库和媒体目录、选择动态端口、启动真实 Go 服务，并在结束时清理。
 
-CI（`.github/workflows/ci.yml`）在 push 到 `main`、发起 PR 或手动触发时跑同一套检查：`go`（`go vet` + `go test`）与 `web`（`npm ci` + `npm test` + `npm run build`）并行，两者通过后运行 `e2e`（安装 Chromium 后跑 `check:flow` 与 `check:ui`），并把 `.artifacts/ui` 截图作为构建产物上传。CI 一律用 `npm ci` 从 `package-lock.json` 安装。
+本地提交前由 pre-commit 钩子跑快速门（`make precommit` = `go vet` + `go test -race` + `npm test` + `npm run build`，先 `make install-hooks` 安装）；两个 Playwright 门（`check:flow` / `check:ui`）按需手动跑 `make check`。推送到 `main` 后由 Gitea Actions 自动部署（见 `DEPLOY.md`）。

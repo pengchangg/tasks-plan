@@ -1,0 +1,5 @@
+#!/bin/sh
+# 提交前快速门：go vet + go test -race + npm test + npm run build。
+# Playwright 两个门（check:flow / check:ui）不在此跑；需要时手动 `make check`。
+set -e
+make test build

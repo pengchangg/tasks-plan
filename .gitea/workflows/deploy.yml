@@ -1,0 +1,51 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install from lockfile
+        run: npm ci
+      - name: Install deploy tooling
+        run: |
+          if command -v apt-get >/dev/null 2>&1; then
+            apt-get update
+            apt-get install -y --no-install-recommends \
+              rsync file curl openssh-client
+          fi
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+        run: |
+          DEPLOY_HOST="${DEPLOY_HOST:-localhost}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+      - name: Deploy
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
+          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+          DEPLOY_UNIT: ${{ vars.DEPLOY_UNIT }}
+        run: |
+          export DEPLOY_HOST="${DEPLOY_HOST:-localhost}"
+          export DEPLOY_DIR="${DEPLOY_DIR:-/home/pengchang/growjoy}"
+          export DEPLOY_URL="${DEPLOY_URL:-http://192.168.0.208:9080}"
+          export DEPLOY_UNIT="${DEPLOY_UNIT:-growjoy}"
+          make deploy

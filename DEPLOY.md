@@ -143,7 +143,26 @@ INFO serving family code=HOME
 INFO GrowJoy listening addr=0.0.0.0:9080
 ```
 
-## 日常升级：`make deploy`
+## 日常升级：自动部署（Gitea Actions）
+
+推送到 `main` 分支会自动触发部署（`.gitea/workflows/deploy.yml`）：checkout → 安装 Go/Node → `npm ci` → 配置 SSH → `make deploy`（构建 SPA + 交叉编译 linux/amd64 → rsync 传输 → `systemctl --user restart` → 轮询 `/health/ready` → 校验 `/health/live` 的 `version` 与本次 `git describe` 一致）。也可以在 Gitea 网页上手动触发（Actions → Deploy → Run workflow）。
+
+一次性前置：
+
+1. **跑一个 Gitea Runner**（`act_runner`），注册到 `gitea.homelab.com`，其 `runs-on` 标签须与工作流的 `ubuntu-latest` 匹配（act_runner 默认 Docker 标签即是 `ubuntu-latest`）。Runner 所在机器要能 `ssh` 到部署目标机。
+2. **在仓库 Settings → Actions 里配 Secrets / Variables**：
+
+|类型|名称|内容|
+|---|---|---|
+|Secret|`DEPLOY_SSH_KEY`|能免密登录目标机用户的 SSH 私钥（其公钥已在目标机 `~/.ssh/authorized_keys` 里，见「首次部署」）|
+|Variable|`DEPLOY_HOST`|部署目标主机，如 `192.168.0.208`（留空默认 `localhost`）|
+|Variable|`DEPLOY_DIR`|远端安装根目录（留空默认 `/home/pengchang/growjoy`）|
+|Variable|`DEPLOY_URL`|自检地址（留空默认 `http://192.168.0.208:9080`）|
+|Variable|`DEPLOY_UNIT`|systemd 用户单元名（留空默认 `growjoy`）|
+
+部署与 `make deploy` 一样**不**改远端 `data/`、不建家庭、不动 unit 文件。
+
+### 手动部署：`make deploy`
 
 ```bash
 make deploy
