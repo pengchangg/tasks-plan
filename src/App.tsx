@@ -1328,6 +1328,9 @@ function ProverbBanner({ date }: { date: string }) {
           ),
         )}
       </p>
+      <p className="proverb-english" lang="en">
+        {proverb.english}
+      </p>
     </section>
   );
 }

@@ -740,6 +740,7 @@ const banner = page.locator(".proverb-banner");
 await banner.waitFor();
 assert.ok((await banner.innerText()).includes("每日谚语"));
 assert.ok((await banner.locator("rt").first().innerText()).length > 0);
+assert.ok((await banner.locator(".proverb-english").innerText()).length > 0);
 // 霞鹜文楷是自托管分包：字体真的从 /fonts 加载出来，check() 才是 true。
 await page.evaluate(() => document.fonts.ready);
 assert.equal(

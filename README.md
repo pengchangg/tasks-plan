@@ -1,136 +1,73 @@
-# GrowJoy
+# GrowJoy 小小成长家
 
 [![部署状态](https://gitea.homelab.com/pengchang/task-plan/actions/workflows/deploy.yml/badge.svg?branch=main)](https://gitea.homelab.com/pengchang/task-plan/actions)
 
-面向家庭的成长任务与积分奖励 H5。Go 服务同源提供 React 应用、SQLite 业务数据、认证会话和受保护的提交附件。
+面向家庭的成长任务与积分奖励 H5。家长发布任务、作业和愿望，孩子提交照片/视频证据换取积分，积分再兑换愿望。一个 Go 二进制同源提供 JSON API、会话认证、受保护的上传文件和预构建的 React 前端，全部状态就是**一份 SQLite 文件 + 一个媒体目录**。
 
-## 开发环境
+## 快速开始
 
-要求 Go 1.22+、Node.js 22.22.2+，并已安装 Playwright Chromium。
+要求 Go 1.22+、Node.js 22.22.2+，并已安装 Playwright Chromium（只有跑 E2E 门时需要）。
 
 ```bash
 npm install
-npm run dev:server
+make dev          # 一个命令起后端 :8080 + 前端 :5173，Ctrl-C 一并退出
 ```
 
-另一个终端运行：
+打开 `http://localhost:5173`（Vite 监听 `::1`，用 `localhost` 而不是 `127.0.0.1`）。也可以分两个终端跑 `npm run dev:server` 和 `npm run dev`。`make` / `make help` 会列出全部常用目标。
 
-```bash
-npm run dev
-```
-
-打开 `http://localhost:5173`（Vite 默认只监听 `localhost`，macOS 上解析为 IPv6 `::1`，用 `127.0.0.1` 会连不上）。Vite 会将 `/api` 代理到 `127.0.0.1:8080`。
-
-也可以用一个命令同时启动两端，Ctrl-C 一并退出：
-
-```bash
-make          # 列出全部常用命令
-make dev      # 后端 :8080 + 前端 :5173（等价于上面两条命令）
-```
-
-其余常用目标：`make install`、`make build`、`make test`、`make check`（完整检查，含两个 Playwright 门）、`make run`（构建后由 Go 单进程服务 `dist/`）、`make check-flow`、`make check-ui`、`make deploy`（构建并部署到远程主机）、`make stop`（清理占用 :8080 的残留后端）、`make clean`。
-
-`npm run dev:server` 会幂等创建演示家庭。应用默认停在孩子端，进入家长端只需要家长密码：
+演示账号（`serve --demo` 幂等创建）：
 
 - 孩子端：打开即用，没有登录步骤
-- 家长端密码：`2468`（演示家庭，4 位数字）
+- 家长端：`/parent`，家长密码 `2468`
+- 演示数据：一个孩子「米娅」、4 个任务、4 个愿望，外加十天历史记录
+
+## 功能
+
+| 孩子端 | 家长端 |
+|---|---|
+| 查看今日任务与作业，提交照片 / 视频证据 | 管理孩子、任务、愿望，审批提交并发放积分 |
+| 查看积分余额、等级与连续打卡天数 | 手动增减积分（记账到同一本积分账本） |
+| 兑换愿望，标记完成并补充证据 | 发布每日作业（图片自动压缩、按日期查看） |
+| 成长日历：每天的任务、补录记录与成长汇总 | 成长统计：按自定义日期区间看完成量与积分 |
 
 ## 用户模型
 
-GrowJoy 面向单个家庭部署，服务只服务数据库中的第一个家庭（按创建时间），界面上不再输入家庭码，孩子也不再有 PIN。
+- **一个部署服务一个家庭**：服务永远读取数据库里最早创建的那一行家庭，客户端不再输入家庭码；需要多个家庭请分别部署。库为空时孩子端会返回 `409 no_family`，用 `admin create-family` 建家庭。
+- **孩子端是默认界面**：能打开页面的人都能看到任务、提交证据、兑换愿望——这是家庭局域网的信任模型。
+- **家长密码是 4 位数字**，只保护家长端。它可以随时在账号菜单里修改（需要当前密码），修改后旧密码立即失效。家长权限只属于本次访问：刷新页面会回到孩子端，要重新输入密码。
+- **写操作都校验同源**：`Origin` 的 host 必须等于请求的 `Host`，所以反向代理必须保留浏览器发来的 `Host`。
 
-- 孩子端是默认界面：能打开页面的人都能看到任务、提交证据、兑换愿望。
-- 家长端（孩子管理、任务管理、愿望管理、成长统计）需要家长密码。
-- 家长密码是 4 位数字，可以在家长端右上角账号菜单的「修改家长密码」里修改：需要先输入当前密码，改完旧密码立即失效、新密码可用于进入家长端（已打开的家长端不会被踢出）。用 `admin create-family` 建家庭时同样只接受 4 位数字。
-- 家长权限只属于本次访问：刷新或重新打开页面都会回到孩子端，再次进入家长端要重新输入密码；点击「回到孩子端」也会立即收回家长权限。
+## 文档
 
-## 创建家庭
+| 文档 | 内容 |
+|---|---|
+| [docs/architecture.md](docs/architecture.md) | 架构、目录、请求链路、数据流、一致性约束、时区与统计规则 |
+| [docs/api.md](docs/api.md) | HTTP 接口参考：认证、全部路由、请求体、错误码、幂等与上传限制 |
+| [docs/development.md](docs/development.md) | 本地开发、命令表、代码约定、测试与提交门禁、常见坑 |
+| [docs/operations.md](docs/operations.md) | 生产运行、环境变量、限流与安全边界、健康检查、备份与清理 |
+| [DEPLOY.md](DEPLOY.md) | 远程部署手册：首次部署、systemd、反向代理 / Caddy / Cloudflare 隧道、排错 |
 
-先构建命令：
+## 技术栈与目录
 
-```bash
-go build -o growjoy ./cmd/growjoy
-./growjoy admin create-family \
-  --code FAMILY01 \
-  --name "我的家庭" \
-  --username parent \
-  --display-name "家长" \
-  --password 2468 \
-  --timezone Asia/Shanghai
+Go 1.22 + chi + 纯 Go 的 `modernc.org/sqlite`（无 cgo）；React 19 + Vite + TypeScript（strict）；样式是手写 CSS，图标来自 `lucide-react`，字体（Fredoka、霞鹜文楷 GB）全部自托管，页面不请求任何第三方域名。
+
+```
+cmd/growjoy/                 唯一入口：serve | admin create-family | seed-demo | backup | gc
+internal/server/             整个后端：路由、处理器、认证、上传、统计
+internal/server/migrations/  嵌入式 SQL 迁移
+src/                         单页应用：App.tsx（全部界面）、store.ts（状态与 API 客户端）等
+scripts/                     Playwright 校验脚本（flow-check / visual-check / with-service）
+docs/                        架构、接口、开发与运维文档
+public/                      图标与自托管字体
+dist/                        Vite 产物，由 Go 服务；构建后才有
 ```
 
-`--code` 和 `--username` 只是数据库中的标识（`--username` 不再用于登录，界面只校验 `--password`）。家庭码不再需要输入：服务启动后始终使用数据库中第一个家庭，需要多个家庭时请分别部署；同一个数据库里第二次执行 `admin create-family` 会被直接拒绝，避免留下永远不可达的家庭。
-
-为指定家庭幂等生成演示内容：
+## 验证与发布
 
 ```bash
-./growjoy seed-demo --family FAMILY01
+make precommit    # 快速门：go vet + go test -race + vitest + 构建（提交前钩子同此）
+make check        # 完整门：单元测试 + 两个 Playwright 门
+make deploy       # 构建 + 交叉编译 + rsync + 重启远端服务 + 健康校验
 ```
 
-## 生产运行
-
-```bash
-npm run build
-go build -ldflags "-X main.version=$(git describe --always --dirty)" -o growjoy ./cmd/growjoy
-GROWJOY_ADDR=127.0.0.1:8080 \
-GROWJOY_DB=/srv/growjoy/growjoy.db \
-GROWJOY_MEDIA=/srv/growjoy/media \
-GROWJOY_DIST="$PWD/dist" \
-GROWJOY_SECURE_COOKIES=true \
-./growjoy serve
-```
-
-服务启动时向前执行嵌入式迁移，并启用 SQLite WAL、外键与 5 秒 busy timeout。首版按单进程、单副本部署；应由反向代理负责 TLS。数据库和媒体目录必须位于持久卷中，并作为一个一致单元备份。
-
-健康检查：`GET /health/live`（返回 `{"status":"ok","version":...}`，版本来自构建时的 `-ldflags "-X main.version=..."`，未注入时为 `dev`）和 `GET /health/ready`（数据库可用、且所服务家庭的时区能加载时才返回 200，否则 503）。启动日志会打印本次实际服务的家庭码。
-
-前端不请求任何外部资源：Fredoka 与霞鹜文楷 GB（`public/fonts/lxgw-wenkai-gb/`，400/500 两套分片，`index.html` 直接链接其 `result.css`）都已自托管，页面没有第三方域名请求。
-
-单进程运行时也可以做备份与媒体清理：
-
-```bash
-./growjoy backup --out /srv/growjoy/backup
-./growjoy gc --media          # 只列出没有附件记录的文件
-./growjoy gc --media --delete # 真正删除
-```
-
-`backup` 用 `VACUUM INTO` 取数据库一致性快照，因此可以在服务运行时执行；输出目录里已存在 `growjoy.db` 或 `media.tar` 时会拒绝覆盖，请换一个目录。`gc --media` 只处理文件名形如 `media_<32位hex>.<扩展名>` 的上传文件，其他文件一律不动；数据库里一条附件记录都没有时会拒绝删除（通常是 `GROWJOY_DB` 指错了库），确认无误后加 `--force`。
-
-## 远程部署
-
-日常升级一条命令：
-
-```bash
-make deploy
-make deploy DEPLOY_HOST=user@host DEPLOY_URL=http://host:9080 DEPLOY_DIR=/home/user/growjoy
-```
-
-它本地 `npm run build` + 交叉编译 `linux/amd64` 静态二进制，rsync 覆盖远端 `dist/` 与 `bin/`，重启 systemd 用户服务，最后轮询 `/health/ready` 并核对 `/health/live` 的版本号等于本地 `git describe --always --dirty`，任一步失败即以非零码退出；远端 `data/`（数据库与上传文件）不受影响。可覆盖 `DEPLOY_HOST`/`DEPLOY_DIR`/`DEPLOY_URL`/`DEPLOY_UNIT`/`DEPLOY_STAGE`。
-
-首次部署的前置准备（远端目录、建家庭、systemd 用户服务、环境变量与明文 HTTP 的两条硬约束、备份与排错）见 **[DEPLOY.md](DEPLOY.md)**。
-
-## 访问限制与清理
-
-认证接口有两层独立限制，参数写死在 `internal/server/ratelimit.go`：
-
-- 按客户端地址限流：60 次突发、之后每秒 1 次，超过返回 `429 too_many_requests`。
-- 按家庭限制家长密码失败次数：10 次失败后每个新的错误尝试返回 429，每 30 秒恢复 1 次。**只有失败才消耗额度**，因此输错密码不会把家里锁在门外，攻击者也无法靠乱试封锁家长端。登录与「修改家长密码」共用这份额度。反向代理部署时所有请求共享同一个地址，按地址的限流会退化为全局限制，此时按家庭的失败额度才是主要防线。
-- argon2 校验并发上限为 4（单次 64 MiB），占满且请求超时则返回 `503 unavailable`。
-
-写接口会校验 `Origin` 与请求的 `Host` 是否同源，因此反向代理必须保留浏览器发送的 `Host`（nginx 用 `proxy_set_header Host $host`）：Host 被改写成上游地址时，所有写请求都会返回 `403 origin_mismatch`。`npm run dev` 的 Vite 代理已按此配置（`changeOrigin: false`）。
-
-服务端内部错误（数据库、文件系统）只写入日志，返回给客户端的固定是 `{"error":{"code":"internal","message":"internal server error"}}`，不会回显原始错误文本。过期会话与超过 30 天的幂等键会在 `serve` 启动时以及此后每小时清理一次，无需外部定时任务。
-
-## 验证
-
-```bash
-go test ./...
-npm test
-npm run build
-npm run check:flow
-npm run check:ui
-```
-
-两个 Playwright 命令会各自创建临时 SQLite 数据库和媒体目录、选择动态端口、启动真实 Go 服务，并在结束时清理。
-
-本地提交前由 pre-commit 钩子跑快速门（`make precommit` = `go vet` + `go test -race` + `npm test` + `npm run build`，先 `make install-hooks` 安装）；两个 Playwright 门（`check:flow` / `check:ui`）按需手动跑 `make check`。推送到 `main` 后由 Gitea Actions 自动部署（见 `DEPLOY.md`）。
+推送到 `main` 后由 Gitea Actions 自动跑 `make precommit` 再执行 `make deploy`；两个 Playwright 门不进入 CI，按需手动跑。首次部署与反向代理配置见 [DEPLOY.md](DEPLOY.md)。

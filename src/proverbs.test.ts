@@ -22,6 +22,14 @@ describe("proverbs", () => {
     }
   });
 
+  it("gives every proverb a complete English line", () => {
+    for (const proverb of proverbs) {
+      expect(proverb.english.trim(), proverb.text).not.toBe("");
+      expect(proverb.english, proverb.text).not.toBe(proverb.text);
+      expect(proverb.english, proverb.text).toMatch(/[.?!]$/);
+    }
+  });
+
   it("picks the same proverb for a date, and a different one the next day", () => {
     const first = proverbForDate("2026-10-14");
     expect(proverbForDate("2026-10-14")).toBe(first);

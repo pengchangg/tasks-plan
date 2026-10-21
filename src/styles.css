@@ -92,6 +92,7 @@
 .proverb-label{font-size:11px;font-weight:800;letter-spacing:2px;color:#94640e}
 .proverb-text{display:flex;flex-wrap:wrap;justify-content:center;gap:2px;margin:8px 0 0;font-size:20px;line-height:2.1;text-align:center}
 .proverb-text ruby rt{font-size:11px;font-weight:400;color:var(--muted)}
+.proverb-english{margin:2px 0 0;font-size:12px;line-height:1.6;color:var(--muted);text-align:center}
 .homework-card{margin-bottom:12px;padding:15px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
 .subject-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:13px;font-weight:800}
 .subject-语文{background:#fdeaea;color:#b3402f}.subject-数学{background:#e8f1fd;color:#2f5fa8}.subject-英语{background:#eaf7ee;color:#2f7a4a}
