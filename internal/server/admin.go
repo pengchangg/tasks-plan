@@ -41,6 +41,14 @@ func (s *Server) CreateFamily(ctx context.Context, in FamilyInput) error {
 		return err
 	}
 	defer tx.Rollback()
+	// 上面那次读取为了不给一次注定失败的调用付 64 MiB 的 argon2 钱而在事务外，
+	// 这里在插入前再确认一次：两个并发的 admin create-family 都能通过上面那次。
+	var raced string
+	if e := tx.QueryRowContext(ctx, `SELECT code FROM families ORDER BY created_at,id LIMIT 1`).Scan(&raced); e == nil {
+		return fmt.Errorf("family %q already exists; GrowJoy serves the oldest family only (deploy a second instance for another family)", raced)
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return e
+	}
 	fid := id("fam")
 	now := nowText(s.now())
 	if _, err = tx.ExecContext(ctx, `INSERT INTO families(id,code,name,timezone,created_at) VALUES(?,?,?,?,?)`, fid, in.Code, in.Name, in.Timezone, now); err != nil {
@@ -83,7 +91,7 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 		if e == nil {
 			return cid, nil
 		}
-		if e != sql.ErrNoRows {
+		if !errors.Is(e, sql.ErrNoRows) {
 			return "", e
 		}
 		cid = id("child")
@@ -143,18 +151,18 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 		var tid string
 		var points int
 		if e := tx.QueryRowContext(ctx, `SELECT id,points FROM task_templates WHERE family_id=? AND child_id=? AND title=? AND active=1`, family, mia, v.title).Scan(&tid, &points); e != nil {
-			if e == sql.ErrNoRows {
+			if errors.Is(e, sql.ErrNoRows) {
 				continue
 			}
 			return e
 		}
 		day := time.Date(todayDate.Year(), todayDate.Month(), todayDate.Day()-v.offset, 0, 0, 0, 0, location)
 		var existing string
-		e := tx.QueryRowContext(ctx, `SELECT id FROM task_instances WHERE template_id=? AND period_key=?`, tid, day.Format("2006-01-02")).Scan(&existing)
+		e := tx.QueryRowContext(ctx, `SELECT id FROM task_instances WHERE template_id=? AND period_key=? AND family_id=?`, tid, day.Format("2006-01-02"), family).Scan(&existing)
 		if e == nil {
 			continue
 		}
-		if e != sql.ErrNoRows {
+		if !errors.Is(e, sql.ErrNoRows) {
 			return e
 		}
 		iid := id("task")
@@ -197,6 +205,15 @@ func (s *Server) EnsureDemo(ctx context.Context) error {
 		return err
 	}
 	if n == 0 {
+		// CreateFamily 只服务一个家庭：库里已经有别家的数据时，--demo 只是没演示
+		// 数据可种，不该让整个进程因此起不来。
+		var others int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM families`).Scan(&others); err != nil {
+			return err
+		}
+		if others > 0 {
+			return nil
+		}
 		if err := s.CreateFamily(ctx, FamilyInput{Code: "DEMO", Name: "演示家庭", Username: "parent", DisplayName: "演示家长", Password: "2468"}); err != nil {
 			return err
 		}

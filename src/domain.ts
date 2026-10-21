@@ -62,6 +62,26 @@ export function familyDate(instant: string, timezone: string): string {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+const timeFormatters = new Map<string, Intl.DateTimeFormat>();
+
+// 同一时刻的「月日 时:分」，同样按家庭时区。账本与提交证据都要用它：
+// toLocaleString() 读的是设备时区，Asia/Shanghai 的 08:30 会显示成前一天的 00:30。
+export function familyTime(instant: string, timezone: string): string {
+  let formatter = timeFormatters.get(timezone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: timezone || undefined,
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    timeFormatters.set(timezone, formatter);
+  }
+  return formatter.format(new Date(instant));
+}
+
 // 客户端与服务端一致地「最后一条 submission 生效」：server 的 submissions
 // 按 submitted_at 升序返回，所以后写覆盖先写。
 function latestSubmissions(

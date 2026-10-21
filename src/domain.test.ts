@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { dayActivity, dayDigest, familyDate, shiftDate } from "./domain";
+import {
+  dayActivity,
+  dayDigest,
+  familyDate,
+  familyTime,
+  shiftDate,
+} from "./domain";
 import type { AppState } from "./types";
 
 // 固定日期的本地 fixture：日期全部写死，才能表达「补录」这类跟今天无关的场景。
@@ -165,6 +171,14 @@ describe("day statistics", () => {
       "2026-09-16",
     );
     expect(familyDate("2026-09-15T17:30:00Z", "UTC")).toBe("2026-09-15");
+  });
+
+  it("formats an instant as the family's local month, day and time", () => {
+    const text = familyTime("2026-09-15T17:30:00Z", "Asia/Shanghai");
+    expect(text).toContain("9");
+    expect(text).toContain("16");
+    expect(text).toContain("01:30");
+    expect(familyTime("2026-09-15T17:30:00Z", "UTC")).toContain("17:30");
   });
 
   it("collects the tasks scheduled on a day and the points earned that day", () => {

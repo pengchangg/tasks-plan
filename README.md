@@ -84,7 +84,7 @@ GROWJOY_SECURE_COOKIES=true \
 
 健康检查：`GET /health/live`（返回 `{"status":"ok","version":...}`，版本来自构建时的 `-ldflags "-X main.version=..."`，未注入时为 `dev`）和 `GET /health/ready`（数据库可用、且所服务家庭的时区能加载时才返回 200，否则 503）。启动日志会打印本次实际服务的家庭码。
 
-前端不请求任何外部资源：Fredoka 字体已自托管在 `public/fonts/`，中文使用系统自带字体栈，页面没有第三方域名请求。
+前端不请求任何外部资源：Fredoka 与霞鹜文楷 GB（`public/fonts/lxgw-wenkai-gb/`，400/500 两套分片，`index.html` 直接链接其 `result.css`）都已自托管，页面没有第三方域名请求。
 
 单进程运行时也可以做备份与媒体清理：
 

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -695,6 +696,10 @@ func TestReviewCreditsExactlyOnceUsesMinimumGrowthAndRedemptionCannotOverdraw(t 
 			before = c.PointsBalance
 		}
 	}
+	// 备注和手动积分、提交说明共用 30 字预算：超了直接 400，不进事务也不占幂等键。
+	if w := doJSON(t, h, "POST", "/api/v1/tasks/"+pending.ID+"/review", map[string]any{"approved": true, "note": strings.Repeat("长", 31)}, cookie, "review-note"); w.Code != 400 {
+		t.Fatalf("long review note: %d %s", w.Code, w.Body.String())
+	}
 	w := doJSON(t, h, "POST", "/api/v1/tasks/"+pending.ID+"/review", map[string]any{"approved": true, "note": "ok"}, cookie, "review-1")
 	if w.Code != 200 {
 		t.Fatalf("review: %d %s", w.Code, w.Body.String())
@@ -776,6 +781,13 @@ func TestWishCompletionIsChildOnlyReversibleAndScopedToTheChild(t *testing.T) {
 	}
 	leo := childCookie(t, h, created.ID)
 	child := childCookie(t, h, mia.ID)
+	// 一次不带 isActive 的编辑不能把心愿悄悄下架：PUT 只改它收到的字段。
+	if w := doJSON(t, h, "PUT", "/api/v1/wishes/"+affordable.ID, map[string]any{
+		"title": affordable.Title, "description": affordable.Description,
+		"pointsCost": affordable.PointsCost, "icon": affordable.Icon, "color": affordable.Color,
+	}, parent, ""); w.Code != 200 {
+		t.Fatalf("edit wish without isActive: %d %s", w.Code, w.Body.String())
+	}
 	w = doJSON(t, h, "POST", "/api/v1/wishes/"+affordable.ID+"/redeem", map[string]any{}, child, "complete-redeem")
 	if w.Code != 200 {
 		t.Fatalf("redeem: %d %s", w.Code, w.Body.String())
@@ -1493,6 +1505,14 @@ func TestHomeworkIsParentOnlyAndValidatesSubjectEditAndDelete(t *testing.T) {
 	}
 	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{{"date", date}, {"subject", "数学"}}, nil); w.Code != 400 {
 		t.Fatalf("empty homework: %d %s", w.Code, w.Body.String())
+	}
+	// 上传预算与任务提交一致：超过 6 个文件当场拒绝，不往磁盘无限写。
+	tooMany := make([]homeworkFile, 0, 7)
+	for i := 0; i < 7; i++ {
+		tooMany = append(tooMany, homeworkFile{name: fmt.Sprintf("many-%d.png", i), content: solidPNG(t, 4, 4)})
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, fields("太多附件"), tooMany); w.Code != 400 {
+		t.Fatalf("too many files: %d %s", w.Code, w.Body.String())
 	}
 	w := runHomework(t, h, "POST", "/api/v1/homework/", parent, fields("写口算"), nil)
 	if w.Code != 200 {

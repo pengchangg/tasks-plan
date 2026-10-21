@@ -16,7 +16,7 @@
 
 |要求|说明|
 |---|---|
-|Go 1.22+|本手册用 1.27.1 验证；`modernc.org/sqlite` 是纯 Go，`CGO_ENABLED=0` 可静态交叉编译|
+|Go 1.22+（`go.mod` 声明 1.22）|本手册用 Go 1.24 验证；`modernc.org/sqlite` 是纯 Go，`CGO_ENABLED=0` 可静态交叉编译|
 |Node 22.22.2+ 与已安装的 `node_modules`|`npm run build` 需要；依赖声明为 `latest`，**不要**跑裸 `npm install`|
 |`rsync`、免密 `ssh`|`make deploy` 依赖两者|
 
@@ -145,7 +145,7 @@ INFO GrowJoy listening addr=0.0.0.0:9080
 
 ## 日常升级：自动部署（Gitea Actions）
 
-推送到 `main` 分支会自动触发部署（`.gitea/workflows/deploy.yml`）：checkout → 安装 Go/Node → `npm ci` → 配置 SSH → `make deploy`（构建 SPA + 交叉编译 linux/amd64 → rsync 传输 → `systemctl --user restart` → 轮询 `/health/ready` → 校验 `/health/live` 的 `version` 与本次 `git describe` 一致）。也可以在 Gitea 网页上手动触发（Actions → Deploy → Run workflow）。
+推送到 `main` 分支会自动触发部署（`.gitea/workflows/deploy.yml`）：checkout → `npm ci` → **`make precommit`（`go vet` + `go test -race` + `npm test` + `npm run build`，检查不通过就不部署）** → 配置 SSH → `make deploy`（构建 SPA + 交叉编译 linux/amd64 → rsync 传输 → `systemctl --user restart` → 轮询 `/health/ready` → 校验 `/health/live` 的 `version` 与本次 `git describe` 一致 → 校验首页引用的正是本次构建的 `assets/index-*.js`）。也可以在 Gitea 网页上手动触发（Actions → Deploy → Run workflow），但**只接受 `main`**：其它 ref 会在第一步直接退非零。同一个 `concurrency` 组串行执行，不会两个 run 同时 rsync + restart。推送即上线，所以这里的 `make precommit` 是唯一的检查门——本地 `.githooks/pre-commit` 只有装过 `make install-hooks` 的机器才有。
 
 一次性前置：
 
@@ -189,7 +189,7 @@ Runner 侧还有三处开关（需在 runner 主机改它的 `config.yaml` 并�
 make deploy
 ```
 
-它按顺序做：`npm run build` → `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(git describe --always --dirty)"` 到 `DEPLOY_STAGE` → 校验产物是 `x86-64` ELF → `ssh mkdir -p` → `rsync -a --delete` 覆盖 `dist/` → `rsync` 二进制 → `chmod +x` → `systemctl --user restart $(DEPLOY_UNIT)` → 轮询 `/health/ready`（最多 30 秒）→ 断言 `/health/live` 的 `version` 等于本地 `git describe`，不一致即退非零。
+它按顺序做：`npm run build` → 确认 `dist/index.html` 存在并记下本次的 `assets/index-*.js` 文件名 → `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(git describe --always --dirty)"` 到一次性的 `DEPLOY_STAGE.XXXXXX`（`mktemp -d`，退出即删）→ 校验产物是 `x86-64` ELF → `ssh -o ConnectTimeout=10 mkdir -p` → `rsync -a --delete` 覆盖 `dist/` → `rsync` 二进制 → `chmod +x` → `systemctl --user restart $(DEPLOY_UNIT)` → 轮询 `/health/ready`（最多 30 秒）→ 断言 `/health/live` 的 `version` 等于本地 `git describe` → 断言首页引用的 JS 就是本次构建的那个文件，任何一条不一致即退非零。最后那条是必需的：同一个 commit 重复部署时 `version` 字符串一模一样，光看它分不清新进程与旧进程。CI 里通过 `SSH_OPTS` 追加 `-o BatchMode=yes`（没人能回答密码提示），交互式 `make deploy` 用默认的 `-o ConnectTimeout=10`。
 
 成功输出形如：
 

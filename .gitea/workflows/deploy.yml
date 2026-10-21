@@ -5,15 +5,28 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# 部署是单副本、单进程的：两个 run 同时 rsync + restart，那台机器上的 dist/ 与
+# 二进制就可能一新一旧，版本校验还可能被对方那次 restart 满足。
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
 jobs:
   deploy:
-    name: Build and deploy
+    name: Build, verify and deploy
     # 自建镜像（debian13 runner 本地 localhost/gha-deploy:1）
     # 已预装 Go / Node / rsync / curl / openssh-client
     runs-on: deploy
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # workflow_dispatch 可以挑任意 ref 触发。部署的对象永远是最老的家庭那条真实
+      # 数据，所以只允许 main；要重放历史版本请临时开分支再合并。
+      - name: Require main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "✗ 只允许部署 main（当前 ${GITHUB_REF}）"
+          exit 1
       # 编译缓存：Go 的 ~/.cache/go-build + 模块，Node 的 node_modules + tsc 增量信息。
       # shortcut: 缓存服务不可达时只告警不失败（continue-on-error），回退到全量安装/编译。
       - name: Cache Go modules and build cache
@@ -45,6 +58,10 @@ jobs:
       - name: Install from lockfile
         if: steps.node-deps.outputs.cache-hit != 'true'
         run: npm ci --prefer-offline --no-audit --no-fund
+      # 推送即上线：这里的检查就是唯一的门。pre-commit 钩子只在装过
+      # `make install-hooks` 的本地机器上存在，不能当成流水线的一部分。
+      - name: Quality gate
+        run: make precommit
       - name: Configure SSH
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -54,16 +71,23 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "${DEPLOY_HOST#*@}" >> ~/.ssh/known_hosts
+          # 只收 ed25519 主机键：不指定类型会连 rsa/sha1 一起收，等于把降级路径留下。
+          ssh-keyscan -t ed25519 -H "${DEPLOY_HOST#*@}" >> ~/.ssh/known_hosts
       - name: Deploy
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           DEPLOY_DIR: ${{ vars.DEPLOY_DIR }}
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
           DEPLOY_UNIT: ${{ vars.DEPLOY_UNIT }}
+          # CI 里没有人能回答密码提示：BatchMode 让 ssh 直接失败而不是挂到超时。
+          SSH_OPTS: -o ConnectTimeout=10 -o BatchMode=yes
         run: |
           export DEPLOY_HOST="${DEPLOY_HOST:-localhost}"
           export DEPLOY_DIR="${DEPLOY_DIR:-/home/pengchang/growjoy}"
           export DEPLOY_URL="${DEPLOY_URL:-http://192.168.0.208:9080}"
           export DEPLOY_UNIT="${DEPLOY_UNIT:-growjoy}"
           make deploy
+      # runner 是长期存活的自建实例：不删等于把部署私钥留在磁盘上。
+      - name: Remove deploy key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519

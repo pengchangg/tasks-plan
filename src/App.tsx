@@ -40,7 +40,13 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { useAppStore } from "./store";
-import { dayActivity, dayDigest, familyDate, shiftDate } from "./domain";
+import {
+  dayActivity,
+  dayDigest,
+  familyDate,
+  familyTime,
+  shiftDate,
+} from "./domain";
 import type { DayActivity, DayEntry } from "./domain";
 import { proverbForDate } from "./proverbs";
 import type {
@@ -125,10 +131,18 @@ const taskSymbol = (category: string) =>
   ) : (
     <Sparkles size={18} />
   );
-const dateText = (date: string) =>
-  date === new Date().toISOString().slice(0, 10)
-    ? "今天"
-    : date.slice(5).replace("-", "月") + "日";
+// due_date 与提交日期都是家庭本地的日期字符串，所以「今天」也必须按家庭时区算：
+// 拿设备的 UTC 日期去比，在 Asia/Shanghai 的 00:00–08:00 之间永远对不上。
+// 日历算术只问「这一天是星期几 / 几月几日」，把它当本地零点解析与瞬时时区无关。
+const familyToday = (timezone: string) =>
+  familyDate(new Date().toISOString(), timezone);
+const weekdayIndex = (date: string) => new Date(`${date}T00:00:00`).getDay();
+const weekdayOf = (date: string) =>
+  ["日", "一", "二", "三", "四", "五", "六"][weekdayIndex(date)];
+const monthDayText = (date: string) =>
+  `${date.slice(5, 7)}月${date.slice(8, 10)}日`;
+const dateText = (date: string, today: string) =>
+  date === today ? "今天" : monthDayText(date);
 
 // favicon.svg 里同一个四角星。文字字形 ✦ 在不少系统字体里不存在，会渲染成空方块。
 function StarMark({ size = 16 }: { size?: number }) {
@@ -744,16 +758,15 @@ function ChildNav() {
 
 function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
   const { activeChild: child, childTasks: tasks } = store;
+  const today = familyToday(store.state.timezone);
   const done = tasks.filter((t) => t.status === "completed").length;
   const pending = tasks.filter((t) => t.status === "pending_review").length;
   return (
-    <div className="content-wrap child-home">
+    <div className="content-wrap">
       <div className="welcome-row">
         <div>
           <p className="eyebrow">
-            星期
-            {["日", "一", "二", "三", "四", "五", "六"][new Date().getDay()]} ·{" "}
-            {new Date().getMonth() + 1}月{new Date().getDate()}日
+            星期{weekdayOf(today)} · {monthDayText(today)}
           </p>
           <h1>
             嗨，{child.name} <span className="wave"><StarMark size={22} /></span>
@@ -773,6 +786,8 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
           <TaskCard
             key={task.id}
             task={task}
+            today={today}
+            timezone={store.state.timezone}
             submission={store.latestSubmissions.get(task.id)}
             onSubmit={store.actions.submitTask}
           />
@@ -860,12 +875,16 @@ function SectionTitle({
 }
 function TaskCard({
   task,
+  today,
+  timezone,
   submission,
   onSubmit,
   parent = false,
   onReview,
 }: {
   task: Task;
+  today: string;
+  timezone: string;
   submission?: TaskSubmission;
   onSubmit?: (id: string, note: string, attachments: Attachment[]) => void;
   parent?: boolean;
@@ -896,7 +915,7 @@ function TaskCard({
           <span className="points">
             <Coins size={14} /> +{task.points}
           </span>
-          <span className="due">{dateText(task.dueDate)}</span>
+          <span className="due">{dateText(task.dueDate, today)}</span>
           {task.status === "todo" && !parent && (
             <button className="small-primary" onClick={() => setOpen(true)}>
               完成任务
@@ -927,6 +946,7 @@ function TaskCard({
         {submission && (
           <SubmissionEvidence
             submission={submission}
+            timezone={timezone}
             variant="card"
             title={parent ? "孩子提交" : "我提交的内容"}
           />
@@ -1032,6 +1052,8 @@ function ChildTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
           <TaskCard
             key={t.id}
             task={t}
+            today={familyToday(store.state.timezone)}
+            timezone={store.state.timezone}
             submission={store.latestSubmissions.get(t.id)}
             onSubmit={store.actions.submitTask}
           />
@@ -1050,10 +1072,12 @@ function ChildTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
 function StarRow({
   redemption,
   ownerName,
+  timezone,
   onToggle,
 }: {
   redemption: Redemption;
   ownerName?: string;
+  timezone: string;
   onToggle?: (
     id: string,
     completed: boolean,
@@ -1088,7 +1112,10 @@ function StarRow({
           <small>
             {ownerName ? `${ownerName} · ` : ""}
             {redemption.pointsCost} 积分 ·{" "}
-            {dateText(redemption.createdAt.slice(0, 10))}
+            {dateText(
+              familyDate(redemption.createdAt, timezone),
+              familyToday(timezone),
+            )}
           </small>
         </div>
         <span
@@ -1188,9 +1215,11 @@ function StarRow({
 }
 function StarWishList({
   items,
+  timezone,
   onToggle,
 }: {
   items: { redemption: Redemption; ownerName?: string }[];
+  timezone: string;
   onToggle?: (
     id: string,
     completed: boolean,
@@ -1213,6 +1242,7 @@ function StarWishList({
           key={redemption.id}
           redemption={redemption}
           ownerName={ownerName}
+          timezone={timezone}
           onToggle={onToggle}
         />
       ))}
@@ -1260,6 +1290,7 @@ function ChildWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
       </div>
       <StarWishList
         items={store.childRedemptions.map((redemption) => ({ redemption }))}
+        timezone={store.state.timezone}
         onToggle={store.actions.toggleRedemption}
       />
       {selected && (
@@ -1707,7 +1738,7 @@ function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
   }, [store.homework.date, store.today, loadDate]);
   const items = store.homework.items;
   return (
-    <div className="content-wrap homework-page">
+    <div className="content-wrap">
       <div className="homework-head">
         <h1>
           {isToday ? "今日作业" : `${Number(date.slice(5, 7))}月${Number(date.slice(8))}日 · 作业`}
@@ -1802,8 +1833,12 @@ function WishCard({
 }
 
 function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
-  const { activeChild: child, childTasks: tasks, state } = store;
-  const done = tasks.filter((task) => task.status === "completed").length;
+  const { activeChild: child, state } = store;
+  // 两个指标必须同一个口径：childTasks 只有「今天还要处理」的实例，用它数完成数、
+  // 却用全量账本求和，就会得到「完成 3 个任务、获得 320 积分」。历史全在 state.tasks 里。
+  const done = state.tasks.filter(
+    (task) => task.childId === child.id && task.status === "completed",
+  ).length;
   const earned = state.ledger
     .filter((item) => item.childId === child.id && item.type === "earned")
     .reduce((sum, item) => sum + item.amount, 0);
@@ -1826,13 +1861,13 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
       (_, index) => `${month}-${String(index + 1).padStart(2, "0")}`,
     ),
   ];
+  // 星期必须按「面板正在讲的那一天」算：selected 才是那一行标题的来源，month 只是
+  // 日历翻到哪一页。用 month + selectedDay 拼日期，翻了月还没点格子就会配错。
   const [selectedMonth, selectedDay] = selected
     .split("-")
     .slice(1)
     .map(Number);
-  const weekday = ["日", "一", "二", "三", "四", "五", "六"][
-    new Date(year, monthNumber - 1, selectedDay).getDay()
-  ];
+  const weekday = weekdayOf(selected);
   const counts: Record<Task["status"], number> = {
     todo: 0,
     pending_review: 0,
@@ -1942,14 +1977,25 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
               <p className="empty-evidence">这一天没有安排任务</p>
             ) : (
               digest.scheduled.map((entry) => (
-                <DayTaskRow key={entry.task.id} entry={entry} />
+                <DayTaskRow
+                  key={entry.task.id}
+                  entry={entry}
+                  today={today}
+                  timezone={state.timezone}
+                />
               ))
             )}
             {digest.backfilled.length > 0 && (
               <>
                 <h3 className="day-group">补录记录</h3>
                 {digest.backfilled.map((entry) => (
-                  <DayTaskRow key={entry.task.id} entry={entry} backfill />
+                  <DayTaskRow
+                    key={entry.task.id}
+                    entry={entry}
+                    today={today}
+                    timezone={state.timezone}
+                    backfill
+                  />
                 ))}
               </>
             )}
@@ -1959,8 +2005,12 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
       <section className="achievement">
         <div className="achievement-badge">🌱</div>
         <div>
-          <h3>连续坚持 5 天</h3>
-          <p>再坚持一天，就能解锁新的徽章啦！</p>
+          <h3>连续坚持 {store.activeChild.streakDays} 天</h3>
+          <p>
+            {store.activeChild.streakDays > 0
+              ? "再坚持一天，就能解锁新的徽章啦！"
+              : "今天完成一个任务，连续天数就开始累积。"}
+          </p>
         </div>
         <ChevronRight size={18} />
       </section>
@@ -2018,9 +2068,13 @@ function CalendarGrid({
 
 function DayTaskRow({
   entry,
+  today,
+  timezone,
   backfill = false,
 }: {
   entry: DayEntry;
+  today: string;
+  timezone: string;
   backfill?: boolean;
 }) {
   const { task, submission, submissionDate } = entry;
@@ -2034,12 +2088,14 @@ function DayTaskRow({
           <h4>
             {task.title}
             {backfill ? (
-              <span className="day-badge">原定 {dateText(task.dueDate)}</span>
+              <span className="day-badge">
+                原定 {dateText(task.dueDate, today)}
+              </span>
             ) : (
               submissionDate !== undefined &&
               submissionDate !== task.dueDate && (
                 <span className="day-badge">
-                  补录 · {dateText(submissionDate)}提交
+                  补录 · {dateText(submissionDate, today)}提交
                 </span>
               )
             )}
@@ -2055,6 +2111,7 @@ function DayTaskRow({
       {submission && (
         <SubmissionEvidence
           submission={submission}
+          timezone={timezone}
           title="提交记录"
           variant="card"
         />
@@ -2313,7 +2370,7 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
       <div className="parent-welcome">
         <div>
           <span className="pill light-pill">
-            今天 · {new Date().getMonth() + 1}月{new Date().getDate()}日
+            今天 · {monthDayText(familyToday(store.state.timezone))}
           </span>
           <h2>
             陪伴 {store.activeChild.name}
@@ -2357,6 +2414,8 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
             <TaskCard
               key={t.id}
               task={t}
+              today={familyToday(store.state.timezone)}
+              timezone={store.state.timezone}
               submission={store.latestSubmissions.get(t.id)}
               parent
               onReview={store.actions.reviewTask}
@@ -2391,7 +2450,9 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
               <div>
                 <strong>{item.description}</strong>
                 <small>
-                  {new Date(item.createdAt).toLocaleDateString("zh-CN")}
+                  {monthDayText(
+                    familyDate(item.createdAt, store.state.timezone),
+                  )}
                 </small>
               </div>
               <b className={item.type === "earned" ? "positive" : "negative"}>
@@ -2561,7 +2622,7 @@ function ChildForm({
   return (
     <div className="modal-backdrop" ref={dialog}>
       <form
-        className="form-modal child-form"
+        className="form-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="child-form-title"
@@ -2796,6 +2857,7 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
         {tasks.map((task) => (
           <AdminTaskRow
             task={task}
+            timezone={store.state.timezone}
             submission={store.latestSubmissions.get(task.id)}
             key={task.id}
             onReview={store.actions.reviewTask}
@@ -2807,6 +2869,7 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
       {(showForm || editing) && (
         <TaskForm
           task={editing}
+          timezone={store.state.timezone}
           onClose={closeForm}
           onSave={(draft) => {
             store.actions.saveTask(
@@ -2879,10 +2942,36 @@ function MediaItem({
     </button>
   );
 }
+// 预览层必须挂载时才建立 useDialog 的 ref：把 ref 留在 {preview && …} 里面，
+// useDialog 在挂载时看到的是 null，直接 return，Esc 与焦点循环全都不会绑上。
+function MediaPreview({
+  attachment,
+  onClose,
+}: {
+  attachment: Attachment;
+  onClose: () => void;
+}) {
+  const dialog = useDialog(onClose);
+  return (
+    <div className="modal-backdrop" onClick={onClose} ref={dialog}>
+      <figure
+        className="media-viewer"
+        role="dialog"
+        aria-modal="true"
+        aria-label={attachment.name}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <ZoomableImage src={attachment.url} alt={attachment.name} />
+        <figcaption>{attachment.name}</figcaption>
+      </figure>
+      <button className="modal-close" onClick={onClose} aria-label="关闭预览">
+        <X size={18} />
+      </button>
+    </div>
+  );
+}
 function MediaGallery({ attachments }: { attachments: Attachment[] }) {
   const [preview, setPreview] = useState<Attachment | null>(null);
-  const closePreview = () => setPreview(null);
-  const dialog = useDialog(closePreview);
   return (
     <>
       <div className="media-grid">
@@ -2895,35 +2984,22 @@ function MediaGallery({ attachments }: { attachments: Attachment[] }) {
         ))}
       </div>
       {preview && (
-        <div className="modal-backdrop" onClick={closePreview} ref={dialog}>
-          <figure
-            className="media-viewer"
-            role="dialog"
-            aria-modal="true"
-            aria-label={preview.name}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <ZoomableImage src={preview.url} alt={preview.name} />
-            <figcaption>{preview.name}</figcaption>
-          </figure>
-          <button
-            className="modal-close"
-            onClick={closePreview}
-            aria-label="关闭预览"
-          >
-            <X size={18} />
-          </button>
-        </div>
+        <MediaPreview
+          attachment={preview}
+          onClose={() => setPreview(null)}
+        />
       )}
     </>
   );
 }
 function SubmissionEvidence({
   submission,
+  timezone,
   title = "孩子提交",
   variant = "row",
 }: {
   submission: TaskSubmission;
+  timezone: string;
   title?: string;
   variant?: "row" | "card";
 }) {
@@ -2934,12 +3010,7 @@ function SubmissionEvidence({
       <div className="evidence-heading">
         <strong>{title}</strong>
         <time dateTime={submission.submittedAt}>
-          {new Date(submission.submittedAt).toLocaleString("zh-CN", {
-            month: "numeric",
-            day: "numeric",
-            hour: "2-digit",
-            minute: "2-digit",
-          })}
+          {familyTime(submission.submittedAt, timezone)}
         </time>
       </div>
       {submission.note ? (
@@ -2962,12 +3033,14 @@ function SubmissionEvidence({
 }
 function AdminTaskRow({
   task,
+  timezone,
   submission,
   onReview,
   onEdit,
   onDelete,
 }: {
   task: Task;
+  timezone: string;
   submission?: TaskSubmission;
   onReview: (id: string, ok: boolean, note?: string) => void;
   onEdit: () => void;
@@ -3028,16 +3101,20 @@ function AdminTaskRow({
           <Trash2 size={16} />
         </button>
       </div>
-      {submission && <SubmissionEvidence submission={submission} />}
+      {submission && (
+        <SubmissionEvidence submission={submission} timezone={timezone} />
+      )}
     </article>
   );
 }
 function TaskForm({
   task,
+  timezone,
   onClose,
   onSave,
 }: {
   task: Task | null;
+  timezone: string;
   onClose: () => void;
   onSave: (draft: {
     title: string;
@@ -3056,7 +3133,7 @@ function TaskForm({
     task?.repeatRule ?? "once",
   );
   const [repeatWeekday, setRepeatWeekday] = useState(
-    task?.repeatWeekday ?? new Date().getDay(),
+    task?.repeatWeekday ?? weekdayIndex(familyToday(timezone)),
   );
   const dialog = useDialog(onClose);
   return (
@@ -3263,6 +3340,7 @@ function ParentWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
             (child) => child.id === redemption.childId,
           )?.name,
         }))}
+        timezone={store.state.timezone}
       />
       {(showForm || editing) && (
         <WishForm

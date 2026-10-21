@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { seedState } from "./data";
 import { familyDate } from "./domain";
 import type { ChildDraft, TaskDraft, WishDraft } from "./domain";
@@ -32,6 +32,8 @@ type APIError = { error?: { code?: string; message?: string } };
 const messages: Record<string, string> = {
   no_family: "还没有创建家庭：请先运行 serve --demo，或用 admin create-family 创建。",
   invalid_credentials: "密码不正确",
+  unauthorized: "登录状态已经失效，请重新进入。",
+  idempotency_required: "请求缺少幂等键，请刷新后重试",
   too_many_requests: "尝试太频繁了，请稍后再试",
   forbidden: "这个操作需要家长密码",
   insufficient_points: "积分不足，无法兑换",
@@ -48,6 +50,8 @@ const messages: Record<string, string> = {
   upload_failed: "上传失败了，请重试",
   unavailable: "服务正忙，请稍后再试",
   internal: "服务出错了，请稍后再试",
+  cross_site_request: "跨站请求被拒绝了，请从本站页面重试",
+  origin_mismatch: "请求来源和本站不一致，请检查访问地址",
 };
 
 class RequestError extends Error {
@@ -163,13 +167,21 @@ export function useAppStore() {
   }, []);
 
   // 作业与任务不同：它按「看的是哪一天」取，所以载荷不进 /state，而是单独一个端点，
-  // 由 homework.date 决定当前这一天。失败时保留上一次的内容并提示。
+  // 由 homework.date 决定当前这一天。失败时保留上一次的内容并提示，并返回 false：
+  // 要用这个结果的调用方（保存/删除）不能把失败当成成功再盖一句「已保存」。
+  // 序号让后发的请求赢。
+  const homeworkAttempt = useRef(0);
+
   const loadHomework = useCallback(async (date: string) => {
+    const attempt = ++homeworkAttempt.current;
     try {
       const response = await request(`/homework/?date=${date}`);
-      setHomework((await response.json()) as HomeworkDay);
+      const payload = (await response.json()) as HomeworkDay;
+      if (attempt === homeworkAttempt.current) setHomework(payload);
+      return true;
     } catch (error) {
       setMessage(describe(error, "加载作业失败"));
+      return false;
     }
   }, []);
 
@@ -277,9 +289,6 @@ export function useAppStore() {
     unlockParent: async (password: string) => {
       try {
         await request("/auth/parent", json("POST", { password }));
-        await refresh();
-        setMessage("");
-        return true;
       } catch (error) {
         // The modal shows its own wrong-password text; anything else
         // (throttling, a missing family) needs the shared banner.
@@ -290,6 +299,15 @@ export function useAppStore() {
           setMessage(describe(error, "无法进入家长端"));
         return false;
       }
+      // 密码已经对、会话已经建好：之后的重拉失败不能再报「密码不正确」，否则家长
+      // 会一遍遍重输一个正确的密码。只是这一屏的数字是旧的。
+      try {
+        await refresh();
+        setMessage("");
+      } catch {
+        setMessage("已进入家长端，但数据刷新失败，请点右上角刷新");
+      }
+      return true;
     },
     changeParentPassword: async (
       currentPassword: string,
@@ -417,24 +435,19 @@ export function useAppStore() {
           skipped?: string[];
         };
         // 表单里的日期可能被改过，列表跟着它走。
-        await loadHomework(draft.date);
-        setOkMessage(
-          saved.skipped?.length
-            ? `已保存，但跳过了 ${saved.skipped.length} 个不支持的文件：${saved.skipped.join("、")}`
-            : "作业已保存",
-        );
+        const loaded = await loadHomework(draft.date);
+        // 重新读失败时那句错误横幅就是唯一要说的话，别再盖一句「已保存」。
+        if (loaded)
+          setOkMessage(
+            saved.skipped?.length
+              ? `已保存，但跳过了 ${saved.skipped.length} 个不支持的文件：${saved.skipped.join("、")}`
+              : "作业已保存",
+          );
       }),
     deleteHomework: (id: string) =>
       void run(async () => {
         await request(`/homework/${id}`, json("DELETE"));
-        await loadHomework(homework.date);
-        setOkMessage("作业已删除");
-      }),
-    deleteHomeworkMedia: (homeworkId: string, mediaId: string) =>
-      void run(async () => {
-        await request(`/homework/${homeworkId}/media/${mediaId}`, json("DELETE"));
-        await loadHomework(homework.date);
-        setOkMessage("附件已删除");
+        if (await loadHomework(homework.date)) setOkMessage("作业已删除");
       }),
   };
   return {

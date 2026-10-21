@@ -487,6 +487,12 @@ func verifySecret(encoded, value string) bool {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &mem, &tm, &threads); err != nil {
 		return false
 	}
+	// 代价参数来自库里的一行字，不能无条件相信：一行被改坏的哈希（m/t 取到
+	// uint32 上限）会让每次登录都去申请几个 TB，进程直接被 OOM 杀掉。上限按
+	// 生产参数（m=65536,t=1,p=4）留足余量，够未来调参，又挡住这种输入。
+	if mem < 8*1024 || mem > 256*1024 || tm < 1 || tm > 10 || threads < 1 || threads > 16 {
+		return false
+	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return false
@@ -545,6 +551,7 @@ func validPin(value string) bool {
 	}
 	return true
 }
+
 // lookupSession resolves the session cookie without failing the request: the
 // child end is open to the household, so a missing or expired cookie is a
 // normal state rather than an error.
@@ -783,8 +790,12 @@ func (s *Server) changeParentPassword(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "new password must be exactly 4 digits")
 		return
 	}
-	family, code, err := s.resolvedFamily(r.Context())
-	if err != nil {
+	// 家庭从会话行取，和所有其它写路径一致（resolvedFamily 取的是最老的家庭，
+	// 多家庭下就是跨家庭改密码）。code 只用于限流桶的键，仍旧从同一行进库读。
+	x := sess(r)
+	family := x.FamilyID
+	var code string
+	if err := s.db.QueryRowContext(r.Context(), `SELECT code FROM families WHERE id=?`, family).Scan(&code); err != nil {
 		s.familyError(w, r, err)
 		return
 	}
@@ -897,8 +908,14 @@ func (s *Server) ensureInstances(ctx context.Context, family string) error {
 	return nil
 }
 
+// streakLookbackDays 限制 /state 读账本的深度：连续天数只从今天往回逐日走，
+// 更早的记录不会改变任何一天的结果，却要每天整表解析一遍。超过这个窗口的连续
+// 天数按窗口内计（400 天足够覆盖任何真实使用）。
+const streakLookbackDays = 400
+
 func (s *Server) streaks(ctx context.Context, family string, loc *time.Location) (map[string]int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT child_id,created_at FROM point_ledger WHERE family_id=? AND entry_type='earned' ORDER BY created_at DESC`, family)
+	since := nowText(s.now().AddDate(0, 0, -streakLookbackDays))
+	rows, err := s.db.QueryContext(ctx, `SELECT child_id,created_at FROM point_ledger WHERE family_id=? AND entry_type='earned' AND created_at>=? ORDER BY created_at DESC`, family, since)
 	if err != nil {
 		return nil, err
 	}
@@ -962,13 +979,17 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 	}
 	for rows.Next() {
 		var c Child
-		var totalExperience int
+		// children.experience 是 REAL 列：扫描进 int 时驱动会把值格式化再解析一次，
+		// 一个非整数值就让 /state 整体 500。按 REAL 扫、显式取整，坏数据只影响这一行
+		// 的等级显示。
+		var totalExperience float64
 		if err = rows.Scan(&c.ID, &c.Name, &c.Avatar, &c.Color, &totalExperience, &c.PointsBalance); err != nil {
 			rows.Close()
 			return out, err
 		}
-		c.Level = 1 + totalExperience/100
-		c.Experience = float64(totalExperience % 100)
+		total := int(totalExperience)
+		c.Level = 1 + total/100
+		c.Experience = float64(total % 100)
 		c.StreakDays = streaks[c.ID]
 		out.Children = append(out.Children, c)
 	}
@@ -1147,7 +1168,7 @@ func (s *Server) saveChild(w http.ResponseWriter, r *http.Request) {
 		// The child row is already committed, so a failure here answers 500 and
 		// leaves the created child visible on the next /state; the client only
 		// has to refresh.
-		if _, err = s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=?`, cid, x.ID); err != nil {
+		if _, err = s.db.Exec(`UPDATE sessions SET selected_child_id=? WHERE id=? AND family_id=?`, cid, x.ID, x.FamilyID); err != nil {
 			s.internalError(w, r, err)
 			return
 		}
@@ -1316,7 +1337,9 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// ensureInstances just ran, so an empty id can only be an internal fault.
-		if err = s.db.QueryRow(`SELECT id FROM task_instances WHERE template_id=? ORDER BY created_at DESC LIMIT 1`, tid).Scan(&instance); err != nil || instance == "" {
+		// created_at 是 RFC3339Nano（秒内的小数位会被裁掉），同一秒里建的两个实例
+		// 排序不可靠；rowid 才是插入顺序。
+		if err = s.db.QueryRow(`SELECT id FROM task_instances WHERE template_id=? AND family_id=? ORDER BY rowid DESC LIMIT 1`, tid, x.FamilyID).Scan(&instance); err != nil || instance == "" {
 			if err == nil {
 				err = fmt.Errorf("task template %s has no instance", tid)
 			}
@@ -1621,6 +1644,12 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "invalid JSON")
 		return
 	}
+	// 和手动积分、提交说明共用 30 字预算：review_note 会随每条 submission 进
+	// /state，1 MiB 的备注能把之后每一次刷新都撑大。
+	if utf8.RuneCountInString(in.Note) > 30 {
+		problem(w, 400, "invalid_request", "note must be at most 30 characters")
+		return
+	}
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.internalError(w, r, err)
@@ -1640,7 +1669,16 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 	var sid, child, title, status string
 	var points int
 	err = tx.QueryRow(`SELECT s.id,i.child_id,i.title,i.points,i.status FROM task_instances i JOIN task_submissions s ON s.task_instance_id=i.id AND s.reviewed_at IS NULL WHERE i.id=? AND i.family_id=? ORDER BY s.submitted_at DESC LIMIT 1`, iid, x.FamilyID).Scan(&sid, &child, &title, &points, &status)
-	if err != nil || status != "pending_review" {
+	if errors.Is(err, sql.ErrNoRows) {
+		problem(w, 409, "invalid_state", "no pending submission")
+		return
+	}
+	// 真正的数据库故障不能冒充「没有待确认的提交」，否则线上只看到一句 409。
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if status != "pending_review" {
 		problem(w, 409, "invalid_state", "no pending submission")
 		return
 	}
@@ -1650,11 +1688,26 @@ func (s *Server) reviewTask(w http.ResponseWriter, r *http.Request) {
 		approved = 1
 		newStatus = "completed"
 	}
-	_, err = tx.Exec(`UPDATE task_submissions SET reviewed_at=?,review_note=?,approved=? WHERE id=? AND family_id=?`, now, in.Note, approved, sid, x.FamilyID)
-	if err == nil {
-		_, err = tx.Exec(`UPDATE task_instances SET status=? WHERE id=? AND family_id=?`, newStatus, iid, x.FamilyID)
+	upd, err := tx.Exec(`UPDATE task_submissions SET reviewed_at=?,review_note=?,approved=? WHERE id=? AND family_id=? AND reviewed_at IS NULL`, now, in.Note, approved, sid, x.FamilyID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
 	}
-	if err == nil && in.Approved {
+	if n, _ := upd.RowsAffected(); n != 1 {
+		problem(w, 409, "conflict", "submission was already reviewed")
+		return
+	}
+	// 和 submitTask 一样用 WHERE 断言状态迁移：改到 0 行说明有人抢先改过。
+	upd, err = tx.Exec(`UPDATE task_instances SET status=? WHERE id=? AND family_id=? AND status='pending_review'`, newStatus, iid, x.FamilyID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if n, _ := upd.RowsAffected(); n != 1 {
+		problem(w, 409, "conflict", "task state changed")
+		return
+	}
+	if in.Approved {
 		lid := id("led")
 		res, e := tx.Exec(`INSERT OR IGNORE INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,?,'task',?,?,?)`, lid, x.FamilyID, child, points, "earned", iid, "完成「"+title+"」", now)
 		err = e
@@ -1774,13 +1827,16 @@ func (s *Server) awardPoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"id": lid})
 }
 
+// IsActive 用指针：decode 关了 DisallowUnknownFields 也只能拒未知字段名，
+// 认不出「没传」和「传了 false」。普通 bool 会让一次省略 isActive 的编辑把心愿
+// 静默下架（下架/上架只改这一个字段，客户端却习惯送整份 DTO）。
 type wishInput struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	PointsCost  int    `json:"pointsCost"`
 	Icon        string `json:"icon"`
 	Color       string `json:"color"`
-	IsActive    bool   `json:"isActive"`
+	IsActive    *bool  `json:"isActive"`
 }
 
 func (s *Server) saveWish(w http.ResponseWriter, r *http.Request) {
@@ -1792,9 +1848,14 @@ func (s *Server) saveWish(w http.ResponseWriter, r *http.Request) {
 	}
 	wid := chi.URLParam(r, "id")
 	now := nowText(s.now())
-	active := 0
-	if in.IsActive {
-		active = 1
+	// 新建默认上架；编辑时没带这个字段就保持原值（nil 绑成 NULL 交给 COALESCE）。
+	active := 1
+	if in.IsActive != nil && !*in.IsActive {
+		active = 0
+	}
+	var activeArg any
+	if in.IsActive != nil {
+		activeArg = active
 	}
 	if wid == "" {
 		wid = id("wish")
@@ -1804,7 +1865,7 @@ func (s *Server) saveWish(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		res, err := s.db.Exec(`UPDATE wishes SET title=?,description=?,points_cost=?,icon=?,color=?,is_active=?,updated_at=? WHERE id=? AND family_id=? AND deleted_at IS NULL`, strings.TrimSpace(in.Title), in.Description, in.PointsCost, in.Icon, in.Color, active, now, wid, x.FamilyID)
+		res, err := s.db.Exec(`UPDATE wishes SET title=?,description=?,points_cost=?,icon=?,color=?,is_active=COALESCE(?,is_active),updated_at=? WHERE id=? AND family_id=? AND deleted_at IS NULL`, strings.TrimSpace(in.Title), in.Description, in.PointsCost, in.Icon, in.Color, activeArg, now, wid, x.FamilyID)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -1870,8 +1931,12 @@ func (s *Server) redeemWish(w http.ResponseWriter, r *http.Request) {
 	var title string
 	var cost, active int
 	err = tx.QueryRow(`SELECT title,points_cost,is_active FROM wishes WHERE id=? AND family_id=? AND deleted_at IS NULL`, wid, x.FamilyID).Scan(&title, &cost, &active)
-	if err != nil || active != 1 {
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && active != 1) {
 		problem(w, 409, "wish_unavailable", "wish is unavailable")
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, err)
 		return
 	}
 	res, err := tx.Exec(`UPDATE children SET points_balance=points_balance-? WHERE id=? AND family_id=? AND points_balance>=?`, cost, x.SelectedChildID, x.FamilyID, cost)

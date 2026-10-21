@@ -238,17 +238,35 @@ func (s *Server) storeHomeworkVideo(src io.Reader, storage string) (int64, error
 	return n, nil
 }
 
+// homeworkMaxUpload 是单次作业上传的总预算，与任务提交、心愿完成一致：媒体目录和
+// SQLite 文件在同一个卷上，一次不设上限的写入就能把整个部署写满。
+const homeworkMaxUpload = 100 << 20
+
 // saveHomework 是 POST /homework/（新建）与 PUT /homework/{id}（编辑）共用的家长端写入路径。
-// 上传刻意不设大小与张数上限（内网可信环境，磁盘即上限）：没有 MaxBytesReader，也不数文件个数。
+// 跳过不支持格式的宽容态度不影响上限：张数与总量都按提交路径的预算卡。
 func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
 	ctx := r.Context()
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, homeworkMaxUpload+(1<<20))
+	if err := r.ParseMultipartForm(homeworkMaxUpload); err != nil {
 		problem(w, 413, "upload_too_large", "homework upload is too large")
 		return
 	}
 	if r.MultipartForm != nil {
 		defer r.MultipartForm.RemoveAll()
+	}
+	files := r.MultipartForm.File["files"]
+	if len(files) > 6 {
+		problem(w, 400, "too_many_files", "at most 6 files per homework")
+		return
+	}
+	var uploadTotal int64
+	for _, f := range files {
+		uploadTotal += f.Size
+	}
+	if uploadTotal > homeworkMaxUpload {
+		problem(w, 413, "upload_too_large", "homework upload is too large")
+		return
 	}
 	date := strings.TrimSpace(r.FormValue("date"))
 	subject := strings.TrimSpace(r.FormValue("subject"))
@@ -290,7 +308,7 @@ func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 	// 不支持的格式只跳过并回报，不拖垮整批（PRD §4）。
 	accepted := []homeworkCandidate{}
 	skipped := []string{}
-	for _, h := range r.MultipartForm.File["files"] {
+	for _, h := range files {
 		kind, mimeType, ext, ok := inspectHomeworkUpload(h)
 		if !ok {
 			skipped = append(skipped, filepath.Base(h.Filename))
