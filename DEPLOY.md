@@ -149,7 +149,7 @@ INFO GrowJoy listening addr=0.0.0.0:9080
 
 一次性前置：
 
-1. **跑一个 Gitea Runner**（`act_runner`），注册到 `gitea.homelab.com`，其 `runs-on` 标签须与工作流的 `ubuntu-latest` 匹配（act_runner 默认 Docker 标签即是 `ubuntu-latest`）。Runner 所在机器要能 `ssh` 到部署目标机。
+1. **跑一个 Gitea Runner**（`act_runner`），注册到 `gitea.homelab.com`，其标签必须包含 `deploy`（对应自建镜像 `localhost/gha-deploy:1`，见下「镜像与缓存」）。Runner 所在机器要能 `ssh` 到部署目标机。
 2. **在仓库 Settings → Actions 里配 Secrets / Variables**：
 
 |类型|名称|内容|
@@ -161,6 +161,19 @@ INFO GrowJoy listening addr=0.0.0.0:9080
 |Variable|`DEPLOY_UNIT`|systemd 用户单元名（留空默认 `growjoy`）|
 
 部署与 `make deploy` 一样**不**改远端 `data/`、不建家庭、不动 unit 文件。
+
+### 里手镜像与缓存
+
+`runs-on: deploy` 指向自建镜像 `localhost/gha-deploy:1`（debian13），已预装 Go、Node、`rsync`、`curl`、`openssh-client`，因此工作流里没有 `setup-go`/`setup-node`，也没有 apt 安装步骤。镜像不在仓库里维护，换机器或升级 Go/Node 时要自己重建并重新打标签，否则 job 会一直排队等不到匹配的 runner。
+
+仓库内还开了两层缓存（`.gitea/workflows/deploy.yml`）：`~/go/pkg/mod` + `~/.cache/go-build`（key 按 `go.sum`）与 `~/.npm`（按 `package-lock.json`）；`npm ci` 带 `--prefer-offline`，命中时不走网络。首次运行仍是冷的，且 `actions/cache` 不可用时只告警不阻断部署。
+
+Runner 侧还有三处开关（需在 runner 主机改它的 `config.yaml` 并重启，仓库改不到）：
+
+|配置|作用|
+|---|---|
+|`cache.offline_mode: true`|`uses:` 的 action 仓库不再每个 job 重新拉取。GitHub 访问慢或被限时，这一步往往是最耗时的|
+|`cache.dir:`|缓存落盘位置（默认 `$HOME/.cache/actcache`）。指到有余量的盘；docker 模式下 `actions/cache` 报 `connect ETIMEDOUT` 时另配 `cache.host`/`cache.port` 并发布该端口|
 
 ### 手动部署：`make deploy`
 
