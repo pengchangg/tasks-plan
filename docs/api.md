@@ -46,11 +46,13 @@
   "submissions": [{"id":"sub_1","taskId":"task_9f","childId":"child_ab12","note":"读完了","attachments":[],"submittedAt":"2026-10-21T09:30:00Z"}],
   "wishes": [{"id":"wish_1","title":"选择一次晚餐","description":"","pointsCost":80,"icon":"🍜","color":"coral","isActive":true}],
   "ledger": [{"id":"led_1","childId":"child_ab12","amount":20,"type":"earned","referenceType":"task","referenceId":"task_9f","description":"任务确认完成","createdAt":"2026-10-21T09:31:00Z"}],
-  "redemptions": [{"id":"red_1","wishId":"wish_1","wishTitle":"选择一次晚餐","wishIcon":"🍜","wishColor":"coral","childId":"child_ab12","pointsCost":80,"attachments":[],"createdAt":"2026-10-21T09:40:00Z"}]
+  "redemptions": [{"id":"red_1","wishId":"wish_1","wishTitle":"选择一次晚餐","wishIcon":"🍜","wishColor":"coral","childId":"child_ab12","pointsCost":80,"attachments":[],"createdAt":"2026-10-21T09:40:00Z"}],
+  "holidays": [{"name":"国庆节","start":"2026-10-01","end":"2026-10-07"}],
+  "makeupWorkdays": ["2026-09-20","2026-10-10"]
 }
 ```
 
-`tasks` 里的是**任务实例**而不是模板；后续 `/tasks/{id}` 全部指实例。`version` 恒为 2，客户端忽略。`timezone` 是家庭 IANA 时区，前端用它把 UTC 时间折算成家庭本地日期。
+`tasks` 里的是**任务实例**而不是模板；后续 `/tasks/{id}` 全部指实例。`version` 恒为 2，客户端忽略。`timezone` 是家庭 IANA 时区，前端用它把 UTC 时间折算成家庭本地日期。`holidays` 与 `makeupWorkdays` 是国办放假表的整张表（见 `internal/server/holidays.go`），日历用它给日期打「休」/「班」角标；周末由客户端按星期自己算，农历由客户端用 `Intl` 中文历法算，服务端不参与。
 
 ### 手动加减分
 
@@ -96,18 +98,20 @@
 
 | 接口 | 角色 | 说明 |
 |---|---|---|
-| `GET /api/v1/homework/?date=YYYY-MM-DD` | 任意 | `200 {date, items}`，省略 `date` 时返回家庭本地的今天 |
+| `GET /api/v1/homework/?date=YYYY-MM-DD` | 任意 | `200 {date, items, holiday?}`，省略 `date` 时返回家庭本地的今天；`holiday` 是这一天所属的连续假期 |
 | `POST /api/v1/homework/` | 家长 | multipart 新建，`200 {id, skipped}` |
 | `PUT /api/v1/homework/{id}` | 家长 | multipart 编辑，`200 {id, skipped}` |
 | `DELETE /api/v1/homework/{id}` | 家长 | `204`，级联删除媒体 |
 | `DELETE /api/v1/homework/{id}/media/{mediaID}` | 家长 | 删单个附件与文件，`204` |
 
-写入字段：`date`、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
+写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
+
+**假期作业。** `date`..`end_date` 是闭区间，这段时间内的每一天读到的都是同一条作业（`date<=? AND end_date>=?`），所以家长在假期前设置一次即可。服务端内置国办放假表（2025–2026 的法定假期区间与调休上班日），把每一段连续放假的日期合并成一个 `Holiday`：`{name,start,end,days,beforeFrom}`，`days` 是这段假期的自然天数，`beforeFrom` 为 `true` 表示这一天本身还是工作日、只是紧挨着假期（「假期前一天」，例如周五之于周末）。表单据此预填整段范围；表外年份退化为只按周末合并。校验：`end_date` 必须是 `YYYY-MM-DD`、不得早于 `date`、跨度上限 21 天（`homeworkMaxRangeDays`），否则 `400 invalid_request`（`end_date must be YYYY-MM-DD` / `end_date must not be before date` / `date range is too long`）。
 
 `HomeworkDay` 形状：
 
 ```json
-{"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-21","subject":"语文","description":"朗读第 5 课","createdAt":"2026-10-21T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}]}]}
+{"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-01","endDate":"2026-10-07","subject":"语文","description":"朗读第 5 课","createdAt":"2026-09-30T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}]}],"holiday":{"name":"国庆节","start":"2026-10-01","end":"2026-10-07","days":7,"beforeFrom":false}}
 ```
 
 ## 媒体

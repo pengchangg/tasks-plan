@@ -27,11 +27,12 @@ flowchart LR
 | `cmd/growjoy/main.go` | 唯一入口与唯一的 `GROWJOY_*` 读取处；子命令 `serve` / `admin create-family` / `seed-demo` / `backup` / `gc`；`http.Server{ReadHeaderTimeout: 10s}` + 优雅关闭；每小时的清理 ticker |
 | `internal/server/server.go` | `Config`/`Server`、`Open`/`applyMigrations`、整个 chi 路由、全部 HTTP 处理器、认证、上传、DTO、统计 |
 | `internal/server/admin.go` | 非 HTTP 操作：`CreateFamily`、`SeedDemo`、`EnsureDemo` |
-| `internal/server/homework.go` | 作业资源：读某一天、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85） |
+| `internal/server/homework.go` | 作业资源：读某一天（`date..end_date` 闭区间，一天就能读到整段假期作业）、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85） |
+| `internal/server/holidays.go` | 内置国办放假表（2025–2026 假期区间 + 调休上班日）：`restBlock` 把连续放假块合并、`holidayWindow` 给出某天所属的整段假期（含假期前一天）供作业表单预填 |
 | `internal/server/ratelimit.go` | 令牌桶、家长密码失败预算、argon2 并发闸门、panic 恢复与错误辅助函数 |
 | `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等 |
 
-前端只有 `src/`：`App.tsx` 装着全部组件与路由，`store.ts` 是唯一状态容器与 API 客户端，`domain.ts` 是成长日历的日期计算，`styles.css` 是全部样式。
+前端只有 `src/`：`App.tsx` 装着全部组件与路由，`store.ts` 是唯一状态容器与 API 客户端，`domain.ts` 是成长日历的日期计算，`lunar.ts` 是农历与「休」/「班」角标，`styles.css` 是全部样式。
 
 ## 请求链路
 
@@ -56,7 +57,7 @@ requestLog（安全响应头 + 一行访问日志）
 
 ## 数据流
 
-- **一次请求拿全量**：`GET /api/v1/state` 返回 `State` 聚合（角色、当前孩子、孩子、任务、提交与附件、愿望、账本、兑换记录、家庭 `timezone`）。前端没有任何按资源分页或按需加载。
+- **一次请求拿全量**：`GET /api/v1/state` 返回 `State` 聚合（角色、当前孩子、孩子、任务、提交与附件、愿望、账本、兑换记录、家庭 `timezone`，以及日历打标用的 `holidays` / `makeupWorkdays`）。前端没有任何按资源分页或按需加载。
 - **写操作返回极简结果**：成功返回 `{"id": "..."}`（200）或 204，然后 `src/store.ts` 重新拉取 `/state` 与 `/stats`。没有乐观更新，服务端是唯一真相。
 - **读也会写**：`state()` 先调 `ensureInstances`，用 `INSERT OR IGNORE` 幂等地为「今天 / 本周 / 创建日」生成任务实例。因此读接口不是纯只读的，实例的生成与读取共用同一个唯一键 `UNIQUE(template_id, period_key)`。
 - 列表顺序是 UI 契约：孩子、账本、兑换、提交升序；任务与愿望按 `created_at` 降序；所有切片都规范化为非 `null` 数组。
@@ -88,6 +89,7 @@ requestLog（安全响应头 + 一行访问日志）
 - 持久化的瞬时时间统一是 UTC 的 `RFC3339Nano`；只有日期语义的值（`due_date`、`period_key`）用**家庭本地**的 `YYYY-MM-DD`。
 - 日/周边界由家庭 IANA 时区（默认 `Asia/Shanghai`）决定，不是进程本地时区。可用 `GET /state` 的 `timezone` 与 `/stats` 的 `from`/`to` 对照。
 - 前端所有日期展示都走 `src/domain.ts` / `dateText` 旁的 `familyToday` / `familyDate` / `weekdayOf` / `monthDayText` 等辅助函数，读家庭时区。**设备本地时间**会在上海时间的最后 8 小时里和 `due_date`、`/stats` 对不上；任何组件需要「今天」时接收 `today` / `timezone` prop，而不是自己读时钟。
+- 农历与「休」/「班」角标在 `src/lunar.ts`：农历走平台自带的 `Intl`（`zh-CN-u-ca-chinese`，按 UTC 正午解析日期串，零依赖零请求），节假日标注用 `/state` 下发的 `holidays` + `makeupWorkdays`（周末按星期算）。成长日历每格、首页问候、作业日期都从同一个 `LunarTag` / `lunarLabel` 取，不要在别处再算一遍。
 - 测试通过替换 `s.now` 固定时间，且必须在写种子数据**之前**替换。
 
 ## 统计

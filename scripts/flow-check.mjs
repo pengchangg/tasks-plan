@@ -411,6 +411,13 @@ assert.ok(dayText.includes("已完成 3"));
 assert.ok(dayText.includes("待确认 1"));
 assert.ok(dayText.includes("获得 20 积分"));
 assert.ok(!dayText.includes("补录"));
+// 日历每格都带农历小字，周末/官方假期打「休」角标，日期面板的标题也带农历。
+assert.equal(
+  await page.locator(".calendar-day .calendar-lunar").count(),
+  await page.locator(".calendar-day").count(),
+);
+assert.ok((await page.locator(".calendar-mark.rest").count()) >= 8);
+assert.ok((await dayPanel.locator(".date-lunar").innerText()).includes("农历"));
 await page.screenshot({
   path: ".artifacts/ui/growth-day.png",
   fullPage: true,
@@ -872,6 +879,146 @@ await emptyHomeModule.waitFor();
 assert.ok((await emptyHomeModule.innerText()).includes("今日暂无作业"));
 assert.ok((await page.locator(".homework-module").innerText()).includes("按日期查看"));
 
+// ── 假期作业：在假期前一天设一次，整段假期每天都能看到。
+// 起始日现探：取未来 90 天里第一个「首日就是这天、且还能延续」的连续假期块，
+// 所以门不依赖具体年份的放假表，也不会撞上落在假期内或后接调休上班的周五。
+const holidayPlan = await page.evaluate(async () => {
+  const state = await (await fetch("/api/v1/state")).json();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: state.timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const value = (type) => parts.find((part) => part.type === type).value;
+  const today = new Date(
+    `${value("year")}-${value("month")}-${value("day")}T00:00:00Z`,
+  );
+  for (let ahead = 1; ahead <= 90; ahead += 1) {
+    const day = new Date(today);
+    day.setUTCDate(day.getUTCDate() + ahead);
+    const date = day.toISOString().slice(0, 10);
+    const response = await fetch(`/api/v1/homework/?date=${date}`);
+    const holiday = (await response.json()).holiday;
+    if (holiday && holiday.start === date && holiday.end > date) return holiday;
+  }
+  return null;
+});
+assert.ok(holidayPlan, "未来 90 天里应至少有一段连续假期");
+const shiftDay = (date, days) => {
+  const day = new Date(`${date}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() + days);
+  return day.toISOString().slice(0, 10);
+};
+const holidayStart = holidayPlan.start;
+const midHoliday = shiftDay(holidayStart, 1);
+const openHomeworkDay = async (date) => {
+  const loaded = page.waitForResponse((response) =>
+    response.url().includes(`/api/v1/homework/?date=${date}`),
+  );
+  await page.getByLabel("作业日期").fill(date);
+  await loaded;
+};
+
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "作业管理" }).click();
+await page.waitForURL(/\/parent\/homework$/);
+await openHomeworkDay(holidayStart);
+await page.getByRole("button", { name: "新增作业" }).click();
+const holidayModal = page.locator(".form-modal");
+await holidayModal.waitFor();
+// 表单已经预填整段假期，家长只需要点保存。
+assert.equal(
+  await holidayModal.getByLabel("日期", { exact: true }).inputValue(),
+  holidayStart,
+);
+assert.equal(
+  await holidayModal.getByLabel("结束日期").inputValue(),
+  holidayPlan.end,
+);
+assert.ok(
+  (await holidayModal.locator(".holiday-hint").innerText()).includes(
+    holidayPlan.name,
+  ),
+);
+await holidayModal.getByRole("button", { name: "数学" }).click();
+await holidayModal
+  .getByLabel("文字描述")
+  .fill("假期里每天读十页课外书。");
+await page.screenshot({
+  path: ".artifacts/ui/homework-holiday.png",
+  fullPage: true,
+});
+await holidayModal.getByRole("button", { name: "保存作业" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+await page.getByText("作业已保存").waitFor();
+const holidayRow = page
+  .locator(".homework-admin-row")
+  .filter({ hasText: "假期里每天读十页课外书" });
+await holidayRow.locator(".holiday-badge").waitFor();
+assert.ok((await holidayRow.locator(".holiday-badge").innerText()).includes("假期作业"));
+
+// 在假期中间新增也要预填整段范围（否则 10/3 新增就只有 10/3–10/7）。
+await openHomeworkDay(midHoliday);
+await page.getByRole("button", { name: "新增作业" }).click();
+const midModal = page.locator(".form-modal");
+await midModal.waitFor();
+assert.equal(
+  await midModal.getByLabel("日期", { exact: true }).inputValue(),
+  holidayStart,
+);
+assert.equal(
+  await midModal.getByLabel("结束日期").inputValue(),
+  holidayPlan.end,
+);
+assert.ok(
+  (await midModal.locator(".holiday-hint").innerText()).includes(
+    holidayPlan.name,
+  ),
+);
+await midModal.locator(".form-heading button").click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+
+await enterChild();
+await page.getByRole("link", { name: "作业" }).click();
+await page.waitForURL(/\/child\/homework$/);
+// 假期每一天都看得到同一条作业，超出范围就看不到。
+const holidayDays = [];
+for (
+  let day = holidayStart;
+  day <= holidayPlan.end;
+  day = shiftDay(day, 1)
+) {
+  holidayDays.push(day);
+}
+assert.ok(holidayDays.length > 1);
+for (const date of holidayDays) {
+  const loaded = page.waitForResponse((response) =>
+    response.url().includes(`/api/v1/homework/?date=${date}`),
+  );
+  await page.getByLabel("选择日期").fill(date);
+  await loaded;
+  const holidayCard = page
+    .locator(".homework-card")
+    .filter({ hasText: "假期里每天读十页课外书" });
+  await holidayCard.waitFor();
+  assert.ok(
+    (await holidayCard.locator(".holiday-badge").innerText()).includes(
+      "假期作业",
+    ),
+  );
+}
+const afterHoliday = shiftDay(holidayPlan.end, 1);
+const afterLoaded = page.waitForResponse((response) =>
+  response.url().includes(`/api/v1/homework/?date=${afterHoliday}`),
+);
+await page.getByLabel("选择日期").fill(afterHoliday);
+await afterLoaded;
+await page.locator(".homework-card").waitFor({ state: "detached" });
+await page.locator(".empty-state").waitFor();
+await page.getByRole("link", { name: "今日", exact: true }).click();
+await page.waitForURL(/\/child$/);
+
 // 顶栏刷新：数据往往和屏幕上一样，所以必须给一句回执，否则按钮看起来没反应；
 // 这条提示只认「已刷新」自己，2 秒后自收（别把后来换成别的提示的消息一起清掉）。
 const refreshed = page.waitForResponse((response) =>
@@ -912,6 +1059,7 @@ console.log(
     redemptionCompletionReversible: true,
     redemptionCompletionEvidence: true,
     growthDayStats: true,
+    growthCalendarLunar: true,
     growthBackfill: true,
     statsRange: true,
     homework: true,
@@ -919,6 +1067,7 @@ console.log(
     homeworkViewer: true,
     homeworkDateNav: true,
     homeworkFont: true,
+    homeworkHolidayRange: true,
     refreshButton: true,
     consoleErrors: errors.length,
   }),

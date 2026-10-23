@@ -7,6 +7,9 @@ const daysAgo = (days: number) =>
 export const seedState: AppState = {
   version: 1,
   timezone: "Asia/Shanghai",
+  // 演示数据不起日历标，真实假期表由服务端 /state 下发。
+  holidays: [],
+  makeupWorkdays: [],
   role: "child",
   activeChildId: "mia",
   children: [

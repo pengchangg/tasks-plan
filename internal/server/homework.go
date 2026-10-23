@@ -46,19 +46,23 @@ func validDateValue(v string) bool {
 }
 
 // Homework 是一条作业。媒体复用 Attachment：前端可以直接把它交给现有的媒体渲染。
+// Date..EndDate 含首尾：假期作业一次覆盖整段假期，孩子端区间内每一天都读得到它。
 type Homework struct {
 	ID          string       `json:"id"`
 	Date        string       `json:"date"`
+	EndDate     string       `json:"endDate"`
 	Subject     string       `json:"subject"`
 	Description string       `json:"description"`
 	CreatedAt   string       `json:"createdAt"`
 	Media       []Attachment `json:"media"`
 }
 
-// HomeworkDay 是某个家庭本地日期的全部作业，按录入顺序。
+// HomeworkDay 是某个家庭本地日期的全部作业，按录入顺序。Holiday 是这一天所属的
+// 连续假期（相对家庭本地日期计算），前端拿它预填「整段假期」的范围，不必再请求一次。
 type HomeworkDay struct {
-	Date  string     `json:"date"`
-	Items []Homework `json:"items"`
+	Date    string     `json:"date"`
+	Items   []Homework `json:"items"`
+	Holiday *Holiday   `json:"holiday,omitempty"`
 }
 
 // getHomework 读一天的作业，孩子端与家长端都能用；date 缺省是家庭本地的今天。
@@ -82,6 +86,11 @@ func (s *Server) getHomework(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	if day, err := time.Parse("2006-01-02", date); err == nil {
+		if window, ok := holidayWindow(day); ok {
+			out.Holiday = &window
+		}
+	}
 	writeJSON(w, 200, out)
 }
 
@@ -89,14 +98,15 @@ func (s *Server) getHomework(w http.ResponseWriter, r *http.Request) {
 // 之后才能查每条作业的媒体。
 func (s *Server) homeworkDay(ctx context.Context, family, date string) (HomeworkDay, error) {
 	out := HomeworkDay{Date: date, Items: []Homework{}}
+	// 假期作业的区间覆盖多天，所以按 date<=今天<=end_date 取，而不是精确等于日期。
 	// created_at 是裁剪过尾零的 RFC3339Nano，同一秒内的字典序不可靠，rowid 才是录入顺序。
-	rows, err := s.db.QueryContext(ctx, `SELECT id,date,subject,description,created_at FROM homework WHERE family_id=? AND date=? ORDER BY created_at,rowid`, family, date)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,date,end_date,subject,description,created_at FROM homework WHERE family_id=? AND date<=? AND end_date>=? ORDER BY date,rowid`, family, date, date)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		item := Homework{Media: []Attachment{}}
-		if err = rows.Scan(&item.ID, &item.Date, &item.Subject, &item.Description, &item.CreatedAt); err != nil {
+		if err = rows.Scan(&item.ID, &item.Date, &item.EndDate, &item.Subject, &item.Description, &item.CreatedAt); err != nil {
 			rows.Close()
 			return out, err
 		}
@@ -279,6 +289,25 @@ func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "subject is not in the fixed list")
 		return
 	}
+	// end_date 缺省等于 date（单日作业）；跨假期时由前端预填整段假期的最后一天。
+	endDate := strings.TrimSpace(r.FormValue("end_date"))
+	if endDate == "" {
+		endDate = date
+	}
+	if !validDateValue(endDate) {
+		problem(w, 400, "invalid_request", "end_date must be YYYY-MM-DD")
+		return
+	}
+	from, fromErr := time.Parse("2006-01-02", date)
+	to, toErr := time.Parse("2006-01-02", endDate)
+	if fromErr != nil || toErr != nil || to.Before(from) {
+		problem(w, 400, "invalid_request", "end_date must not be before date")
+		return
+	}
+	if to.Sub(from) > time.Duration(homeworkMaxRangeDays-1)*24*time.Hour {
+		problem(w, 400, "invalid_request", "date range is too long")
+		return
+	}
 	hid := chi.URLParam(r, "id")
 	// 编辑时先把现存媒体读出来：合并「至少一项」的判断、要删的行、以及磁盘上要清的文件，
 	// 都基于同一次读取，避免在事务里重读。
@@ -363,10 +392,10 @@ func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 	now := nowText(s.now())
 	if hid == "" {
 		hid = id("hw")
-		_, err = tx.Exec(`INSERT INTO homework(id,family_id,date,subject,description,created_at) VALUES(?,?,?,?,?,?)`, hid, x.FamilyID, date, subject, description, now)
+		_, err = tx.Exec(`INSERT INTO homework(id,family_id,date,end_date,subject,description,created_at) VALUES(?,?,?,?,?,?,?)`, hid, x.FamilyID, date, endDate, subject, description, now)
 	} else {
 		var res sql.Result
-		res, err = tx.Exec(`UPDATE homework SET date=?,subject=?,description=? WHERE id=? AND family_id=?`, date, subject, description, hid, x.FamilyID)
+		res, err = tx.Exec(`UPDATE homework SET date=?,end_date=?,subject=?,description=? WHERE id=? AND family_id=?`, date, endDate, subject, description, hid, x.FamilyID)
 		if err == nil {
 			var changed int64
 			if changed, err = res.RowsAffected(); err == nil && changed == 0 {

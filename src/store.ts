@@ -420,6 +420,7 @@ export function useAppStore() {
       void run(async () => {
         const body = new FormData();
         body.set("date", draft.date);
+        body.set("end_date", draft.endDate || draft.date);
         body.set("subject", draft.subject);
         body.set("description", draft.description);
         for (const file of draft.files) body.append("files", file);

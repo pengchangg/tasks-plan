@@ -143,6 +143,9 @@ type State struct {
 	Wishes        []Wish       `json:"wishes"`
 	Ledger        []Ledger     `json:"ledger"`
 	Redemptions   []Redemption `json:"redemptions"`
+	// 日历打标只需要官方的放假区间与调休上班日；周末由客户端按星期自己算。
+	Holidays       []HolidaySpan `json:"holidays"`
+	MakeupWorkdays []string      `json:"makeupWorkdays"`
 }
 
 func Open(cfg Config, logger *slog.Logger) (*Server, error) {
@@ -969,6 +972,8 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 		return out, err
 	}
 	out.Timezone = loc.String()
+	out.Holidays = holidaySpans()
+	out.MakeupWorkdays = append([]string{}, makeupWorkdays...)
 	streaks, err := s.streaks(ctx, x.FamilyID, loc)
 	if err != nil {
 		return out, err

@@ -1639,3 +1639,118 @@ func TestHomeworkIsParentOnlyAndValidatesSubjectEditAndDelete(t *testing.T) {
 		t.Fatalf("media rows survived the cascade: %d", stored)
 	}
 }
+
+func TestHomeworkHolidayWindowsFollowTheOfficialCalendar(t *testing.T) {
+	// 表里的日期是常量，写错一天就当场发现。
+	for _, entry := range holidayTable {
+		if mustDay(entry.End).Before(mustDay(entry.Start)) {
+			t.Fatalf("holiday %s ends before it starts", entry.Name)
+		}
+	}
+	// 2026 春节 2/15（周日）–2/23（周一）：周末与法定假合并成一整块。
+	window, ok := holidayWindow(mustDay("2026-02-18"))
+	if !ok || window.Name != "春节" || window.Start != "2026-02-15" || window.End != "2026-02-23" || window.Days != 9 || window.BeforeFrom {
+		t.Fatalf("spring festival window: %+v ok=%v", window, ok)
+	}
+	// 2/14 是调休上班的周六，但它紧挨着假期，所以是假期作业的起点。
+	window, ok = holidayWindow(mustDay("2026-02-14"))
+	if !ok || window.Start != "2026-02-14" || window.End != "2026-02-23" || window.Days != 10 || !window.BeforeFrom {
+		t.Fatalf("day before the spring festival: %+v ok=%v", window, ok)
+	}
+	// 普通周五与它后面的周末连成 3 天：周五设置等同于周末设置。
+	window, ok = holidayWindow(mustDay("2026-03-06"))
+	if !ok || window.Name != "周末" || window.Start != "2026-03-06" || window.End != "2026-03-08" || window.Days != 3 || !window.BeforeFrom {
+		t.Fatalf("friday window: %+v ok=%v", window, ok)
+	}
+	// 周六自己看是 2 天，不会再往前吞掉周五。
+	window, ok = holidayWindow(mustDay("2026-03-07"))
+	if !ok || window.Start != "2026-03-07" || window.End != "2026-03-08" || window.Days != 2 || window.BeforeFrom {
+		t.Fatalf("saturday window: %+v ok=%v", window, ok)
+	}
+	// 调休上班的周六不是假期，只有第二天（周日）放假时它才算假前日。
+	window, ok = holidayWindow(mustDay("2026-10-10"))
+	if !ok || window.Start != "2026-10-10" || window.End != "2026-10-11" || window.Days != 2 || !window.BeforeFrom {
+		t.Fatalf("makeup saturday window: %+v ok=%v", window, ok)
+	}
+	// 2025 国庆+中秋 10/1–10/8 共 8 天，假前一天 9/30 也算进来。
+	window, ok = holidayWindow(mustDay("2025-09-30"))
+	if !ok || window.Name != "国庆节、中秋节" || window.Start != "2025-09-30" || window.End != "2025-10-08" || window.Days != 9 || !window.BeforeFrom {
+		t.Fatalf("2025 national day window: %+v ok=%v", window, ok)
+	}
+	// 调休上班、前后都不放假的日子不沾假期。
+	if window, ok = holidayWindow(mustDay("2026-01-04")); ok {
+		t.Fatalf("makeup workday looks like a holiday: %+v", window)
+	}
+	// 假期结束后第一个工作日也不沾边。
+	if window, ok = holidayWindow(mustDay("2026-10-09")); ok {
+		t.Fatalf("day after the holiday looks like a holiday: %+v", window)
+	}
+}
+
+func TestHomeworkRangeCoversEveryDayOfTheHoliday(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	// 2026 国庆是 10/1–10/7，9/30 是它前一天：一条作业覆盖整段假期。
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-09-30"}, {"end_date", "2026-10-07"}, {"subject", "语文"}, {"description", "背古诗"},
+	}, nil); w.Code != 200 {
+		t.Fatalf("create holiday homework: %d %s", w.Code, w.Body.String())
+	}
+	for _, date := range []string{"2026-09-30", "2026-10-01", "2026-10-04", "2026-10-07"} {
+		day := homeworkDay(t, h, parent, date)
+		if len(day.Items) != 1 || day.Items[0].EndDate != "2026-10-07" || day.Items[0].Date != "2026-09-30" {
+			t.Fatalf("%s: unexpected items %+v", date, day.Items)
+		}
+	}
+	for _, date := range []string{"2026-09-29", "2026-10-08"} {
+		if day := homeworkDay(t, h, parent, date); len(day.Items) != 0 {
+			t.Fatalf("%s leaked %d items", date, len(day.Items))
+		}
+	}
+	// 这天的假期信息随载荷一起回来，前端不必再问一次。
+	if day := homeworkDay(t, h, parent, "2026-10-02"); day.Holiday == nil || day.Holiday.Name != "国庆节" || day.Holiday.Days != 7 {
+		t.Fatalf("holiday payload: %+v", day.Holiday)
+	}
+	before := homeworkDay(t, h, parent, "2026-09-30")
+	if before.Holiday == nil || !before.Holiday.BeforeFrom || before.Holiday.Start != "2026-09-30" || before.Holiday.Days != 8 {
+		t.Fatalf("day before the holiday: %+v", before.Holiday)
+	}
+	// 日历需要的整张表随 /state 下发：官方区间 + 调休上班日。
+	if st := getStateTest(t, h, parent); len(st.Holidays) == 0 || len(st.MakeupWorkdays) == 0 || st.Holidays[0].Name == "" {
+		t.Fatalf("state calendar data: %+v %v", st.Holidays, st.MakeupWorkdays)
+	}
+	// 不给 end_date 就是单日作业，第二天读不到它。
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-10-03"}, {"subject", "数学"}, {"description", "口算一页"},
+	}, nil); w.Code != 200 {
+		t.Fatalf("create single day: %d %s", w.Code, w.Body.String())
+	}
+	if day := homeworkDay(t, h, parent, "2026-10-03"); len(day.Items) != 2 || day.Items[1].EndDate != "2026-10-03" {
+		t.Fatalf("single day entry: %+v", day.Items)
+	}
+	if day := homeworkDay(t, h, parent, "2026-10-04"); len(day.Items) != 1 {
+		t.Fatalf("single day entry leaked to the next day: %+v", day.Items)
+	}
+	// 三处校验：早于开始、超长、日期格式。
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-09-30"}, {"end_date", "2026-09-29"}, {"subject", "语文"}, {"description", "背古诗"},
+	}, nil); w.Code != 400 {
+		t.Fatalf("end before start: %d %s", w.Code, w.Body.String())
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-09-01"}, {"end_date", "2026-09-22"}, {"subject", "语文"}, {"description", "背古诗"},
+	}, nil); w.Code != 400 {
+		t.Fatalf("range too long: %d %s", w.Code, w.Body.String())
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-09-01"}, {"end_date", "2026-9-2"}, {"subject", "语文"}, {"description", "背古诗"},
+	}, nil); w.Code != 400 {
+		t.Fatalf("bad end date: %d %s", w.Code, w.Body.String())
+	}
+	// 区间读也是家庭作用域内的。
+	foreign := sessionFor(t, s, otherFamily(t, s, "OTHER2", "Asia/Shanghai"), "parent", "par-other2", "")
+	if other := homeworkDay(t, h, foreign, "2026-10-02"); len(other.Items) != 0 {
+		t.Fatalf("other family sees %d items", len(other.Items))
+	}
+}

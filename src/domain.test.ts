@@ -13,6 +13,8 @@ function dayState(): AppState {
   return {
     version: 1,
     timezone: "Asia/Shanghai",
+    holidays: [],
+    makeupWorkdays: [],
     role: "child",
     activeChildId: "mia",
     children: [

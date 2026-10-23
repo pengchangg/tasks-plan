@@ -60,7 +60,14 @@
 .calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;margin-top:14px}
 .calendar-weekday{font-size:11px;font-weight:700;color:var(--muted);text-align:center}
 .calendar-empty{aspect-ratio:1}
-.calendar-day{position:relative;aspect-ratio:1;border:1px solid transparent;border-radius:8px;background:#f6f4ef;font:700 14px Fredoka,'Noto Sans SC',sans-serif;display:grid;place-items:center;padding:0}
+.calendar-day{position:relative;aspect-ratio:1;border:1px solid transparent;border-radius:8px;background:#f6f4ef;font:700 14px Fredoka,'Noto Sans SC',sans-serif;display:grid;align-content:center;place-items:center;gap:1px;padding:2px 0 7px}
+.calendar-day-num{line-height:1.05}
+.calendar-lunar{max-width:100%;padding:0 1px;font-family:var(--sans);font-size:9px;font-weight:600;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#6b716d}
+.calendar-day.selected .calendar-lunar{color:#dff2ec}
+.calendar-mark{position:absolute;top:2px;right:2px;padding:0 2px;border-radius:4px;font-family:var(--sans);font-size:9px;font-weight:700;line-height:1.35}
+.calendar-mark.rest{background:#fde7e2;color:#b2452f}
+.calendar-mark.work{background:#e5eefb;color:#2f5fa8}
+.calendar-day.selected .calendar-mark{background:#fff;color:var(--mint-ink)}
 .calendar-day.today{border-color:#e4bd61}
 .calendar-day.selected{background:var(--mint-ink);color:#fff}
 .calendar-dot{position:absolute;bottom:6px;left:50%;transform:translateX(-50%);width:5px;height:5px;border-radius:50%;background:transparent}
@@ -100,6 +107,13 @@
 .subject-美术{background:#fdecf3;color:#a83a6b}.subject-体育{background:#e9f6f4;color:#2b7d70}.subject-劳动{background:#f1f0e8;color:#6a6440}
 .subject-default{background:#f1efea;color:#5d625f}
 .homework-desc{margin:10px 0 0;font-size:15px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere}
+.holiday-badge{margin-left:8px;padding:3px 8px;border-radius:999px;background:#fdf3e2;color:#93641a;font-size:12px;font-weight:800;white-space:nowrap}
+.date-lunar{display:inline-flex;align-items:center;gap:5px;font-family:var(--sans);font-size:12px;font-weight:600;color:#7d837f;white-space:nowrap}
+.date-mark{font-style:normal;font-weight:800;font-size:11px;line-height:1.5;padding:0 4px;border-radius:4px}
+.date-mark.rest{background:#fde7e2;color:#b2452f}
+.date-mark.work{background:#e5eefb;color:#2f5fa8}
+.holiday-hint{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0;padding:8px 10px;border-radius:8px;background:#fdf3e2;color:#93641a;font-size:13px;font-weight:700}
+.holiday-hint button{border:1px solid #e3c9a2;border-radius:999px;background:#fff;color:#93641a;font-size:12px;font-weight:700;padding:3px 10px}
 .homework-card .media-grid{margin-top:12px}
 .homework-thumb{position:relative;padding:0;border:1px solid var(--line);border-radius:6px;background:#000;overflow:hidden;aspect-ratio:1;display:grid;place-items:center}
 .homework-thumb img,.homework-thumb video{width:100%;height:100%;object-fit:cover;display:block}

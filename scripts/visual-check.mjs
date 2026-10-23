@@ -125,6 +125,32 @@ for (const scenario of scenarios) {
     fullPage: true,
   });
 
+  // 作业表单是假期预填的入口：起止日期都得在、范围不能倒置，弹窗自己不能横向溢出。
+  if (scenario.name === "homework-desktop") {
+    await page.getByRole("button", { name: "新增作业" }).click();
+    const form = page.locator(".form-modal");
+    await form.waitFor();
+    const range = {
+      start: await form.getByLabel("日期", { exact: true }).inputValue(),
+      end: await form.getByLabel("结束日期").inputValue(),
+    };
+    const box = await form.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+    }));
+    if (
+      !range.start ||
+      !range.end ||
+      range.end < range.start ||
+      box.scrollWidth > box.clientWidth + 1
+    )
+      errors.push(
+        `homework form range ${range.start}..${range.end} scrollWidth=${box.scrollWidth}`,
+      );
+    await form.locator(".form-heading button").click();
+    await form.waitFor({ state: "detached" });
+  }
+
   const overflow = layout.bodyWidth > layout.viewportWidth + 1;
   const invalid =
     errors.length > 0 ||

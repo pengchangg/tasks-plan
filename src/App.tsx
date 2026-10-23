@@ -49,9 +49,13 @@ import {
 } from "./domain";
 import type { DayActivity, DayEntry } from "./domain";
 import { proverbForDate } from "./proverbs";
+import { holidayNameOf, lunarFestival, lunarLabel, lunarMonthDay, restMark } from "./lunar";
 import type {
+  AppState,
   Attachment,
   Child,
+  Holiday,
+  HolidaySpan,
   Homework,
   HomeworkDraft,
   PointLedger,
@@ -143,6 +147,9 @@ const monthDayText = (date: string) =>
   `${date.slice(5, 7)}月${date.slice(8, 10)}日`;
 const dateText = (date: string, today: string) =>
   date === today ? "今天" : monthDayText(date);
+// 跨天作业就是假期作业：范围由服务端按国办放假表算出（含假期前一天）。
+const rangeText = (start: string, end: string) =>
+  `${Number(start.slice(5, 7))}月${Number(start.slice(8))}日–${Number(end.slice(5, 7))}月${Number(end.slice(8))}日`;
 
 // favicon.svg 里同一个四角星。文字字形 ✦ 在不少系统字体里不存在，会渲染成空方块。
 function StarMark({ size = 16 }: { size?: number }) {
@@ -766,7 +773,8 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
       <div className="welcome-row">
         <div>
           <p className="eyebrow">
-            星期{weekdayOf(today)} · {monthDayText(today)}
+            星期{weekdayOf(today)} · {monthDayText(today)}{" "}
+            <LunarTag date={today} state={store.state} />
           </p>
           <h1>
             嗨，{child.name} <span className="wave"><StarMark size={22} /></span>
@@ -1649,6 +1657,33 @@ function HomeworkViewer({
 
 // 作业卡片 + 全屏灯箱：孩子端首页的「今日作业」模块与 /child/homework 共用同一份实现，
 // 灯箱顺序是页面内全部媒体（先摊平再按下标定位）。
+function HolidayBadge({ date, endDate }: { date: string; endDate: string }) {
+  if (!endDate || endDate === date) return null;
+  return (
+    <span className="holiday-badge">假期作业 {rangeText(date, endDate)}</span>
+  );
+}
+
+// 日期标题上的农历小字：农历日号 + 节日/官方假期名 + 「休」「班」角标。
+// 日历格子与各页标题都从这一处取，免得两套写法漂移。
+function LunarTag({ date, state }: { date: string; state: AppState }) {
+  const mark = restMark(date, state.holidays, state.makeupWorkdays);
+  const festival = lunarFestival(date);
+  const official = holidayNameOf(date, state.holidays);
+  const names = [festival, official !== festival ? official : ""].filter(Boolean);
+  return (
+    <span className="date-lunar">
+      农历{lunarMonthDay(date)}
+      {names.length > 0 && ` · ${names.join(" · ")}`}
+      {mark && (
+        <b className={`date-mark ${mark === "休" ? "rest" : "work"}`}>
+          {mark}
+        </b>
+      )}
+    </span>
+  );
+}
+
 function HomeworkDay({
   items,
   title,
@@ -1668,6 +1703,7 @@ function HomeworkDay({
             <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
             {item.subject}
           </span>
+          <HolidayBadge date={item.date} endDate={item.endDate} />
           {item.description && <p className="homework-desc">{item.description}</p>}
           {item.media.length > 0 && (
             <div className="media-grid">
@@ -1748,6 +1784,7 @@ function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
           {isToday && <span className="today-badge">今天</span>}
         </h1>
         <p>老师布置的作业都在这里，看完就开始吧。</p>
+        <LunarTag date={date} state={store.state} />
         <div className="homework-date-bar">
           <button type="button" onClick={() => loadDate(shiftDate(date, -1))}>
             前一天
@@ -1943,6 +1980,8 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
           today={today}
           activity={activity}
           onSelect={setSelected}
+          holidays={store.state.holidays}
+          makeupWorkdays={store.state.makeupWorkdays}
         />
       </section>
       <section className="chart-panel day-panel">
@@ -1952,6 +1991,7 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
               {selected === today ? "今天" : `${selectedMonth}月${selectedDay}日`}{" "}
               · 周{weekday}
             </h2>
+            <LunarTag date={selected} state={store.state} />
           </div>
           <span className="chart-total">
             {digest.scheduled.length} <small>个任务</small>
@@ -2027,12 +2067,16 @@ function CalendarGrid({
   today,
   activity,
   onSelect,
+  holidays,
+  makeupWorkdays,
 }: {
   cells: (string | null)[];
   selected: string;
   today: string;
   activity: Record<string, DayActivity>;
   onSelect: (date: string) => void;
+  holidays: HolidaySpan[];
+  makeupWorkdays: string[];
 }) {
   return (
     <div className="calendar-grid">
@@ -2052,15 +2096,24 @@ function CalendarGrid({
               ? "done"
               : "open"
           : "";
+        const lunar = lunarLabel(date);
+        const festival = lunarFestival(date);
+        const mark = restMark(date, holidays, makeupWorkdays);
         return (
           <button
             className={`calendar-day${date === selected ? " selected" : ""}${date === today ? " today" : ""}`}
             aria-pressed={date === selected}
-            aria-label={`${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日`}
+            aria-label={`${Number(date.slice(5, 7))}月${Number(date.slice(8, 10))}日 农历${lunarMonthDay(date)}${festival ? ` ${festival}` : ""}${mark ? (mark === "休" ? " 放假" : " 上班") : ""}`}
             key={date}
             onClick={() => onSelect(date)}
           >
-            {Number(date.slice(8, 10))}
+            <span className="calendar-day-num">{Number(date.slice(8, 10))}</span>
+            <span className="calendar-lunar">{lunar}</span>
+            {mark && (
+              <span className={`calendar-mark ${mark === "休" ? "rest" : "work"}`}>
+                {mark}
+              </span>
+            )}
             <span className={`calendar-dot${dot ? ` ${dot}` : ""}`} />
           </button>
         );
@@ -3391,6 +3444,7 @@ function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
           value={date}
           onChange={(event) => event.target.value && loadDate(event.target.value)}
         />
+        <LunarTag date={date} state={store.state} />
         <button
           type="button"
           className="primary-button"
@@ -3406,6 +3460,7 @@ function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
             <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
             {item.subject}
           </span>
+          <HolidayBadge date={item.date} endDate={item.endDate} />
           <span className="homework-media-count">{item.media.length} 个附件</span>
           <div className="homework-admin-actions">
             <button
@@ -3437,6 +3492,7 @@ function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
         <HomeworkForm
           homework={editing === "new" ? null : editing}
           date={editing === "new" ? date : editing.date}
+          holiday={store.homework.holiday}
           onClose={() => setEditing(null)}
           onSave={(draft) => {
             store.actions.saveHomework(
@@ -3466,16 +3522,26 @@ function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
 function HomeworkForm({
   homework,
   date,
+  holiday,
   onClose,
   onSave,
 }: {
   homework: Homework | null;
   date: string;
+  holiday?: Holiday;
   onClose: () => void;
   onSave: (draft: HomeworkDraft) => void;
 }) {
   const dialog = useDialog(onClose);
-  const [value, setValue] = useState(date);
+  // 所选日期落在假期内（或假期前一天）时默认预填整段假期：开始日期也从假期首日起，
+  // 否则在假期中途新增会得到一段残缺的范围；家长仍可把任一端改短。
+  const [value, setValue] = useState(
+    homework ? homework.date : (holiday?.start ?? date),
+  );
+  // shortcut: 手改日期输入框不会重算假期，家长自己决定结束日期。
+  const [endValue, setEndValue] = useState(
+    homework ? homework.endDate || homework.date : (holiday?.end ?? date),
+  );
   const [subject, setSubject] = useState(
     homework
       ? homeworkSubjects.includes(homework.subject)
@@ -3528,6 +3594,7 @@ function HomeworkForm({
           }
           onSave({
             date: value,
+            endDate: endValue || value,
             subject,
             description: description.trim(),
             files,
@@ -3555,6 +3622,35 @@ function HomeworkForm({
             onChange={(event) => setValue(event.target.value)}
           />
         </label>
+        <label>
+          结束日期
+          <input
+            type="date"
+            required
+            min={value}
+            value={endValue || value}
+            onChange={(event) => setEndValue(event.target.value || value)}
+          />
+        </label>
+        {holiday && (
+          <p className="holiday-hint">
+            <span>
+              {holiday.name} · {rangeText(holiday.start, holiday.end)} 共{" "}
+              {holiday.days} 天
+            </span>
+            {(value !== holiday.start || endValue !== holiday.end) && (
+              <button
+                type="button"
+                onClick={() => {
+                  setValue(holiday.start);
+                  setEndValue(holiday.end);
+                }}
+              >
+                设为整段假期
+              </button>
+            )}
+          </p>
+        )}
         <div className="form-field">
           <span>学科</span>
           <div className="subject-picker" role="group" aria-label="学科">
