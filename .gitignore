@@ -8,3 +8,7 @@ coverage/
 .artifacts/
 data/
 .DS_Store
+android/.gradle/
+android/app/build/
+android/local.properties
+*.apk

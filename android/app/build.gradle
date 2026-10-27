@@ -1,0 +1,25 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.growjoy.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.growjoy.app'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // 只有 debug 变体：CI 产出的 app-debug.apk 自带 debug 签名，可直接侧载。
+    // 要发 release 需要自己的 keystore（见 android/README.md）。
+    buildTypes {
+        release { minifyEnabled false }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

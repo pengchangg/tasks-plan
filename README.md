@@ -45,6 +45,7 @@ make dev          # 一个命令起后端 :8080 + 前端 :5173，Ctrl-C 一并�
 | [docs/api.md](docs/api.md) | HTTP 接口参考：认证、全部路由、请求体、错误码、幂等与上传限制 |
 | [docs/development.md](docs/development.md) | 本地开发、命令表、代码约定、测试与提交门禁、常见坑 |
 | [docs/operations.md](docs/operations.md) | 生产运行、环境变量、限流与安全边界、健康检查、备份与清理 |
+| [android/README.md](android/README.md) | 安卓 APK（WebView 壳）的出包流程与地址配置 |
 | [DEPLOY.md](DEPLOY.md) | 远程部署手册：首次部署、systemd、反向代理 / Caddy / Cloudflare 隧道、排错 |
 
 ## 技术栈与目录
