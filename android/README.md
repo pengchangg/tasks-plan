@@ -4,14 +4,37 @@
 不要把 `dist/` 打进 APK 用本地地址加载——那样每个 API 都变跨源，`sameOrigin` 直接
 `403 origin_mismatch`，`SameSite=Lax` 的 `growjoy_session` 也不会随请求发出。
 
-## 出包
+## 出包（只在本地编）
 
-Gitea Actions → **Android APK** → Run workflow（手动触发，不跟 push 联动）。跑完在
-run 页面下载 `growjoy-apk` 产物，就是 `app-debug.apk`，手机直接侧载。
-产物是 debug 签名，够自己家装；要发 release 得配自己的 keystore。
+```bash
+./android/build.sh        # → android/app/build/outputs/apk/debug/app-debug.apk
+```
 
-首次运行现装工具链（Temurin JDK 17 + Android SDK platform 34/build-tools + Gradle 8.9，
-约 1 GB），之后靠 Actions 缓存，一次构建两分钟左右。
+产物是 debug 签名，手机允许未知来源直接侧载；要发 release 得配自己的 keystore。
+
+不进 Gitea Actions：`runs-on: deploy` 的 runner 连不上 `github.com`（`actions/checkout`
+的 `git clone` 直接 TLS EOF），任何带 `uses:` 的 workflow 都跑不起来，所以出包留在本地。
+
+### 工具链
+
+默认路径 `~/.local/android-toolchain`（可用 `GROWJOY_ANDROID_TOOLCHAIN` 覆盖），内容是
+Temurin JDK 21 + `sdk/`（platform 34、build-tools 34.0.0）+ Gradle 8.9，约 650 MB。
+AGP 8.6 支持 JDK 17+，实测 21 可用。
+
+### 墙内网络
+
+本机直连 `services.gradle.org`、`repo.maven.apache.org`、`api.adoptium.net`、`github.com`
+都不通（TLS 握手直接被断），所以装工具链和拉依赖都要换源：
+
+| 东西 | 源 |
+|---|---|
+| JDK | `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/21/jdk/x64/linux/` |
+| Gradle 8.9 | `https://mirrors.cloud.tencent.com/gradle/gradle-8.9-bin.zip` |
+| Android SDK | `https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip`（dl.google.com 是通的）|
+| Maven 依赖 | `https://maven.aliyun.com/repository/{google,central,gradle-plugin}` |
+
+Maven 换源只写在本机 `~/.gradle/init.d/aliyun-mirror.gradle`（清空 `settingsEvaluated` 里的
+仓库列表再填阿里云），**别提交进仓库**——墙外环境不需要它。
 
 ## 改地址
 
