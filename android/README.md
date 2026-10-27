@@ -24,15 +24,32 @@ run 页面下载 `growjoy-apk` 产物，就是 `app-debug.apk`，手机直接侧
 
 `AndroidManifest.xml` 里的 `usesCleartextTraffic="true"` 只为内网 http 入口；全站上 HTTPS 后可以去掉。
 
-## 本地打包（可选）
+## 本地打包（已验证，1 分 12 秒）
 
-装好 JDK 17 + Android SDK 后：
+需要 JDK 17+、Android SDK（platform 34 + build-tools 34.0.0）、Gradle 8.9：
 
 ```bash
-cd android && echo "sdk.dir=$HOME/.android-sdk" > local.properties && gradle assembleDebug
+cd android
+echo "sdk.dir=$HOME/.android-sdk" > local.properties   # 或 ANDROID_HOME
+gradle assembleDebug                                   # 产物 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-产物在 `app/build/outputs/apk/debug/app-debug.apk`。
+本机实测可以用的是 JDK 21（AGP 8.6 支持 17+）。
+
+### 墙内网络
+
+本机直连 `services.gradle.org`、`repo.maven.apache.org`、`api.adoptium.net`、`github.com`
+都不通（TLS 握手直接被断），所以本地装工具链要换源，Gradle 依赖也走阿里云：
+
+| 东西 | 源 |
+|---|---|
+| JDK | `https://mirrors.tuna.tsinghua.edu.cn/Adoptium/21/jdk/x64/linux/` |
+| Gradle 8.9 | `https://mirrors.cloud.tencent.com/gradle/gradle-8.9-bin.zip` |
+| Android SDK | `https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip`（dl.google.com 是通的）|
+| Maven 依赖 | `https://maven.aliyun.com/repository/{google,central,gradle-plugin}` |
+
+Gradle 依赖换源只写在本机 `~/.gradle/init.d/aliyun-mirror.gradle`（清空 `settingsEvaluated`
+里的仓库列表再填阿里云），别提交进仓库——CI 或墙外环境不需要它。
 
 ## 已知边界
 
