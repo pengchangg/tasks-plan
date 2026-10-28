@@ -103,6 +103,7 @@
 | `PUT /api/v1/homework/{id}` | 家长 | multipart 编辑，`200 {id, skipped}` |
 | `DELETE /api/v1/homework/{id}` | 家长 | `204`，级联删除媒体 |
 | `DELETE /api/v1/homework/{id}/media/{mediaID}` | 家长 | 删单个附件与文件，`204` |
+| `POST /api/v1/homework/{id}/done` | 任意 | 孩子端卡片上的「完成」勾选，JSON `{date, done}`，`200 {id}`；按天记录，天然幂等，不加 `Idempotency-Key` |
 
 写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
 
@@ -111,8 +112,10 @@
 `HomeworkDay` 形状：
 
 ```json
-{"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-01","endDate":"2026-10-07","subject":"语文","description":"朗读第 5 课","createdAt":"2026-09-30T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}]}],"holiday":{"name":"国庆节","start":"2026-10-01","end":"2026-10-07","days":7,"beforeFrom":false}}
+{"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-01","endDate":"2026-10-07","subject":"语文","description":"朗读第 5 课","createdAt":"2026-09-30T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}],"done":false}],"holiday":{"name":"国庆节","start":"2026-10-01","end":"2026-10-07","days":7,"beforeFrom":false}}
 ```
+
+`done` 是「看的那一天」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾，所以同一条作业在不同日期读到的 `done` 可能不同。
 
 ## 媒体
 

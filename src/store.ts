@@ -450,6 +450,20 @@ export function useAppStore() {
         await request(`/homework/${id}`, json("DELETE"));
         if (await loadHomework(homework.date)) setOkMessage("作业已删除");
       }),
+    // 完成勾选按「看的那一天」记录，所以假期作业可以逐天勾。先把本地那一行翻过来
+    // （重新读整天的作业会让受控勾选在往返期间跳回未勾），再发这次写入。
+    toggleHomeworkDone: (id: string, done: boolean) => {
+      const date = homework.date;
+      setHomework((prev) => ({
+        ...prev,
+        items: prev.items.map((item) =>
+          item.id === id ? { ...item, done } : item,
+        ),
+      }));
+      void run(() =>
+        request(`/homework/${id}/done`, json("POST", { date, done })),
+      );
+    },
   };
   return {
     state,

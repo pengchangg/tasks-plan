@@ -1754,3 +1754,61 @@ func TestHomeworkRangeCoversEveryDayOfTheHoliday(t *testing.T) {
 		t.Fatalf("other family sees %d items", len(other.Items))
 	}
 }
+
+func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	child := childCookie(t, h, "")
+	// 一条覆盖国庆在区的假期作业：勾选按天记录，不能一天勾了整段都算完。
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-10-01"}, {"end_date", "2026-10-07"}, {"subject", "数学"}, {"description", "每天一页口算"},
+	}, nil); w.Code != 200 {
+		t.Fatalf("create homework: %d %s", w.Code, w.Body.String())
+	}
+	id := homeworkDay(t, h, parent, "2026-10-03").Items[0].ID
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-03", "done": true}, child, ""); w.Code != 200 {
+		t.Fatalf("check done: %d %s", w.Code, w.Body.String())
+	}
+	if !homeworkDay(t, h, parent, "2026-10-03").Items[0].Done {
+		t.Fatal("2026-10-03 should read back done")
+	}
+	if homeworkDay(t, h, parent, "2026-10-04").Items[0].Done {
+		t.Fatal("the sibling day must stay open")
+	}
+	// 重放同一次勾选不报错；取消后再读回来是未完成。
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-03", "done": true}, child, ""); w.Code != 200 {
+		t.Fatalf("replay check: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-03", "done": false}, child, ""); w.Code != 200 {
+		t.Fatalf("uncheck: %d %s", w.Code, w.Body.String())
+	}
+	if homeworkDay(t, h, parent, "2026-10-03").Items[0].Done {
+		t.Fatal("uncheck did not clear the flag")
+	}
+	// 区间外的一天、别的家庭的 id、坏日期都是拒绝。
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-08", "done": true}, child, ""); w.Code != 404 {
+		t.Fatalf("outside the range: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-3", "done": true}, child, ""); w.Code != 400 {
+		t.Fatalf("bad date: %d %s", w.Code, w.Body.String())
+	}
+	foreign := sessionFor(t, s, otherFamily(t, s, "OTHER3", "Asia/Shanghai"), "parent", "par-other3", "")
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-03", "done": true}, foreign, ""); w.Code != 404 {
+		t.Fatalf("cross-family: %d %s", w.Code, w.Body.String())
+	}
+	// 删除作业级联清掉勾选记录。
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-05", "done": true}, child, ""); w.Code != 200 {
+		t.Fatalf("check before delete: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "DELETE", "/api/v1/homework/"+id, nil, parent, ""); w.Code != 204 {
+		t.Fatalf("delete homework: %d %s", w.Code, w.Body.String())
+	}
+	var left int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM homework_done WHERE homework_id=?`, id).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("homework_done rows survived the delete: %d", left)
+	}
+}

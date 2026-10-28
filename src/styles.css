@@ -101,6 +101,8 @@
 .proverb-text ruby rt{font-size:11px;font-weight:400;color:var(--muted)}
 .proverb-english{margin:2px 0 0;font-size:12px;line-height:1.6;color:var(--muted);text-align:center}
 .homework-card{margin-bottom:12px;padding:15px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+.homework-check{float:right;display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:800;color:var(--muted);cursor:pointer}.homework-check input{width:19px;height:19px;margin:0;accent-color:var(--mint);cursor:pointer}
+.homework-card.done{background:#f4f7f3}.homework-card.done .homework-desc{color:var(--muted)}.homework-card.done .media-grid{opacity:.62}
 .subject-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;font-size:13px;font-weight:800}
 .subject-语文{background:#fdeaea;color:#b3402f}.subject-数学{background:#e8f1fd;color:#2f5fa8}.subject-英语{background:#eaf7ee;color:#2f7a4a}
 .subject-科学{background:#eef0fb;color:#4a4fa0}.subject-道德与法治{background:#fdf3e2;color:#93641a}.subject-音乐{background:#f6ecfb;color:#7a3f9e}

@@ -30,7 +30,7 @@ export interface WishInput { title: string; description: string; pointsCost: num
 
 // GET /api/v1/homework/?date= 的载荷：某一天的作业，按录入顺序。
 // date..endDate 含首尾：假期作业一条覆盖整段假期，区间里每一天都读得到它。
-export interface Homework { id: string; date: string; endDate: string; subject: string; description: string; createdAt: string; media: Attachment[] }
+export interface Homework { id: string; date: string; endDate: string; subject: string; description: string; createdAt: string; media: Attachment[]; done: boolean }
 // 这一天所属的连续假期（服务端按国办放假表算好，含「假前日」起点）。
 export interface Holiday { name: string; start: string; end: string; days: number; beforeFrom: boolean }
 export interface HomeworkDay { date: string; items: Homework[]; holiday?: Holiday }

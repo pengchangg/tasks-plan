@@ -900,7 +900,15 @@ const holidayPlan = await page.evaluate(async () => {
     const date = day.toISOString().slice(0, 10);
     const response = await fetch(`/api/v1/homework/?date=${date}`);
     const holiday = (await response.json()).holiday;
-    if (holiday && holiday.start === date && holiday.end > date) return holiday;
+    if (!holiday || holiday.start !== date || holiday.end === date) continue;
+    // 第二天也要认出同一个块：周末块的首日若是周五，周六读到的只是它自己的
+    // 2 天块（周五是「假前日」），表单就不会预填整段了。
+    const nextDay = new Date(day);
+    nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+    const next = await fetch(
+      `/api/v1/homework/?date=${nextDay.toISOString().slice(0, 10)}`,
+    );
+    if ((await next.json()).holiday?.start === date) return holiday;
   }
   return null;
 });

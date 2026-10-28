@@ -55,6 +55,8 @@ type Homework struct {
 	Description string       `json:"description"`
 	CreatedAt   string       `json:"createdAt"`
 	Media       []Attachment `json:"media"`
+	// Done 是「看的那一天」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾。
+	Done bool `json:"done"`
 }
 
 // HomeworkDay 是某个家庭本地日期的全部作业，按录入顺序。Holiday 是这一天所属的
@@ -122,7 +124,70 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 			return out, err
 		}
 	}
+	// 完成勾选按天记录，只取这一天。
+	doneRows, err := s.db.QueryContext(ctx, `SELECT homework_id FROM homework_done WHERE family_id=? AND date=?`, family, date)
+	if err != nil {
+		return out, err
+	}
+	done := map[string]bool{}
+	for doneRows.Next() {
+		var hid string
+		if err = doneRows.Scan(&hid); err != nil {
+			doneRows.Close()
+			return out, err
+		}
+		done[hid] = true
+	}
+	if err = doneRows.Err(); err != nil {
+		doneRows.Close()
+		return out, err
+	}
+	doneRows.Close()
+	for i := range out.Items {
+		out.Items[i].Done = done[out.Items[i].ID]
+	}
 	return out, nil
+}
+
+// setHomeworkDone 是孩子端作业卡片的「完成」勾选。按日期记录，所以假期作业在区间内
+// 可以逐天勾；写入天然幂等（INSERT OR IGNORE / DELETE），不需要 Idempotency-Key，
+// 也不碰积分账本，所以不校验角色（家长端不渲染这个开关）。
+func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
+	x := sess(r)
+	var in struct {
+		Date string `json:"date"`
+		Done bool   `json:"done"`
+	}
+	if err := decode(r, &in); err != nil {
+		problem(w, 400, "invalid_request", "invalid request body")
+		return
+	}
+	if !validDateValue(in.Date) {
+		problem(w, 400, "invalid_request", "date must be YYYY-MM-DD")
+		return
+	}
+	hid := chi.URLParam(r, "id")
+	var found int
+	// 只认区间内的那一天：区间外勾选会写出一个读不回来的行。
+	err := s.db.QueryRowContext(r.Context(), `SELECT 1 FROM homework WHERE id=? AND family_id=? AND date<=? AND end_date>=?`, hid, x.FamilyID, in.Date, in.Date).Scan(&found)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			problem(w, 404, "not_found", "homework not found")
+			return
+		}
+		s.internalError(w, r, err)
+		return
+	}
+	if in.Done {
+		_, err = s.db.ExecContext(r.Context(), `INSERT OR IGNORE INTO homework_done(family_id,homework_id,date,completed_at) VALUES(?,?,?,?)`, x.FamilyID, hid, in.Date, nowText(s.now()))
+	} else {
+		_, err = s.db.ExecContext(r.Context(), `DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date)
+	}
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, 200, map[string]string{"id": hid})
 }
 
 // homeworkMediaFor 按 sort 升序取一条作业的媒体（sort 由写入端从 0 起递增）。

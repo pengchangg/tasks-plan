@@ -392,6 +392,7 @@ func (s *Server) Handler() http.Handler {
 				hw.Put("/{id}", s.parentOnly(s.saveHomework))
 				hw.Delete("/{id}", s.parentOnly(s.deleteHomework))
 				hw.Delete("/{id}/media/{mediaID}", s.parentOnly(s.deleteHomeworkMedia))
+				hw.Post("/{id}/done", s.setHomeworkDone)
 			})
 			a.Patch("/redemptions/{id}", s.completeRedemption)
 			a.Get("/media/{id}", s.media)

@@ -1688,17 +1688,32 @@ function HomeworkDay({
   items,
   title,
   compact = false,
+  onDone,
 }: {
   items: Homework[];
   title: string;
   compact?: boolean;
+  onDone?: (item: Homework, done: boolean) => void;
 }) {
   const [viewing, setViewing] = useState<number | null>(null);
   const media = items.flatMap((item) => item.media);
   return (
     <>
       {items.map((item) => (
-        <article className="homework-card" key={item.id}>
+        <article
+          className={`homework-card${item.done ? " done" : ""}`}
+          key={item.id}
+        >
+          {onDone && (
+            <label className="homework-check">
+              <input
+                type="checkbox"
+                checked={item.done}
+                onChange={(event) => onDone(item, event.target.checked)}
+              />
+              完成
+            </label>
+          )}
           <span className={`subject-chip ${subjectClass(item.subject)}`}>
             <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>
             {item.subject}
@@ -1762,6 +1777,9 @@ function TodayHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
         items={store.homework.date === store.today ? store.homework.items : []}
         title="今日暂无作业"
         compact
+        onDone={(item, done) =>
+          store.actions.toggleHomeworkDone(item.id, done)
+        }
       />
     </section>
   );
@@ -1813,6 +1831,9 @@ function ChildHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
       <HomeworkDay
         items={items}
         title={isToday ? "今日暂无作业" : "这一天没有作业"}
+        onDone={(item, done) =>
+          store.actions.toggleHomeworkDone(item.id, done)
+        }
       />
     </div>
   );
