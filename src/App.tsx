@@ -1570,13 +1570,6 @@ function HomeworkViewer({
   const item = items[index];
   const step = (delta: number) =>
     onIndex((index + delta + items.length) % items.length);
-  useEffect(() => {
-    // 有则尝试进入浏览器全屏；无头浏览器或无权限时静默放弃。
-    void document.documentElement.requestFullscreen?.().catch(() => {});
-    return () => {
-      if (document.fullscreenElement) void document.exitFullscreen?.().catch(() => {});
-    };
-  }, []);
   return (
     <div
       className="modal-backdrop homework-viewer"
@@ -1606,7 +1599,7 @@ function HomeworkViewer({
         }}
       >
         {item.type === "video" ? (
-          <video className="media-video" src={item.url} controls autoPlay />
+          <video className="media-video" src={item.url} controls autoPlay playsInline />
         ) : (
           <ZoomableImage
             key={item.id}
@@ -3001,6 +2994,7 @@ function MediaItem({
         src={attachment.url}
         controls
         preload="metadata"
+        playsInline
       />
     );
   return (
