@@ -102,6 +102,12 @@ function subjectClass(subject: string): string {
 }
 // 与服务端的 statsMaxRangeDays 同值：只用于自定义区间日期输入的 min。
 const statsMaxRangeDays = 92;
+// 到账横幅的标题：台账 referenceType 决定该怎么称呼这笔积分。
+const rewardTitles: Record<string, string> = {
+  manual: "家长奖励",
+  homework: "作业完成",
+  homework_bonus: "当天作业全部完成",
+};
 const statsRanges = [
   { key: "today", label: "今天" },
   { key: "week", label: "最近 7 天" },
@@ -690,9 +696,7 @@ function RewardCelebration({
         <Sparkles size={25} />
       </div>
       <div>
-        <span>
-          {reward.referenceType === "manual" ? "家长奖励" : "任务确认完成"}
-        </span>
+        <span>{rewardTitles[reward.referenceType] ?? "任务确认完成"}</span>
         <strong>+{reward.amount} 积分到账！</strong>
         <small>{reward.description}</small>
       </div>

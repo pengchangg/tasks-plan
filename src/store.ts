@@ -450,8 +450,10 @@ export function useAppStore() {
         await request(`/homework/${id}`, json("DELETE"));
         if (await loadHomework(homework.date)) setOkMessage("作业已删除");
       }),
-    // 完成勾选按「看的那一天」记录，所以假期作业可以逐天勾。先把本地那一行翻过来
-    // （重新读整天的作业会让受控勾选在往返期间跳回未勾），再发这次写入。
+    // 完成勾选按「看的那一天」记录，所以假期作业可以逐天勾；勾上每科 +5、当天全部
+    // 完成再 +5（服务端算账，加分由奖励横幅呈现）。先把本地那一行翻过来（重新读整
+    // 天的作业会让受控勾选在往返期间跳回未勾），再发这次写入；取消完成会扣分，
+    // 扣分没有奖励横幅，用一条提示说明。
     toggleHomeworkDone: (id: string, done: boolean) => {
       const date = homework.date;
       setHomework((prev) => ({
@@ -460,9 +462,16 @@ export function useAppStore() {
           item.id === id ? { ...item, done } : item,
         ),
       }));
-      void run(() =>
-        request(`/homework/${id}/done`, json("POST", { date, done })),
-      );
+      void run(async () => {
+        const response = await request(
+          `/homework/${id}/done`,
+          json("POST", { date, done }),
+        );
+        const { awarded = 0 } = (await response.json()) as {
+          awarded?: number;
+        };
+        if (awarded < 0) setOkMessage(`已取消完成，扣回 ${-awarded} 积分`);
+      });
     },
   };
   return {

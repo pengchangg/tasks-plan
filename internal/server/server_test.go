@@ -1797,6 +1797,60 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-03", "done": true}, foreign, ""); w.Code != 404 {
 		t.Fatalf("cross-family: %d %s", w.Code, w.Body.String())
 	}
+	// 勾选进出积分：每一科当天完成 +5，当天全部完成再额外 +5，取消完成按同样的数扣回。
+	for _, subject := range []string{"语文", "数学"} {
+		if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+			{"date", "2026-10-09"}, {"subject", subject}, {"description", "作业"},
+		}, nil); w.Code != 200 {
+			t.Fatalf("create %s: %d %s", subject, w.Code, w.Body.String())
+		}
+	}
+	items := homeworkDay(t, h, parent, "2026-10-09").Items
+	if len(items) != 2 {
+		t.Fatalf("2026-10-09 should hold 2 items, got %d", len(items))
+	}
+	balance := getStateTest(t, h, child).Children[0].PointsBalance
+	toggle := func(id string, done bool) (awarded, got int) {
+		w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-09", "done": done}, child, "")
+		if w.Code != 200 {
+			t.Fatalf("toggle done: %d %s", w.Code, w.Body.String())
+		}
+		var out struct {
+			Awarded int `json:"awarded"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Awarded, getStateTest(t, h, child).Children[0].PointsBalance
+	}
+	// 第一科 +5，重放不再加，第二科补齐当天 +5 再加额外 +5。
+	if awarded, got := toggle(items[0].ID, true); awarded != homeworkDonePoints || got != balance+homeworkDonePoints {
+		t.Fatalf("first subject: awarded %d balance %d, want %d %d", awarded, got, homeworkDonePoints, balance+homeworkDonePoints)
+	}
+	if awarded, got := toggle(items[0].ID, true); awarded != 0 || got != balance+homeworkDonePoints {
+		t.Fatalf("replay must not credit: awarded %d balance %d", awarded, got)
+	}
+	if awarded, got := toggle(items[1].ID, true); awarded != 2*homeworkDonePoints || got != balance+3*homeworkDonePoints {
+		t.Fatalf("all done bonus: awarded %d balance %d", awarded, got)
+	}
+	// 取消完成倒着扣：先收回当天的那 5 分，再收回这一科的 5 分。
+	if awarded, got := toggle(items[0].ID, false); awarded != -2*homeworkDonePoints || got != balance+homeworkDonePoints {
+		t.Fatalf("uncheck first: awarded %d balance %d", awarded, got)
+	}
+	if awarded, got := toggle(items[1].ID, false); awarded != -homeworkDonePoints || got != balance {
+		t.Fatalf("uncheck last: awarded %d balance %d", awarded, got)
+	}
+	// 取消完成时那 5 分可能已经被花掉了：余额允许扣成负数，但兑换心愿仍然要求余额够。
+	toggle(items[0].ID, true)
+	if _, err := s.db.Exec(`UPDATE children SET points_balance=0 WHERE id=?`, getStateTest(t, h, child).ActiveChildID); err != nil {
+		t.Fatal(err)
+	}
+	if awarded, got := toggle(items[0].ID, false); awarded != -homeworkDonePoints || got != -homeworkDonePoints {
+		t.Fatalf("spent points go negative: awarded %d balance %d", awarded, got)
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/wishes/"+getStateTest(t, h, child).Wishes[0].ID+"/redeem", nil, child, "overdraft"); w.Code != 409 {
+		t.Fatalf("redeem on a negative balance: %d %s", w.Code, w.Body.String())
+	}
 	// 删除作业级联清掉勾选记录。
 	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-05", "done": true}, child, ""); w.Code != 200 {
 		t.Fatalf("check before delete: %d %s", w.Code, w.Body.String())
@@ -1810,5 +1864,45 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 	}
 	if left != 0 {
 		t.Fatalf("homework_done rows survived the delete: %d", left)
+	}
+}
+
+// 006 重建 children 放开余额下限。迁移在空库上跑过一遍不代表带数据的库能跑：那句
+// DROP TABLE 的隐式 DELETE 要在 foreign_keys=ON 的事务里推迟到提交，所以这里在
+// 已经有外键指向 children 的库上再跑一次，并确认引用没有被重建弄断。
+func TestChildrenRebuildKeepsForeignKeysAndAllowsNegativeBalance(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	child := childCookie(t, h, "")
+	state := getStateTest(t, h, child)
+	childID := state.ActiveChildID
+	migration, err := migrationFS.ReadFile("migrations/006_negative_balance.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(string(migration)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("rebuild with existing rows: %v", err)
+	}
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.db.Exec(`UPDATE children SET points_balance=-5 WHERE id=?`, childID); err != nil {
+		t.Fatalf("negative balance: %v", err)
+	}
+	// 重建后外键仍然成立：删掉孩子会级联清掉他的台账与任务。
+	if _, err = s.db.Exec(`DELETE FROM children WHERE id=?`, childID); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM point_ledger WHERE child_id=?`, childID).Scan(&left); err != nil {
+		t.Fatal(err)
+	}
+	if left != 0 {
+		t.Fatalf("ledger rows survived the cascade: %d", left)
 	}
 }

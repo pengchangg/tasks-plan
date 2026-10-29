@@ -149,9 +149,14 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 	return out, nil
 }
 
+// homeworkDonePoints 是作业完成一次给的分：勾上一科 +5，当天全部勾完再额外 +5。
+const homeworkDonePoints = 5
+
 // setHomeworkDone 是孩子端作业卡片的「完成」勾选。按日期记录，所以假期作业在区间内
-// 可以逐天勾；写入天然幂等（INSERT OR IGNORE / DELETE），不需要 Idempotency-Key，
-// 也不碰积分账本，所以不校验角色（家长端不渲染这个开关）。
+// 可以逐天勾；写入天然幂等（INSERT OR IGNORE / DELETE），不需要 Idempotency-Key。
+// 勾选进出都带着积分账本，所以三件事必须在同一个事务里：勾记录、台账、孩子余额。
+// shortcut: homework_done 是家庭级的，积分只记在勾选的那个孩子身上；
+// 若作业要按孩子分开，这里需要一张带 child_id 的完成表。
 func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
 	var in struct {
@@ -167,10 +172,15 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hid := chi.URLParam(r, "id")
-	var found int
-	// 只认区间内的那一天：区间外勾选会写出一个读不回来的行。
-	err := s.db.QueryRowContext(r.Context(), `SELECT 1 FROM homework WHERE id=? AND family_id=? AND date<=? AND end_date>=?`, hid, x.FamilyID, in.Date, in.Date).Scan(&found)
+	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	defer tx.Rollback()
+	var subject string
+	// 只认区间内的那一天：区间外勾选会写出一个读不回来的行。
+	if err = tx.QueryRow(`SELECT subject FROM homework WHERE id=? AND family_id=? AND date<=? AND end_date>=?`, hid, x.FamilyID, in.Date, in.Date).Scan(&subject); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 404, "not_found", "homework not found")
 			return
@@ -178,16 +188,105 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
+	var res sql.Result
 	if in.Done {
-		_, err = s.db.ExecContext(r.Context(), `INSERT OR IGNORE INTO homework_done(family_id,homework_id,date,completed_at) VALUES(?,?,?,?)`, x.FamilyID, hid, in.Date, nowText(s.now()))
+		res, err = tx.Exec(`INSERT OR IGNORE INTO homework_done(family_id,homework_id,date,completed_at) VALUES(?,?,?,?)`, x.FamilyID, hid, in.Date, nowText(s.now()))
 	} else {
-		_, err = s.db.ExecContext(r.Context(), `DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date)
+		res, err = tx.Exec(`DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date)
+	}
+	var changed int64
+	if err == nil {
+		changed, err = res.RowsAffected()
+	}
+	// 只有状态真的翻了一下的那次才动积分，重放既不加也不扣。积分必须记在某个孩子
+	// 头上，所以没有选中孩子的会话（家长端不渲染这个开关）只记勾选。
+	awarded := 0
+	if err == nil && changed == 1 && x.SelectedChildID != "" {
+		awarded, err = s.homeworkPoints(tx, x.FamilyID, x.SelectedChildID, hid, in.Date, subject, in.Done)
 	}
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, 200, map[string]string{"id": hid})
+	if err = tx.Commit(); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	// awarded 是这次实际进出的分数（勾上 5/10，取消 -5/-10），前端据此给反馈。
+	writeJSON(w, 200, map[string]any{"id": hid, "awarded": awarded})
+}
+
+// homeworkPoints 让勾选进出积分账本：勾上时先加这一科的分，当天已经全部完成再加一笔；
+// 取消时把这两笔倒着扣回。台账 reference_id 让每一笔只可能有一条。
+func (s *Server) homeworkPoints(tx *sql.Tx, family, child, hid, date, subject string, done bool) (int, error) {
+	if !done {
+		bonus, err := s.reverseHomeworkPoints(tx, family, "homework_bonus", date)
+		if err != nil {
+			return 0, err
+		}
+		item, err := s.reverseHomeworkPoints(tx, family, "homework", hid+":"+date)
+		return bonus + item, err
+	}
+	awarded, err := s.creditHomeworkPoints(tx, family, child, "homework", hid+":"+date, "作业完成："+subject, nowText(s.now()))
+	if err != nil {
+		return 0, err
+	}
+	all, err := s.homeworkDayAllDone(tx, family, date)
+	if err != nil || !all {
+		return awarded, err
+	}
+	bonus, err := s.creditHomeworkPoints(tx, family, child, "homework_bonus", date, "当天作业全部完成", nowText(s.now()))
+	return awarded + bonus, err
+}
+
+// creditHomeworkPoints 记一笔作业积分并同步孩子余额与成长值。已经记过（同一
+// reference_id）的那一笔返回 0，所以重放不会加第二遍。
+func (s *Server) creditHomeworkPoints(tx *sql.Tx, family, child, refType, refID, desc, now string) (int, error) {
+	res, err := tx.Exec(`INSERT OR IGNORE INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,'earned',?,?,?,?)`, id("led"), family, child, homeworkDonePoints, refType, refID, desc, now)
+	if err != nil {
+		return 0, err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil || changed != 1 {
+		return 0, err
+	}
+	growth := homeworkDonePoints / 5
+	if growth < 1 {
+		growth = 1
+	}
+	_, err = tx.Exec(`UPDATE children SET points_balance=points_balance+?,experience=experience+?,level=1+CAST((experience+?)/100 AS INTEGER) WHERE id=? AND family_id=?`, homeworkDonePoints, growth, growth, child, family)
+	return homeworkDonePoints, err
+}
+
+// reverseHomeworkPoints 删掉一笔作业积分并扣回余额。积分可能已经被孩子花掉了，
+// 所以余额允许扣成负数（欠分），兑换心愿那道闸门（points_balance>=cost）自己会拦住；
+// 成长值不欠，下限 0。没有这一笔就什么也不做。
+func (s *Server) reverseHomeworkPoints(tx *sql.Tx, family, refType, refID string) (int, error) {
+	var lid, child string
+	var amount int
+	err := tx.QueryRow(`SELECT id,child_id,amount FROM point_ledger WHERE family_id=? AND reference_type=? AND reference_id=?`, family, refType, refID).Scan(&lid, &child, &amount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(`DELETE FROM point_ledger WHERE id=?`, lid); err != nil {
+		return 0, err
+	}
+	growth := amount / 5
+	if growth < 1 {
+		growth = 1
+	}
+	_, err = tx.Exec(`UPDATE children SET points_balance=points_balance-?,experience=MAX(experience-?,0),level=1+CAST(MAX(experience-?,0)/100 AS INTEGER) WHERE id=? AND family_id=?`, amount, growth, growth, child, family)
+	return -amount, err
+}
+
+// homeworkDayAllDone 判断这一天（按在区间内的作业计）是不是每一科都勾上了。
+func (s *Server) homeworkDayAllDone(tx *sql.Tx, family, date string) (bool, error) {
+	var total, done int
+	err := tx.QueryRow(`SELECT COUNT(*),COUNT(d.homework_id) FROM homework h LEFT JOIN homework_done d ON d.family_id=h.family_id AND d.homework_id=h.id AND d.date=? WHERE h.family_id=? AND h.date<=? AND h.end_date>=?`, date, family, date, date).Scan(&total, &done)
+	return total > 0 && done == total, err
 }
 
 // homeworkMediaFor 按 sort 升序取一条作业的媒体（sort 由写入端从 0 起递增）。

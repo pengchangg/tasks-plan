@@ -103,7 +103,7 @@
 | `PUT /api/v1/homework/{id}` | 家长 | multipart 编辑，`200 {id, skipped}` |
 | `DELETE /api/v1/homework/{id}` | 家长 | `204`，级联删除媒体 |
 | `DELETE /api/v1/homework/{id}/media/{mediaID}` | 家长 | 删单个附件与文件，`204` |
-| `POST /api/v1/homework/{id}/done` | 任意 | 孩子端卡片上的「完成」勾选，JSON `{date, done}`，`200 {id}`；按天记录，天然幂等，不加 `Idempotency-Key` |
+| `POST /api/v1/homework/{id}/done` | 任意 | 孩子端卡片上的「完成」勾选，JSON `{date, done}`，`200 {id, awarded}`；按天记录，幂等（重放不再加/扣分），不加 `Idempotency-Key` |
 
 写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
 
@@ -116,6 +116,8 @@
 ```
 
 `done` 是「看的那一天」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾，所以同一条作业在不同日期读到的 `done` 可能不同。
+
+**完成积分。** 勾上一科当天完成 +5，当天在区间内的作业全部勾完再额外 +5；`awarded` 是这次真正进出的分数（勾上 5/10，取消 −5/−10，重放 0），前端据此给反馈。积分记在勾选的那个孩子（会话选中的孩子）头上，走的是和确认任务同一条 `point_ledger`：`reference_type` 为 `homework`（`reference_id` = `<作业 id>:<日期>`）与 `homework_bonus`（`reference_id` = 日期），`UNIQUE(family_id,reference_type,reference_id)` 保证同一科同一天只会有一笔、当天奖励只会有一笔。取消完成时删掉这两笔台账行并把分数扣回（积分可能已经被花掉，所以余额可以扣成负数；成长值下限 0。负余额不能兑换心愿，`redeemWish` 仍然要求 `points_balance>=points_cost`）。作业删除后已发的积分不会被追回，和删除任务保留历史台账一致。
 
 ## 媒体
 
