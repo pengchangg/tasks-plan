@@ -223,23 +223,43 @@ func applyMigrations(db *sql.DB) error {
 		if applied != 0 {
 			continue
 		}
-		tx, err := db.Begin()
-		if err != nil {
+		if err = runMigration(db, version, migration); err != nil {
 			return err
-		}
-		if _, err = tx.Exec(string(migration)); err == nil {
-			_, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, version, nowText(time.Now()))
-		}
-		if err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("migration %d: %w", version, err)
-		}
-		if err = tx.Commit(); err != nil {
-			return fmt.Errorf("migration %d commit: %w", version, err)
 		}
 	}
 	return nil
 }
+
+// runMigration 跑一个版本号 >= 2 的迁移：整段在一个事务里，跑完才记 schema_migrations。
+//
+// 外面那对 PRAGMA 是必需的，不是装饰：这类迁移靠 DROP + 改名重建表，而引用表的外键子句
+// 写着 ON DELETE CASCADE，DROP 会把引用表真的清空（2026-11-05 线上整月的任务、打卡与积分
+// 记录就是这么没的）。事务里改不动 foreign_keys，而 defer_foreign_keys 只推迟提交时的
+// 校验、拦不住 DROP 触发的级联；改名也会顺手把别的表的外键子句指向中间表名，留下悬空引用。
+// 所以先在连接上关掉外键，跑完再开回来。连接池只有 1 条连接（见 Open），这两条 PRAGMA
+// 一定作用在跑迁移的那条连接上。
+func runMigration(db *sql.DB, version int, migration []byte) error {
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("migration %d: %w", version, err)
+	}
+	defer func() { _, _ = db.Exec(`PRAGMA foreign_keys=ON`) }()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(string(migration)); err == nil {
+		_, err = tx.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, version, nowText(time.Now()))
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("migration %d: %w", version, err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("migration %d commit: %w", version, err)
+	}
+	return nil
+}
+
 func (s *Server) Close() error { return s.db.Close() }
 func (s *Server) DB() *sql.DB  { return s.db }
 
@@ -597,14 +617,25 @@ func (s *Server) parentOnly(h http.HandlerFunc) http.HandlerFunc {
 // into the child end and switching to the parent end always costs the
 // password again.
 func (s *Server) childSession(w http.ResponseWriter, r *http.Request) {
-	current, had := s.lookupSession(r)
-	if had && current.ActorType == "child" {
-		writeJSON(w, 200, map[string]string{"role": "child", "activeChildId": current.SelectedChildID})
-		return
-	}
 	family, _, err := s.resolvedFamily(r.Context())
 	if err != nil {
 		s.familyError(w, r, err)
+		return
+	}
+	current, had := s.lookupSession(r)
+	if had && current.ActorType == "child" {
+		child := s.familyChild(r.Context(), family, current.SelectedChildID)
+		if child == "" {
+			// The app's default screen means this cookie can be minted before the
+			// family has any profile (or after the selected one was removed). Every
+			// child-scoped read then filters on an empty child_id and answers empty
+			// tables for the rest of the session's 30 days, so the SPA's next boot
+			// heals it in place — actor_id mirrors the profile, as always.
+			if child = s.firstChild(r.Context(), family); child != "" {
+				_, _ = s.db.Exec(`UPDATE sessions SET selected_child_id=?, actor_id=? WHERE id=? AND family_id=?`, child, child, current.ID, family)
+			}
+		}
+		writeJSON(w, 200, map[string]string{"role": "child", "activeChildId": child})
 		return
 	}
 	child := s.firstChild(r.Context(), family)

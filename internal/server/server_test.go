@@ -1069,6 +1069,54 @@ func TestChildEndIsTheDefaultAndThePasswordGatesTheManagementApi(t *testing.T) {
 	}
 }
 
+func TestChildSessionMintedBeforeTheFirstChildExistsHealsOnTheNextChildEndOpen(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(Config{DBPath: filepath.Join(dir, "heal.db"), MediaDir: filepath.Join(dir, "media")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err = s.CreateFamily(context.Background(), FamilyInput{Code: "HOME", Name: "Home", Username: "parent", Password: "2468"}); err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	// 平板先打开应用，这时库里一个孩子档案都还没有：这张 30 天的会话就是没选中任何
+	// 孩子发出去的，而孩子端的每条读都带 child_id 限定，不修就整月读不到东西。
+	opening := doJSON(t, h, "POST", "/api/v1/auth/child", nil, nil, "")
+	if opening.Code != 200 || !strings.Contains(opening.Body.String(), `"activeChildId":""`) {
+		t.Fatalf("child end with no profile: %d %s", opening.Code, opening.Body.String())
+	}
+	tablet := opening.Result().Cookies()[0]
+	w := doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "2468"}, nil, "")
+	if w.Code != 200 {
+		t.Fatalf("parent unlock on another device: %d %s", w.Code, w.Body.String())
+	}
+	parent := w.Result().Cookies()[0]
+	if w = doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "扬扬", "avatar": "🚀", "color": "#ff8f78"}, parent, ""); w.Code != 200 {
+		t.Fatalf("create profile: %d %s", w.Code, w.Body.String())
+	}
+	childID := getStateTest(t, h, parent).Children[0].ID
+	if w = doJSON(t, h, "POST", "/api/v1/tasks/", map[string]any{"childId": childID, "title": "整理自己的书桌", "description": "", "category": "生活自理", "points": 20, "repeatRule": "daily", "repeatWeekday": 1}, parent, ""); w.Code != 200 {
+		t.Fatalf("create task: %d %s", w.Code, w.Body.String())
+	}
+	// SPA 每次加载都重新走一次孩子端入口，修复就挂在那里：同一张 Cookie 不用清缓存也该
+	// 看到今天的任务，actor_id 还得跟着选中的孩子镜像（幂等键和归属都靠它）。
+	if reopened := doJSON(t, h, "POST", "/api/v1/auth/child", nil, tablet, ""); reopened.Code != 200 || !strings.Contains(reopened.Body.String(), childID) {
+		t.Fatalf("reopen the stale child end: %d %s", reopened.Code, reopened.Body.String())
+	}
+	state := getStateTest(t, h, tablet)
+	if state.ActiveChildID != childID || len(state.Tasks) != 1 || state.Tasks[0].Title != "整理自己的书桌" {
+		t.Fatalf("stale session still reads empty tables: active=%s tasks=%d", state.ActiveChildID, len(state.Tasks))
+	}
+	var selected, actor string
+	if err = s.db.QueryRow(`SELECT COALESCE(selected_child_id,''),actor_id FROM sessions WHERE actor_type='child'`).Scan(&selected, &actor); err != nil {
+		t.Fatal(err)
+	}
+	if selected != childID || actor != childID {
+		t.Fatalf("healed session row: selected=%s actor=%s", selected, actor)
+	}
+}
+
 func TestChildEndWithoutAFamilyIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(Config{DBPath: filepath.Join(dir, "empty.db"), MediaDir: filepath.Join(dir, "media")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -1868,28 +1916,48 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 }
 
 // 006 重建 children 放开余额下限。迁移在空库上跑过一遍不代表带数据的库能跑：那句
-// DROP TABLE 的隐式 DELETE 要在 foreign_keys=ON 的事务里推迟到提交，所以这里在
-// 已经有外键指向 children 的库上再跑一次，并确认引用没有被重建弄断。
+// DROP TABLE 会顺着七张表外键子句上的 ON DELETE CASCADE 把它们真的清空（2026-11-05
+// 线上整月的任务、打卡与积分记录就是这么没的），defer_foreign_keys 只推迟提交时的校验，
+// 拦不住这一刀。所以在已经有数据的库上重跑一次，确认引用行原样留下、外键也还开着。
 func TestChildrenRebuildKeepsForeignKeysAndAllowsNegativeBalance(t *testing.T) {
 	s := testServer(t)
 	h := s.Handler()
 	child := childCookie(t, h, "")
 	state := getStateTest(t, h, child)
 	childID := state.ActiveChildID
+	owned := func() (int, int, int) {
+		var tpl, inst, led int
+		if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM task_templates WHERE child_id=?), (SELECT COUNT(*) FROM task_instances WHERE child_id=?), (SELECT COUNT(*) FROM point_ledger WHERE child_id=?)`, childID, childID, childID).Scan(&tpl, &inst, &led); err != nil {
+			t.Fatal(err)
+		}
+		return tpl, inst, led
+	}
+	tpl, instances, ledger := owned()
+	if tpl == 0 || instances == 0 || ledger == 0 {
+		t.Fatalf("demo seed should own rows to protect, got tpl=%d instances=%d ledger=%d", tpl, instances, ledger)
+	}
 	migration, err := migrationFS.ReadFile("migrations/006_negative_balance.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
+	// testServer 走的是正常启动，006 已经记过账；删掉这一行才谈得上重跑。
+	if _, err = s.db.Exec(`DELETE FROM schema_migrations WHERE version=6`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = tx.Exec(string(migration)); err != nil {
-		_ = tx.Rollback()
+	if err = runMigration(s.db, 6, migration); err != nil {
 		t.Fatalf("rebuild with existing rows: %v", err)
 	}
-	if err = tx.Commit(); err != nil {
+	// 迁移里那句 DROP 若走了级联，这三个数会一起归零。
+	if afterTpl, afterInstances, afterLedger := owned(); afterTpl != tpl || afterInstances != instances || afterLedger != ledger {
+		t.Fatalf("the rebuild cascaded away the child's rows: templates %d→%d, instances %d→%d, ledger %d→%d", tpl, afterTpl, instances, afterInstances, ledger, afterLedger)
+	}
+	// runMigration 为了躲开级联把外键关了，跑完必须开回来：归属过滤与删除级联都靠它。
+	var enforced int
+	if err := s.db.QueryRow(`PRAGMA foreign_keys`).Scan(&enforced); err != nil {
 		t.Fatal(err)
+	}
+	if enforced != 1 {
+		t.Fatalf("foreign keys left disabled after the migration: %d", enforced)
 	}
 	if _, err = s.db.Exec(`UPDATE children SET points_balance=-5 WHERE id=?`, childID); err != nil {
 		t.Fatalf("negative balance: %v", err)
@@ -1904,5 +1972,129 @@ func TestChildrenRebuildKeepsForeignKeysAndAllowsNegativeBalance(t *testing.T) {
 	}
 	if left != 0 {
 		t.Fatalf("ledger rows survived the cascade: %d", left)
+	}
+}
+
+// 线上库是 v1..v5 一路升上来的：children 还带着 CHECK(points_balance>=0)，七张引用表
+// 写着 ON DELETE CASCADE。006 就是在这种库上把整月记录清空的，所以按同样的形状建好库、
+// 灌上数据，再走一遍真正的启动迁移，要求一行都不掉、外键子句也没被改名带跑。
+func TestLegacyDatabaseUpgradeKeepsEveryRow(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
+		if _, err = db.Exec(pragma); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		var version int
+		if _, err = fmt.Sscanf(entry.Name(), "%d_", &version); err != nil {
+			t.Fatalf("%s: %v", entry.Name(), err)
+		}
+		if version >= 6 {
+			continue
+		}
+		file, err := migrationFS.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(file)); err != nil {
+			t.Fatalf("%s: %v", entry.Name(), err)
+		}
+	}
+	// 001 自己记版本 1，002..005 由 applyMigrations 记账；这里手工铺开，就得手工补上。
+	if _, err = db.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES(2,'2026-09-01T00:00:00Z'),(3,'2026-09-01T00:00:00Z'),(4,'2026-09-01T00:00:00Z'),(5,'2026-09-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	now := nowText(time.Now())
+	family, other := id("fam"), id("fam")
+	first, second := id("child"), id("child")
+	template, instance, wish := id("tpl"), id("task"), id("wish")
+	for _, step := range []struct {
+		statement string
+		args      []any
+	}{
+		{`INSERT INTO families(id,code,name,created_at) VALUES(?,?,?,?)`, []any{family, "LEGACY", "老库", now}},
+		{`INSERT INTO families(id,code,name,created_at) VALUES(?,?,?,?)`, []any{other, "OTHER4", "别家", now}},
+		{`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES(?,?,?,'🚀','#ff8f78',1,120,30,?)`, []any{first, family, "扬扬", now}},
+		{`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES(?,?,?,'🐱','#6fb7c9',1,0,5,?)`, []any{second, family, "豆豆", now}},
+		// 第二行孩子属于另一个家庭，006 的 INSERT…SELECT 必须原样带走它。
+		{`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES(?,?,?,'🌟','#f0b429',1,0,0,?)`, []any{id("child"), other, "外人", now}},
+		{`INSERT INTO task_templates(id,family_id,child_id,title,description,category,points,repeat_rule,repeat_weekday,active,created_at,updated_at) VALUES(?,?,?,?,'','生活自理',20,'daily',1,1,?,?)`, []any{template, family, first, "整理自己的书桌", now, now}},
+		{`INSERT INTO task_instances(id,family_id,template_id,child_id,period_key,title,description,category,points,repeat_rule,repeat_weekday,due_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, []any{instance, family, template, first, "once", "整理自己的书桌", "", "生活自理", 20, "once", 1, "2026-10-05", "pending_review", now}},
+		{`INSERT INTO task_submissions(id,family_id,task_instance_id,child_id,note,submitted_at) VALUES(?,?,?,?,?,?)`, []any{id("sub"), family, instance, first, "", now}},
+		{`INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,20,'earned','task',?,'任务确认完成',?)`, []any{id("led"), family, first, instance, now}},
+		{`INSERT INTO wishes(id,family_id,title,description,points_cost,icon,color,created_at,updated_at) VALUES(?,?,?,'',60,'🎈','#f36f56',?,?)`, []any{wish, family, "公园探险半日游", now, now}},
+		{`INSERT INTO redemptions(id,family_id,wish_id,wish_title,child_id,points_cost,created_at) VALUES(?,?,?,?,?,?,?)`, []any{id("red"), family, wish, "公园探险半日游", first, 60, now}},
+		{`INSERT INTO sessions(id,token_hash,family_id,actor_type,actor_id,selected_child_id,expires_at,created_at) VALUES(?,?,?,?,?,?,?,?)`, []any{id("ses"), tokenHash("legacy-token"), family, "child", first, first, "2099-01-01T00:00:00Z", now}},
+		{`INSERT INTO homework(id,family_id,date,end_date,subject,description,created_at) VALUES(?,?,?,'2026-10-07','语文','抄写生字',?)`, []any{id("hw"), family, "2026-10-05", now}},
+	} {
+		if _, err = db.Exec(step.statement, step.args...); err != nil {
+			t.Fatalf("seed legacy row: %v", err)
+		}
+	}
+	if _, err = db.Exec(`INSERT INTO homework_done(family_id,homework_id,date,completed_at) SELECT family_id,id,date,? FROM homework`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	if err = applyMigrations(db); err != nil {
+		t.Fatalf("upgrade a v5 database: %v", err)
+	}
+	var children, templates, instances, submissions, ledger, redemptions, homeworkDone int
+	if err = db.QueryRow(`SELECT (SELECT COUNT(*) FROM children), (SELECT COUNT(*) FROM task_templates), (SELECT COUNT(*) FROM task_instances), (SELECT COUNT(*) FROM task_submissions), (SELECT COUNT(*) FROM point_ledger), (SELECT COUNT(*) FROM redemptions), (SELECT COUNT(*) FROM homework_done)`).Scan(&children, &templates, &instances, &submissions, &ledger, &redemptions, &homeworkDone); err != nil {
+		t.Fatal(err)
+	}
+	if children != 3 || templates != 1 || instances != 1 || submissions != 1 || ledger != 1 || redemptions != 1 || homeworkDone != 1 {
+		t.Fatalf("upgrade dropped rows: children=%d templates=%d instances=%d submissions=%d ledger=%d redemptions=%d homework_done=%d", children, templates, instances, submissions, ledger, redemptions, homeworkDone)
+	}
+	// 归属是重点：读接口每条都带 child_id 限定，指向丢了就等于什么都没丢但什么都看不见。
+	var owner, selected string
+	if err = db.QueryRow(`SELECT child_id FROM task_instances WHERE id=?`, instance).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != first {
+		t.Fatalf("instance lost its owner: %s", owner)
+	}
+	if err = db.QueryRow(`SELECT selected_child_id FROM sessions WHERE actor_type='child'`).Scan(&selected); err != nil {
+		t.Fatal(err)
+	}
+	if selected != first {
+		t.Fatalf("rename re-pointed the session's foreign key: %s", selected)
+	}
+	// 放开余额下限就是这次迁移的目的：老库的 CHECK 没了。
+	if _, err = db.Exec(`UPDATE children SET points_balance=-40 WHERE id=?`, first); err != nil {
+		t.Fatalf("negative balance after upgrade: %v", err)
+	}
+	var violations int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 {
+		t.Fatalf("upgrade left dangling foreign keys: %d", violations)
+	}
+	// 外键在迁移之后仍然是开着的：删孩子照常级联，而不是悄悄留下孤儿行。
+	var enforced int
+	if err = db.QueryRow(`PRAGMA foreign_keys`).Scan(&enforced); err != nil {
+		t.Fatal(err)
+	}
+	if enforced != 1 {
+		t.Fatalf("foreign keys left disabled after the upgrade: %d", enforced)
+	}
+	if _, err = db.Exec(`DELETE FROM children WHERE id=?`, first); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM point_ledger WHERE child_id=?`, first).Scan(&ledger); err != nil {
+		t.Fatal(err)
+	}
+	if ledger != 0 {
+		t.Fatalf("cascade stopped working after the rebuild: %d", ledger)
 	}
 }

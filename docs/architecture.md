@@ -77,7 +77,7 @@ requestLog（安全响应头 + 一行访问日志）
 
 **幂等写入**：`submit` / `review` / `redeem` / 手动加减分要求 `Idempotency-Key` 头，缺失是 `400 idempotency_required`。键作为事务的第一笔写入（`INSERT ... ON CONFLICT DO NOTHING`，哨兵 `status_code = -1`）抢占：并发同键请求只有赢家执行，输家回滚并返回已记录的状态；赢家也回滚时输家看到 `409 conflict`。前端只在失败后重放同一个键，因此重试是安全的。
 
-**积分双记账**：账本是真相；`children.experience` 存**总经验**，接口暴露 `experience % 100` 与 `level = 1 + 总经验/100`；审批加 `max(points/5, 1)` 经验。`children.points_balance` **可以为负**：取消作业完成时那 5 分可能已经被花掉，服务端照扣（`006_negative_balance.sql` 重建了 `children` 去掉旧的 `CHECK(points_balance>=0)`，SQLite 改不了 CHECK，重建靠事务里的 `PRAGMA defer_foreign_keys=ON` 把外键检查推到提交）。兑换心愿仍然要求 `points_balance>=points_cost`（否则 409 `insufficient_points`），所以欠分状态下兑不了任何心愿。
+**积分双记账**：账本是真相；`children.experience` 存**总经验**，接口暴露 `experience % 100` 与 `level = 1 + 总经验/100`；审批加 `max(points/5, 1)` 经验。`children.points_balance` **可以为负**：取消作业完成时那 5 分可能已经被花掉，服务端照扣（`006_negative_balance.sql` 重建了 `children` 去掉旧的 `CHECK(points_balance>=0)`，SQLite 改不了 CHECK；重建能安全跑完靠的是 `runMigration` 在迁移事务之前把连接上的 `PRAGMA foreign_keys` 关掉、跑完再打开——引用 `children` 的七张表都写着 `ON DELETE CASCADE`，外键开着时那句 `DROP TABLE children` 会把它们真的清空，2026-11-05 线上整月的记录就是这么没的；事务里的 `PRAGMA defer_foreign_keys=ON` 拦不住这一刀，不要再加回来）。兑换心愿仍然要求 `points_balance>=points_cost`（否则 409 `insufficient_points`），所以欠分状态下兑不了任何心愿。
 
 **单连接事务纪律**：池子只有一条连接，事务里访问 `s.db` 会死锁——要么用 `tx`，要么用接受 `queryer` 参数的辅助函数。关闭每个 `*sql.Rows` 之后再发下一条查询。
 
