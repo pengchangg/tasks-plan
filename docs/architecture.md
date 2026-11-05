@@ -30,7 +30,7 @@ flowchart LR
 | `internal/server/homework.go` | 作业资源：读某一天（`date..end_date` 闭区间，一天就能读到整段假期作业）、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85） |
 | `internal/server/holidays.go` | 内置国办放假表（2025–2026 假期区间 + 调休上班日）：`restBlock` 把连续放假块合并、`holidayWindow` 给出某天所属的整段假期（含假期前一天）供作业表单预填 |
 | `internal/server/ratelimit.go` | 令牌桶、家长密码失败预算、argon2 并发闸门、panic 恢复与错误辅助函数 |
-| `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等 |
+| `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等；当前最新是 `009_homework_done_child.sql`（编号 8 曾被用过又整体回滚，不要再复用） |
 
 前端只有 `src/`：`App.tsx` 装着全部组件与路由，`store.ts` 是唯一状态容器与 API 客户端，`domain.ts` 是成长日历的日期计算，`lunar.ts` 是农历与「休」/「班」角标，`styles.css` 是全部样式。
 
@@ -77,7 +77,7 @@ requestLog（安全响应头 + 一行访问日志）
 
 **幂等写入**：`submit` / `review` / `redeem` / 手动加减分要求 `Idempotency-Key` 头，缺失是 `400 idempotency_required`。键作为事务的第一笔写入（`INSERT ... ON CONFLICT DO NOTHING`，哨兵 `status_code = -1`）抢占：并发同键请求只有赢家执行，输家回滚并返回已记录的状态；赢家也回滚时输家看到 `409 conflict`。前端只在失败后重放同一个键，因此重试是安全的。
 
-**积分双记账**：账本是真相；`children.experience` 存**总经验**，接口暴露 `experience % 100` 与 `level = 1 + 总经验/100`；审批加 `max(points/5, 1)` 经验。`children.points_balance` **可以为负**：取消作业完成时那 5 分可能已经被花掉，服务端照扣（`006_negative_balance.sql` 重建了 `children` 去掉旧的 `CHECK(points_balance>=0)`，SQLite 改不了 CHECK；重建能安全跑完靠的是 `runMigration` 在迁移事务之前把连接上的 `PRAGMA foreign_keys` 关掉、跑完再打开——引用 `children` 的七张表都写着 `ON DELETE CASCADE`，外键开着时那句 `DROP TABLE children` 会把它们真的清空，2026-11-05 线上整月的记录就是这么没的；事务里的 `PRAGMA defer_foreign_keys=ON` 拦不住这一刀，不要再加回来）。兑换心愿仍然要求 `points_balance>=points_cost`（否则 409 `insufficient_points`），所以欠分状态下兑不了任何心愿。
+**积分双记账**：账本是真相；`children.experience` 存**总经验**，接口暴露 `experience % 100` 与 `level = 1 + 总经验/100`；审批加 `max(points/5, 1)` 经验。`children.points_balance` **可以为负**：取消作业完成时那 5 分可能已经被花掉，服务端照扣（`006_negative_balance.sql` 重建了 `children` 去掉旧的 `CHECK(points_balance>=0)`，SQLite 改不了 CHECK；重建能安全跑完靠的是 `runMigration` 在迁移事务之前把连接上的 `PRAGMA foreign_keys` 关掉、跑完再打开——引用 `children` 的七张表都写着 `ON DELETE CASCADE`，外键开着时那句 `DROP TABLE children` 会把它们真的清空，2026-11-05 线上整月的记录就是这么没的；事务里的 `PRAGMA defer_foreign_keys=ON` 拦不住这一刀，不要再加回来）。兑换心愿仍然要求 `points_balance>=points_cost`（否则 409 `insufficient_points`），所以欠分状态下兑不了任何心愿。作业完成是按「作业 × 日期 × 孩子」记账的（`009` 给 `homework_done` 加了 `child_id`），台账 key 也带 `:<child>`，所以两个孩子勾同一天各得各的 5 分，取消只扣回自己那笔。
 
 **单连接事务纪律**：池子只有一条连接，事务里访问 `s.db` 会死锁——要么用 `tx`，要么用接受 `queryer` 参数的辅助函数。关闭每个 `*sql.Rows` 之后再发下一条查询。
 
@@ -105,7 +105,7 @@ requestLog（安全响应头 + 一行访问日志）
 - 任务提交与心愿完成：`multipart/form-data`，字段 `files`（最多 6 个）、可选 `note`（≤30 字），总预算 100 MiB。图片 jpeg/png/webp ≤10 MiB，视频 mp4/webm ≤100 MiB。
 - 作业：字段 `date` / `subject` / `description` / `files` / `remove_media`，同样的张数与总量预算；不支持的格式在作业路径上会被跳过并回报，不拖垮整批。
 - 类型靠**内容嗅探**（512 字节 + MP4 `ftyp`/brand、WebM EBML 探针）而不是文件名。文件先落盘到 `GROWJOY_MEDIA`（`media_<hex><ext>`，0600），再进事务；失败路径有清理闭包，提交成功后不会删。
-- 读取走 `GET /api/v1/media/{id}`：要登录、按家庭隔离、`filepath.Base` 防穿越、`http.ServeContent` 支持 Range，返回 `Content-Disposition: inline`。
+- 读取走 `GET /api/v1/media/{id}`：要登录、按家庭隔离、`filepath.Base` 防穿越、`http.ServeContent` 支持 Range，返回 `Content-Disposition: inline`。任务提交/心愿完成的附件再按主人收窄：孩子的会话读兄弟的附件一律 404，只有家长端能跨孩子读；作业媒体仍按家庭共享。
 - `attachments` 行有 XOR 约束：要么属于提交（`submission_id`），要么属于兑换（`redemption_id`）。
 
 ## 前端结构

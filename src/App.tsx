@@ -902,9 +902,13 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
       </section>
       <SectionTitle title="愿望小铺" action="全部愿望" to="/child/wishes" />
       <div className="wish-strip">
-        {store.state.wishes.slice(0, 3).map((wish) => (
-          <WishMini key={wish.id} wish={wish} balance={child.pointsBalance} />
-        ))}
+        {/* 家长下架的愿望不该再出现在孩子的首页橱窗里（/child/wishes 也过滤了）。 */}
+        {store.state.wishes
+          .filter((wish) => wish.isActive)
+          .slice(0, 3)
+          .map((wish) => (
+            <WishMini key={wish.id} wish={wish} balance={child.pointsBalance} />
+          ))}
       </div>
     </div>
   );
@@ -1125,10 +1129,11 @@ function StarRow({
     completed: boolean,
     note: string,
     attachments: Attachment[],
-  ) => void;
+  ) => Promise<boolean>;
 }) {
   const done = Boolean(redemption.completedAt);
   const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [undoing, setUndoing] = useState(false);
   const [note, setNote] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -1197,8 +1202,9 @@ function StarRow({
         <div className="star-complete">
           <textarea
             value={note}
+            maxLength={30}
             onChange={(event) => setNote(event.target.value)}
-            placeholder="写一句话记录这一刻吧（可选）"
+            placeholder="写一句话记录这一刻吧（可选，30 字以内）"
           />
           <div className="attachment-row">
             <label>
@@ -1229,14 +1235,23 @@ function StarRow({
           )}
           <button
             className="wide-primary"
-            onClick={() => {
-              onToggle(redemption.id, true, note, attachments);
-              setOpen(false);
-              setNote("");
-              setAttachments([]);
+            disabled={saving}
+            onClick={async () => {
+              if (saving) return;
+              setSaving(true);
+              try {
+                // 失败时（含网络错误）面板与已填的备注、照片都留着，别让人白写一遍。
+                if (await onToggle(redemption.id, true, note, attachments)) {
+                  setOpen(false);
+                  setNote("");
+                  setAttachments([]);
+                }
+              } finally {
+                setSaving(false);
+              }
             }}
           >
-            确认完成
+            {saving ? "提交中…" : "确认完成"}
           </button>
         </div>
       )}
@@ -1247,8 +1262,8 @@ function StarRow({
           confirm="确认撤销"
           onClose={() => setUndoing(false)}
           onConfirm={() => {
-            onToggle?.(redemption.id, false, "", []);
             setUndoing(false);
+            void onToggle?.(redemption.id, false, "", []);
           }}
         />
       )}
@@ -1267,7 +1282,7 @@ function StarWishList({
     completed: boolean,
     note: string,
     attachments: Attachment[],
-  ) => void;
+  ) => Promise<boolean>;
 }) {
   if (items.length === 0)
     return (
@@ -1602,8 +1617,11 @@ function HomeworkViewer({
   // 放大后单指拖动是平移，不再触发上一张/下一张。
   const scaleRef = useRef(1);
   const item = items[index];
-  const step = (delta: number) =>
+  const step = (delta: number) => {
+    // 上一张的放大不该留给下一张：缩放是每张图自己的状态，切图时归位。
+    scaleRef.current = 1;
     onIndex((index + delta + items.length) % items.length);
+  };
   return (
     <div
       className="modal-backdrop homework-viewer"
@@ -1727,14 +1745,23 @@ function HomeworkDay({
   // 却是真账（重放、取消完成、积分不够都不会虚报），所以不拿本地猜测去画它。
   const [award, setAward] = useState<{ id: string; amount: number } | null>(null);
   const awardTimer = useRef(0);
+  // 请求在途时禁掉那张卡的勾选框：连点两下会发 done=true / done=false 两个请求，
+  // 服务端按到达顺序记账，孩子看到的 +N 可能和最终状态对不上。
+  const [pending, setPending] = useState<string[]>([]);
   useEffect(() => () => window.clearTimeout(awardTimer.current), []);
   const tick = async (item: Homework, done: boolean) => {
+    if (!onDone || pending.includes(item.id)) return;
     window.clearTimeout(awardTimer.current);
     if (!done) setAward(null);
-    const awarded = await onDone?.(item, done);
-    if (!awarded || awarded <= 0) return;
-    setAward({ id: item.id, amount: awarded });
-    awardTimer.current = window.setTimeout(() => setAward(null), 2000);
+    setPending((prev) => [...prev, item.id]);
+    try {
+      const awarded = await onDone(item, done);
+      if (!awarded || awarded <= 0) return;
+      setAward({ id: item.id, amount: awarded });
+      awardTimer.current = window.setTimeout(() => setAward(null), 2000);
+    } finally {
+      setPending((prev) => prev.filter((id) => id !== item.id));
+    }
   };
   const media = items.flatMap((item) => item.media);
   return (
@@ -1749,6 +1776,7 @@ function HomeworkDay({
               <input
                 type="checkbox"
                 checked={item.done}
+                disabled={pending.includes(item.id)}
                 onChange={(event) => tick(item, event.target.checked)}
               />
               完成
@@ -2310,7 +2338,7 @@ function ConfirmModal({
   return (
     <div className="modal-backdrop" ref={dialog}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <button className="modal-close" onClick={onClose}>
+        <button className="modal-close" aria-label="关闭对话框" onClick={onClose}>
           <X size={18} />
         </button>
         <div className="modal-icon">🎁</div>
@@ -2624,9 +2652,12 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
         <PointsForm
           child={store.activeChild}
           onClose={() => setAwarding(false)}
-          onSubmit={(amount, note) => {
-            store.actions.awardPoints(store.activeChild.id, amount, note);
-            setAwarding(false);
+          onSubmit={async (amount, note) => {
+            // 失败时把面板留着：金额和原因还在这里，改一下就能重试。
+            if (
+              await store.actions.awardPoints(store.activeChild.id, amount, note)
+            )
+              setAwarding(false);
           }}
         />
       )}
@@ -2732,10 +2763,12 @@ function ParentChildren({ store }: { store: ReturnType<typeof useAppStore> }) {
             setShowForm(false);
             setEditing(null);
           }}
-          onSave={(draft) => {
-            store.actions.saveChild(draft, editing?.id);
-            setShowForm(false);
-            setEditing(null);
+          onSave={async (draft) => {
+            // 校验失败（400）时保持表单打开，输入不会丢。
+            if (await store.actions.saveChild(draft, editing?.id)) {
+              setShowForm(false);
+              setEditing(null);
+            }
           }}
         />
       )}
@@ -2762,7 +2795,7 @@ function ChildForm({
 }: {
   child: Child | null;
   onClose: () => void;
-  onSave: (draft: Pick<Child, "name" | "avatar" | "color">) => void;
+  onSave: (draft: Pick<Child, "name" | "avatar" | "color">) => Promise<unknown>;
 }) {
   const avatars = ["🌻", "🚀", "🌈", "⭐", "🦕", "🐳"];
   const colors = [
@@ -2776,6 +2809,7 @@ function ChildForm({
   const [name, setName] = useState(child?.name ?? "");
   const [avatar, setAvatar] = useState(child?.avatar ?? avatars[0]);
   const [color, setColor] = useState(child?.color ?? colors[0]);
+  const [saving, setSaving] = useState(false);
   const dialog = useDialog(onClose);
   return (
     <div className="modal-backdrop" ref={dialog}>
@@ -2784,14 +2818,15 @@ function ChildForm({
         role="dialog"
         aria-modal="true"
         aria-labelledby="child-form-title"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
-          if (name.trim())
-            onSave({
-              name: name.trim(),
-              avatar,
-              color,
-            });
+          if (!name.trim() || saving) return;
+          setSaving(true);
+          try {
+            await onSave({ name: name.trim(), avatar, color });
+          } finally {
+            setSaving(false);
+          }
         }}
       >
         <div className="form-heading">
@@ -2848,8 +2883,8 @@ function ChildForm({
             ))}
           </div>
         </fieldset>
-        <button className="wide-primary" type="submit">
-          {child ? "保存修改" : "添加孩子"}
+        <button className="wide-primary" type="submit" disabled={saving}>
+          {saving ? "保存中…" : child ? "保存修改" : "添加孩子"}
         </button>
       </form>
     </div>
@@ -2863,13 +2898,14 @@ function PointsForm({
 }: {
   child: Child;
   onClose: () => void;
-  onSubmit: (amount: number, note: string) => void;
+  onSubmit: (amount: number, note: string) => Promise<unknown>;
 }) {
   const presets = [5, 10, 20, 50];
   const [mode, setMode] = useState<"add" | "deduct">("add");
   const [amount, setAmount] = useState("10");
   const [note, setNote] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   const dialog = useDialog(onClose);
   return (
     <div className="modal-backdrop" ref={dialog}>
@@ -2878,14 +2914,20 @@ function PointsForm({
         role="dialog"
         aria-modal="true"
         aria-labelledby="points-form-title"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
+          if (saving) return;
           const value = Number(amount);
           if (!Number.isInteger(value) || value < 1 || value > 500) {
             setError("请输入 1-500 之间的整数");
             return;
           }
-          onSubmit(mode === "add" ? value : -value, note.trim());
+          setSaving(true);
+          try {
+            await onSubmit(mode === "add" ? value : -value, note.trim());
+          } finally {
+            setSaving(false);
+          }
         }}
       >
         <div className="form-heading">
@@ -2954,8 +2996,8 @@ function PointsForm({
         </label>
         <small className="pin-hint">当前可用积分：{child.pointsBalance}</small>
         {error && <small className="pin-error-text">{error}</small>}
-        <button className="wide-primary" type="submit">
-          {mode === "add" ? "确认奖励" : "确认扣除"}
+        <button className="wide-primary" type="submit" disabled={saving}>
+          {saving ? "提交中…" : mode === "add" ? "确认奖励" : "确认扣除"}
         </button>
       </form>
     </div>
@@ -3029,12 +3071,14 @@ function ParentTasks({ store }: { store: ReturnType<typeof useAppStore> }) {
           task={editing}
           timezone={store.state.timezone}
           onClose={closeForm}
-          onSave={(draft) => {
-            store.actions.saveTask(
-              { ...draft, childId: store.state.activeChildId },
-              editing?.id,
-            );
-            closeForm();
+          onSave={async (draft) => {
+            if (
+              await store.actions.saveTask(
+                { ...draft, childId: store.state.activeChildId },
+                editing?.id,
+              )
+            )
+              closeForm();
           }}
         />
       )}
@@ -3280,7 +3324,7 @@ function TaskForm({
     repeatRule: RepeatRule;
     repeatWeekday: number;
     repeatWeekdays: number[];
-  }) => void;
+  }) => Promise<unknown>;
 }) {
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
@@ -3303,6 +3347,7 @@ function TaskForm({
         ? current.filter((picked) => picked !== day)
         : [...current, day].sort((left, right) => left - right),
     );
+  const [saving, setSaving] = useState(false);
   const dialog = useDialog(onClose);
   return (
     <div className="modal-backdrop" ref={dialog}>
@@ -3311,10 +3356,12 @@ function TaskForm({
         role="dialog"
         aria-modal="true"
         aria-labelledby="task-form-title"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          if (title.trim())
-            onSave({
+          if (!title.trim() || saving) return;
+          setSaving(true);
+          try {
+            await onSave({
               title,
               description,
               category,
@@ -3323,13 +3370,16 @@ function TaskForm({
               repeatWeekday: weekdays[0] ?? repeatWeekday,
               repeatWeekdays: weekdays,
             });
+          } finally {
+            setSaving(false);
+          }
         }}
       >
         <div className="form-heading">
           <div>
             <h2 id="task-form-title">{task ? "编辑任务信息" : "创建一个新任务"}</h2>
           </div>
-          <button type="button" onClick={onClose}>
+          <button type="button" aria-label="关闭任务表单" onClick={onClose}>
             <X size={18} />
           </button>
         </div>
@@ -3448,14 +3498,14 @@ function TaskForm({
         <button
           className="wide-primary"
           type="submit"
-          disabled={repeatRule === "weekly" && weekdays.length === 0}
+          disabled={saving || (repeatRule === "weekly" && weekdays.length === 0)}
           title={
             repeatRule === "weekly" && weekdays.length === 0
               ? "至少选一个星期"
               : undefined
           }
         >
-          {task ? "保存修改" : "发布任务"}
+          {saving ? "保存中…" : task ? "保存修改" : "发布任务"}
         </button>
       </form>
     </div>
@@ -3562,9 +3612,8 @@ function ParentWishes({ store }: { store: ReturnType<typeof useAppStore> }) {
         <WishForm
           wish={editing}
           onClose={closeForm}
-          onSave={(draft) => {
-            store.actions.saveWish(draft, editing?.id);
-            closeForm();
+          onSave={async (draft) => {
+            if (await store.actions.saveWish(draft, editing?.id)) closeForm();
           }}
         />
       )}
@@ -3654,12 +3703,14 @@ function ParentHomework({ store }: { store: ReturnType<typeof useAppStore> }) {
           date={editing === "new" ? date : editing.date}
           holiday={store.homework.holiday}
           onClose={() => setEditing(null)}
-          onSave={(draft) => {
-            store.actions.saveHomework(
-              draft,
-              editing === "new" ? undefined : editing.id,
-            );
-            setEditing(null);
+          onSave={async (draft) => {
+            if (
+              await store.actions.saveHomework(
+                draft,
+                editing === "new" ? undefined : editing.id,
+              )
+            )
+              setEditing(null);
           }}
         />
       )}
@@ -3690,7 +3741,7 @@ function HomeworkForm({
   date: string;
   holiday?: Holiday;
   onClose: () => void;
-  onSave: (draft: HomeworkDraft) => void;
+  onSave: (draft: HomeworkDraft) => Promise<unknown>;
 }) {
   const dialog = useDialog(onClose);
   // 所选日期落在假期内（或假期前一天）时默认预填整段假期：开始日期也从假期首日起，
@@ -3714,6 +3765,7 @@ function HomeworkForm({
   const [previews, setPreviews] = useState<string[]>([]);
   const [removed, setRemoved] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
   // 预览用的是 blob URL，卸载时必须逐个回收（删除单项时也立刻回收；重复回收无害）。
   const created = useRef<string[]>([]);
   useEffect(
@@ -3745,21 +3797,27 @@ function HomeworkForm({
         role="dialog"
         aria-modal="true"
         aria-labelledby="homework-form-title"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
+          if (saving) return;
           // 描述与图片/视频至少填一项（PRD §3.2）。
           if (!description.trim() && kept.length + files.length === 0) {
             setError("请填写文字描述或选择图片或视频");
             return;
           }
-          onSave({
-            date: value,
-            endDate: endValue || value,
-            subject,
-            description: description.trim(),
-            files,
-            removeMedia: removed,
-          });
+          setSaving(true);
+          try {
+            await onSave({
+              date: value,
+              endDate: endValue || value,
+              subject,
+              description: description.trim(),
+              files,
+              removeMedia: removed,
+            });
+          } finally {
+            setSaving(false);
+          }
         }}
       >
         <div className="form-heading">
@@ -3768,7 +3826,7 @@ function HomeworkForm({
               {homework ? "编辑作业" : "新增作业"}
             </h2>
           </div>
-          <button type="button" onClick={onClose}>
+          <button type="button" aria-label="关闭作业表单" onClick={onClose}>
             <X size={18} />
           </button>
         </div>
@@ -3899,8 +3957,8 @@ function HomeworkForm({
           <button type="button" className="secondary-button" onClick={onClose}>
             取消
           </button>
-          <button className="wide-primary" type="submit">
-            保存作业
+          <button className="wide-primary" type="submit" disabled={saving}>
+            {saving ? "保存中…" : "保存作业"}
           </button>
         </div>
       </form>
@@ -3915,7 +3973,7 @@ function WishForm({
 }: {
   wish: Wish | null;
   onClose: () => void;
-  onSave: (draft: Omit<Wish, "id">) => void;
+  onSave: (draft: Omit<Wish, "id">) => Promise<unknown>;
 }) {
   const colors = ["#ffcf70", "#ff9980", "#9bd8c8", "#bdb2ed"];
   const [title, setTitle] = useState(wish?.title ?? "");
@@ -3923,6 +3981,7 @@ function WishForm({
   const [pointsCost, setPoints] = useState(wish?.pointsCost ?? 100);
   const [icon, setIcon] = useState(wish?.icon ?? "🎁");
   const [color, setColor] = useState(wish?.color ?? colors[0]);
+  const [saving, setSaving] = useState(false);
   const dialog = useDialog(onClose);
   return (
     <div className="modal-backdrop" ref={dialog}>
@@ -3931,10 +3990,12 @@ function WishForm({
         role="dialog"
         aria-modal="true"
         aria-labelledby="wish-form-title"
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
-          if (title.trim())
-            onSave({
+          if (!title.trim() || saving) return;
+          setSaving(true);
+          try {
+            await onSave({
               title,
               description,
               pointsCost,
@@ -3942,13 +4003,16 @@ function WishForm({
               color,
               isActive: wish?.isActive ?? true,
             });
+          } finally {
+            setSaving(false);
+          }
         }}
       >
         <div className="form-heading">
           <div>
             <h2 id="wish-form-title">{wish ? "编辑愿望信息" : "添加一个愿望"}</h2>
           </div>
-          <button type="button" onClick={onClose}>
+          <button type="button" aria-label="关闭愿望表单" onClick={onClose}>
             <X size={18} />
           </button>
         </div>
@@ -4004,8 +4068,8 @@ function WishForm({
             ))}
           </div>
         </fieldset>
-        <button className="wide-primary" type="submit">
-          {wish ? "保存修改" : "放入愿望小铺"}
+        <button className="wide-primary" type="submit" disabled={saving}>
+          {saving ? "保存中…" : wish ? "保存修改" : "放入愿望小铺"}
         </button>
       </form>
     </div>
@@ -4035,7 +4099,9 @@ function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }) {
     return () => {
       live = false;
     };
-  }, [store.state, range.from, range.to]);
+    // 只跟着「看哪个孩子」与区间走：依赖整个 state 会让每 60 秒的轮询和每次写操作
+    // 都重拉一遍 /stats。
+  }, [store.activeChild.id, range.from, range.to]);
   const rangeLabel = statsRangeLabel(rangeKey, stats);
   const done = stats.completedTasks;
   const earned = stats.earnedPoints;

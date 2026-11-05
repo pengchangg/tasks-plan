@@ -25,7 +25,14 @@ import (
 const (
 	homeworkMaxEdge     = 2560
 	homeworkJPEGQuality = 85
+	// homeworkMaxPixels 是解码前就拦下的像素上限。100 MiB 的压缩图片可以解出几十 GB
+	// 的 RGBA，解码完再判大小已经太晚（进程先被 OOM 干掉）；40 MP 覆盖手机常见照片，
+	// 再大的按「不支持」跳过。
+	homeworkMaxPixels = 40_000_000
 )
+
+// errImageTooLarge 只用于本文件的保存路径：调用方据此把这一张记进 skipped 而不是整批失败。
+var errImageTooLarge = errors.New("image dimensions exceed the decode limit")
 
 // 学科固定 10 项，与 src/App.tsx 的 homeworkSubjects 一一对应；改一处必须改另一处。
 var homeworkSubjects = []string{"语文", "数学", "英语", "科学", "道德与法治", "音乐", "美术", "体育", "劳动", "其他"}
@@ -83,7 +90,7 @@ func (s *Server) getHomework(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "date must be YYYY-MM-DD")
 		return
 	}
-	out, err := s.homeworkDay(r.Context(), x.FamilyID, date)
+	out, err := s.homeworkDay(r.Context(), x.FamilyID, x.SelectedChildID, date)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -97,8 +104,8 @@ func (s *Server) getHomework(w http.ResponseWriter, r *http.Request) {
 }
 
 // homeworkDay 读一天的作业及其媒体。池只有一个连接，所以外层 Rows 必须读完关闭
-// 之后才能查每条作业的媒体。
-func (s *Server) homeworkDay(ctx context.Context, family, date string) (HomeworkDay, error) {
+// 之后才能查每条作业的媒体。完成勾选按「谁、哪一天」记录：child 为空时 Done 全是 false。
+func (s *Server) homeworkDay(ctx context.Context, family, child, date string) (HomeworkDay, error) {
 	out := HomeworkDay{Date: date, Items: []Homework{}}
 	// 假期作业的区间覆盖多天，所以按 date<=今天<=end_date 取，而不是精确等于日期。
 	// created_at 是裁剪过尾零的 RFC3339Nano，同一秒内的字典序不可靠，rowid 才是录入顺序。
@@ -124,8 +131,8 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 			return out, err
 		}
 	}
-	// 完成勾选按天记录，只取这一天。
-	doneRows, err := s.db.QueryContext(ctx, `SELECT homework_id FROM homework_done WHERE family_id=? AND date=?`, family, date)
+	// 完成勾选按「谁、哪一天」记录，只取这个孩子这一天。
+	doneRows, err := s.db.QueryContext(ctx, `SELECT homework_id FROM homework_done WHERE family_id=? AND child_id=? AND date=?`, family, child, date)
 	if err != nil {
 		return out, err
 	}
@@ -152,11 +159,10 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 // homeworkDonePoints 是作业完成一次给的分：勾上一科 +5，当天全部勾完再额外 +5。
 const homeworkDonePoints = 5
 
-// setHomeworkDone 是孩子端作业卡片的「完成」勾选。按日期记录，所以假期作业在区间内
-// 可以逐天勾；写入天然幂等（INSERT OR IGNORE / DELETE），不需要 Idempotency-Key。
-// 勾选进出都带着积分账本，所以三件事必须在同一个事务里：勾记录、台账、孩子余额。
-// shortcut: homework_done 是家庭级的，积分只记在勾选的那个孩子身上；
-// 若作业要按孩子分开，这里需要一张带 child_id 的完成表。
+// setHomeworkDone 是孩子端作业卡片的「完成」勾选。按「孩子 + 日期」记录，所以假期作业
+// 在区间内可以逐天勾，同一个作业同一天两个孩子也各勾各的、各记各的分；写入天然幂等
+// （INSERT OR IGNORE / DELETE），不需要 Idempotency-Key。勾选进出都带着积分账本，
+// 所以三件事必须在同一个事务里：勾记录、台账、孩子余额。
 func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
 	var in struct {
@@ -169,6 +175,22 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validDateValue(in.Date) {
 		problem(w, 400, "invalid_request", "date must be YYYY-MM-DD")
+		return
+	}
+	// 勾选记在哪个孩子头上必须是明确的：没有选中孩子的会话不该写出一个没人认领的勾选。
+	if x.SelectedChildID == "" {
+		problem(w, 400, "invalid_request", "no child selected")
+		return
+	}
+	// 未来的日子不能提前勾：那等于把还没发生的作业先领了分。日期是家庭本地日期，
+	// 所以拿家庭时区里的今天来比，而不是进程本地时间。
+	loc, err := s.familyLocation(r.Context(), x.FamilyID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if in.Date > s.now().In(loc).Format("2006-01-02") {
+		problem(w, 400, "invalid_request", "date must not be in the future")
 		return
 	}
 	hid := chi.URLParam(r, "id")
@@ -190,18 +212,17 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	}
 	var res sql.Result
 	if in.Done {
-		res, err = tx.Exec(`INSERT OR IGNORE INTO homework_done(family_id,homework_id,date,completed_at) VALUES(?,?,?,?)`, x.FamilyID, hid, in.Date, nowText(s.now()))
+		res, err = tx.Exec(`INSERT OR IGNORE INTO homework_done(family_id,homework_id,child_id,date,completed_at) VALUES(?,?,?,?,?)`, x.FamilyID, hid, x.SelectedChildID, in.Date, nowText(s.now()))
 	} else {
-		res, err = tx.Exec(`DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date)
+		res, err = tx.Exec(`DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND child_id=? AND date=?`, x.FamilyID, hid, x.SelectedChildID, in.Date)
 	}
 	var changed int64
 	if err == nil {
 		changed, err = res.RowsAffected()
 	}
-	// 只有状态真的翻了一下的那次才动积分，重放既不加也不扣。积分必须记在某个孩子
-	// 头上，所以没有选中孩子的会话（家长端不渲染这个开关）只记勾选。
+	// 只有状态真的翻了一下的那次才动积分，重放既不加也不扣。
 	awarded := 0
-	if err == nil && changed == 1 && x.SelectedChildID != "" {
+	if err == nil && changed == 1 {
 		awarded, err = s.homeworkPoints(tx, x.FamilyID, x.SelectedChildID, hid, in.Date, subject, in.Done)
 	}
 	if err != nil {
@@ -216,26 +237,29 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"id": hid, "awarded": awarded})
 }
 
-// homeworkPoints 让勾选进出积分账本：勾上时先加这一科的分，当天已经全部完成再加一笔；
-// 取消时把这两笔倒着扣回。台账 reference_id 让每一笔只可能有一条。
+// homeworkPoints 让勾选进出积分账本：勾上时先加这一科的分，当天这个孩子已经全部完成
+// 再加一笔；取消时把这两笔倒着扣回。台账 reference_id 带上孩子，同一科同一天两个孩子
+// 各有一条，唯一键 (family_id,reference_type,reference_id) 才容得下。
 func (s *Server) homeworkPoints(tx *sql.Tx, family, child, hid, date, subject string, done bool) (int, error) {
+	itemRef := hid + ":" + date + ":" + child
+	bonusRef := date + ":" + child
 	if !done {
-		bonus, err := s.reverseHomeworkPoints(tx, family, "homework_bonus", date)
+		bonus, err := s.reverseHomeworkPoints(tx, family, "homework_bonus", bonusRef)
 		if err != nil {
 			return 0, err
 		}
-		item, err := s.reverseHomeworkPoints(tx, family, "homework", hid+":"+date)
+		item, err := s.reverseHomeworkPoints(tx, family, "homework", itemRef)
 		return bonus + item, err
 	}
-	awarded, err := s.creditHomeworkPoints(tx, family, child, "homework", hid+":"+date, "作业完成："+subject, nowText(s.now()))
+	awarded, err := s.creditHomeworkPoints(tx, family, child, "homework", itemRef, "作业完成："+subject, nowText(s.now()))
 	if err != nil {
 		return 0, err
 	}
-	all, err := s.homeworkDayAllDone(tx, family, date)
+	all, err := s.homeworkDayAllDone(tx, family, child, date)
 	if err != nil || !all {
 		return awarded, err
 	}
-	bonus, err := s.creditHomeworkPoints(tx, family, child, "homework_bonus", date, "当天作业全部完成", nowText(s.now()))
+	bonus, err := s.creditHomeworkPoints(tx, family, child, "homework_bonus", bonusRef, "当天作业全部完成", nowText(s.now()))
 	return awarded + bonus, err
 }
 
@@ -282,10 +306,10 @@ func (s *Server) reverseHomeworkPoints(tx *sql.Tx, family, refType, refID string
 	return -amount, err
 }
 
-// homeworkDayAllDone 判断这一天（按在区间内的作业计）是不是每一科都勾上了。
-func (s *Server) homeworkDayAllDone(tx *sql.Tx, family, date string) (bool, error) {
+// homeworkDayAllDone 判断这一天（按在区间内的作业计）这个孩子是不是每一科都勾上了。
+func (s *Server) homeworkDayAllDone(tx *sql.Tx, family, child, date string) (bool, error) {
 	var total, done int
-	err := tx.QueryRow(`SELECT COUNT(*),COUNT(d.homework_id) FROM homework h LEFT JOIN homework_done d ON d.family_id=h.family_id AND d.homework_id=h.id AND d.date=? WHERE h.family_id=? AND h.date<=? AND h.end_date>=?`, date, family, date, date).Scan(&total, &done)
+	err := tx.QueryRow(`SELECT COUNT(*),COUNT(d.homework_id) FROM homework h LEFT JOIN homework_done d ON d.family_id=h.family_id AND d.homework_id=h.id AND d.date=? AND d.child_id=? WHERE h.family_id=? AND h.date<=? AND h.end_date>=?`, date, child, family, date, date).Scan(&total, &done)
 	return total > 0 && done == total, err
 }
 
@@ -360,8 +384,19 @@ func inspectHomeworkUpload(h *multipart.FileHeader) (kind, mimeType, storageExt 
 }
 
 // storeHomeworkImage 把上传的图片解码、按 EXIF 方向摆正、必要缩到最长边 2560（只缩不放）、
-// 透明底铺白，最后写成 JPEG q85 落盘，返回落盘后的字节数。
-func (s *Server) storeHomeworkImage(src io.Reader, storage string) (int64, error) {
+// 透明底铺白，最后写成 JPEG q85 落盘，返回落盘后的字节数。解码前先读尺寸：像素超限的
+// 压缩炸弹在这里就被挡住了。
+func (s *Server) storeHomeworkImage(src io.ReadSeeker, storage string) (int64, error) {
+	cfg, _, err := image.DecodeConfig(src)
+	if err != nil {
+		return 0, err
+	}
+	if cfg.Width > 0 && cfg.Height > 0 && cfg.Width*cfg.Height > homeworkMaxPixels {
+		return 0, errImageTooLarge
+	}
+	if _, err = src.Seek(0, io.SeekStart); err != nil {
+		return 0, err
+	}
 	img, err := imaging.Decode(src, imaging.AutoOrientation(true))
 	if err != nil {
 		return 0, err
@@ -540,11 +575,23 @@ func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = src.Close()
 		if err != nil {
+			if errors.Is(err, errImageTooLarge) {
+				// 和格式不支持一个待遇：跳过这一张、在响应里回报，不拖垮整批。
+				skipped = append(skipped, filepath.Base(candidate.h.Filename))
+				continue
+			}
 			cleanup()
 			s.uploadError(w, r, err)
 			return
 		}
 		savedFiles = append(savedFiles, saved{h: candidate.h, storage: storage, mid: id("hm"), kind: candidate.kind, mimeType: candidate.mimeType, size: size})
+	}
+	// 被跳过的文件可能让这次保存变成「既没有描述也没有媒体」：前面按 accepted 算过一次，
+	// 这里按真正落盘的算，免得存下一条空记录。
+	if description == "" && len(existing)-len(staleIDs)+len(savedFiles) == 0 {
+		cleanup()
+		problem(w, 400, "invalid_request", "description or media is required")
+		return
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

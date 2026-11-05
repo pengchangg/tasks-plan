@@ -69,8 +69,12 @@ jobs:
         run: |
           DEPLOY_HOST="${DEPLOY_HOST:-localhost}"
           mkdir -p ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
+          # runner 是长期存活的自建实例：私钥写到本次运行的临时路径，绝不覆盖
+          # 主机用户自己的 ~/.ssh/id_ed25519（也绝不删它）。
+          KEY="$(mktemp "${RUNNER_TEMP:-/tmp}/growjoy-deploy-key.XXXXXX")"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$KEY"
+          chmod 600 "$KEY"
+          echo "DEPLOY_KEY=$KEY" >> "$GITHUB_ENV"
           # 只收 ed25519 主机键：不指定类型会连 rsa/sha1 一起收，等于把降级路径留下。
           ssh-keyscan -t ed25519 -H "${DEPLOY_HOST#*@}" >> ~/.ssh/known_hosts
       - name: Deploy
@@ -80,14 +84,15 @@ jobs:
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
           DEPLOY_UNIT: ${{ vars.DEPLOY_UNIT }}
           # CI 里没有人能回答密码提示：BatchMode 让 ssh 直接失败而不是挂到超时。
-          SSH_OPTS: -o ConnectTimeout=10 -o BatchMode=yes
+          # -i 指向上一步生成的临时私钥（DEPLOY_KEY 由 GITHUB_ENV 传过来）。
+          SSH_OPTS: -o ConnectTimeout=10 -o BatchMode=yes -i ${{ env.DEPLOY_KEY }}
         run: |
           export DEPLOY_HOST="${DEPLOY_HOST:-localhost}"
           export DEPLOY_DIR="${DEPLOY_DIR:-/home/pengchang/growjoy}"
           export DEPLOY_URL="${DEPLOY_URL:-http://192.168.0.208:9080}"
           export DEPLOY_UNIT="${DEPLOY_UNIT:-growjoy}"
           make deploy
-      # runner 是长期存活的自建实例：不删等于把部署私钥留在磁盘上。
+      # 私钥只活到本次运行结束：临时文件删掉，不动 runner 用户自己的 ~/.ssh。
       - name: Remove deploy key
         if: always()
-        run: rm -f ~/.ssh/id_ed25519
+        run: rm -f "${DEPLOY_KEY:-}" 

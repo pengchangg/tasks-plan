@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -1988,9 +1990,29 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-3", "done": true}, child, ""); w.Code != 400 {
 		t.Fatalf("bad date: %d %s", w.Code, w.Body.String())
 	}
-	foreign := sessionFor(t, s, otherFamily(t, s, "OTHER3", "Asia/Shanghai"), "parent", "par-other3", "")
+	// 别的家庭：会话带一个该家庭自己的孩子，勾选请求才走得到「这个 id 不属于我家」。
+	otherFamilyID := otherFamily(t, s, "OTHER3", "Asia/Shanghai")
+	if _, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,created_at) VALUES('child-other3',?,'Other child','⭐','#ffb547',?)`, otherFamilyID, nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	foreign := sessionFor(t, s, otherFamilyID, "parent", "par-other3", "child-other3")
 	if w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-03", "done": true}, foreign, ""); w.Code != 404 {
 		t.Fatalf("cross-family: %d %s", w.Code, w.Body.String())
+	}
+	// 未来的日子不能提前勾：那等于先把还没发生的作业的分领了。区间内、今天以前照勾。
+	loc, err := time.LoadLocation("Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tomorrow := time.Now().In(loc).AddDate(0, 0, 1).Format("2006-01-02")
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", tomorrow}, {"subject", "科学"}, {"description", "明天再看"},
+	}, nil); w.Code != 200 {
+		t.Fatalf("create tomorrow's homework: %d %s", w.Code, w.Body.String())
+	}
+	tomorrowID := homeworkDay(t, h, parent, tomorrow).Items[0].ID
+	if w := doJSON(t, h, "POST", "/api/v1/homework/"+tomorrowID+"/done", map[string]any{"date": tomorrow, "done": true}, child, ""); w.Code != 400 {
+		t.Fatalf("future day must be refused: %d %s", w.Code, w.Body.String())
 	}
 	// 勾选进出积分：每一科当天完成 +5，当天全部完成再额外 +5，取消完成按同样的数扣回。
 	for _, subject := range []string{"语文", "数学"} {
@@ -2060,6 +2082,204 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 	if left != 0 {
 		t.Fatalf("homework_done rows survived the delete: %d", left)
 	}
+}
+
+// 作业完成按孩子记：同一个作业同一天，两个孩子各勾各的、各拿各的分（含「当天全完成」
+// 那笔奖励），一个孩子取消只扣自己的账与勾选，另一个孩子的完成状态与积分原样不动。
+func TestHomeworkDoneIsScopedToEachChild(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	first := childCookie(t, h, "")
+	w := doJSON(t, h, "POST", "/api/v1/children/", map[string]any{"name": "豆豆", "avatar": "🐣", "color": "#6fb7c9"}, parent, "")
+	if w.Code != 200 {
+		t.Fatalf("create second child: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	var familyID string
+	if err := s.db.QueryRow(`SELECT id FROM families LIMIT 1`).Scan(&familyID); err != nil {
+		t.Fatal(err)
+	}
+	second := sessionFor(t, s, familyID, "child", created.ID, created.ID)
+	balance := func(cookie *http.Cookie, child string) int {
+		t.Helper()
+		for _, c := range getStateTest(t, h, cookie).Children {
+			if c.ID == child {
+				return c.PointsBalance
+			}
+		}
+		t.Fatalf("child %s is missing from /state", child)
+		return 0
+	}
+	if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-10-12"}, {"subject", "语文"}, {"description", "抄写生字"},
+	}, nil); w.Code != 200 {
+		t.Fatalf("create homework: %d %s", w.Code, w.Body.String())
+	}
+	hid := homeworkDay(t, h, parent, "2026-10-12").Items[0].ID
+	toggle := func(cookie *http.Cookie, done bool) int {
+		t.Helper()
+		w := doJSON(t, h, "POST", "/api/v1/homework/"+hid+"/done", map[string]any{"date": "2026-10-12", "done": done}, cookie, "")
+		if w.Code != 200 {
+			t.Fatalf("toggle: %d %s", w.Code, w.Body.String())
+		}
+		var out struct {
+			Awarded int `json:"awarded"`
+		}
+		if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Awarded
+	}
+	firstBalance := balance(first, getStateTest(t, h, first).ActiveChildID)
+	// 当天只有这一科：勾上拿这一科的 5 分 + 当天全完成的 5 分。
+	if awarded := toggle(first, true); awarded != 2*homeworkDonePoints {
+		t.Fatalf("first child: awarded %d, want %d", awarded, 2*homeworkDonePoints)
+	}
+	if homeworkDay(t, h, second, "2026-10-12").Items[0].Done {
+		t.Fatal("the second child inherited the first child's tick")
+	}
+	if awarded := toggle(second, true); awarded != 2*homeworkDonePoints {
+		t.Fatalf("second child: awarded %d, want %d", awarded, 2*homeworkDonePoints)
+	}
+	if got := balance(first, getStateTest(t, h, first).ActiveChildID); got != firstBalance+2*homeworkDonePoints {
+		t.Fatalf("second child's tick changed the first child's balance: %d -> %d", firstBalance, got)
+	}
+	if awarded := toggle(first, false); awarded != -2*homeworkDonePoints {
+		t.Fatalf("unchecking the first child: awarded %d", awarded)
+	}
+	if !homeworkDay(t, h, second, "2026-10-12").Items[0].Done {
+		t.Fatal("unchecking on one child cleared the other child's tick")
+	}
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM point_ledger WHERE child_id=? AND reference_type IN ('homework','homework_bonus')`, created.ID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Fatalf("the second child should keep its own two ledger rows, got %d", rows)
+	}
+}
+
+// oversizedPNG 只写 PNG 头：签名 + 合法的 IHDR（含 CRC）。解码器读尺寸只需要这些，
+// 所以不必真的分配一张 60000×60000 的位图就能验证「解码前先卡像素」。
+func oversizedPNG(width, height uint32) []byte {
+	var buf bytes.Buffer
+	buf.Write([]byte("\x89PNG\r\n\x1a\n"))
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:], width)
+	binary.BigEndian.PutUint32(ihdr[4:], height)
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 6 // RGBA
+	chunk := append([]byte("IHDR"), ihdr...)
+	var word [4]byte
+	binary.BigEndian.PutUint32(word[:], uint32(len(ihdr)))
+	buf.Write(word[:])
+	buf.Write(chunk)
+	binary.BigEndian.PutUint32(word[:], crc32.ChecksumIEEE(chunk))
+	buf.Write(word[:])
+	buf.Write([]byte{0, 0, 0, 0})
+	iend := []byte("IEND")
+	buf.Write(iend)
+	binary.BigEndian.PutUint32(word[:], crc32.ChecksumIEEE(iend))
+	buf.Write(word[:])
+	return buf.Bytes()
+}
+
+// 压缩炸弹的守卫：解码前先读尺寸。超过上限的图片和格式不支持一样被跳过并回报，
+// 不拖垮整批，也不会在解码器里把内存吃光。
+func TestHomeworkSkipsImagesOverThePixelLimit(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
+		{"date", "2026-10-13"}, {"subject", "美术"}, {"description", "画一张"},
+	}, []homeworkFile{{name: "huge.png", content: oversizedPNG(60000, 60000)}})
+	if w.Code != 200 {
+		t.Fatalf("create homework: %d %s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Skipped []string `json:"skipped"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Skipped) != 1 || out.Skipped[0] != "huge.png" {
+		t.Fatalf("oversized image should be reported as skipped, got %v", out.Skipped)
+	}
+	items := homeworkDay(t, h, parent, "2026-10-13").Items
+	if len(items) != 1 || len(items[0].Media) != 0 {
+		t.Fatalf("skipped image must not be stored: %+v", items)
+	}
+}
+
+// 媒体只对「凭证的主人」与家长开放：同一个家庭里，孩子 A 拿到孩子 B 的附件 id 也不该
+// 能读出来（家庭级过滤挡不住这种越权）。家长端要审作业与心愿，所以家长放行。
+func TestMediaIsScopedToTheOwningChild(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	first := childCookie(t, h, "")
+	taskID := ""
+	for _, task := range getStateTest(t, h, first).Tasks {
+		if task.Status == "todo" {
+			taskID = task.ID
+			break
+		}
+	}
+	if taskID == "" {
+		t.Fatal("demo seed has no todo task to submit")
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, multipartRequest(t, "POST", "/api/v1/tasks/"+taskID+"/submit", first, "media-scope-submit", nil, map[string][]byte{"photo.png": solidPNG(t, 24, 24)}))
+	if w.Code != 200 {
+		t.Fatalf("submit: %d %s", w.Code, w.Body.String())
+	}
+	attID := ""
+	for _, sub := range getStateTest(t, h, parent).Submissions {
+		if len(sub.Attachments) > 0 {
+			attID = sub.Attachments[0].ID
+			break
+		}
+	}
+	if attID == "" {
+		t.Fatal("submission has no attachment")
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/children/", map[string]any{"name": "豆豆", "avatar": "🐣", "color": "#6fb7c9"}, parent, ""); w.Code != 200 {
+		t.Fatalf("create second child: %d %s", w.Code, w.Body.String())
+	}
+	children := getStateTest(t, h, parent).Children
+	second := sessionFor(t, s, familyOf(t, s), "child", children[1].ID, children[1].ID)
+	get := func(cookie *http.Cookie) int {
+		r := httptest.NewRequest("GET", "/api/v1/media/"+attID, nil)
+		r.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Code
+	}
+	if code := get(first); code != 200 {
+		t.Fatalf("owner should read the attachment: %d", code)
+	}
+	if code := get(parent); code != 200 {
+		t.Fatalf("parent should read the attachment: %d", code)
+	}
+	if code := get(second); code != 404 {
+		t.Fatalf("another child must not read the attachment: %d", code)
+	}
+}
+
+// familyOf 取被服务家庭的 id（测试里只有一行 families 会被 resolvedFamily 选中）。
+func familyOf(t *testing.T, s *Server) string {
+	t.Helper()
+	var family string
+	if err := s.db.QueryRow(`SELECT id FROM families ORDER BY created_at LIMIT 1`).Scan(&family); err != nil {
+		t.Fatal(err)
+	}
+	return family
 }
 
 // 006 重建 children 放开余额下限。迁移在空库上跑过一遍不代表带数据的库能跑：那句
@@ -2243,5 +2463,83 @@ func TestLegacyDatabaseUpgradeKeepsEveryRow(t *testing.T) {
 	}
 	if ledger != 0 {
 		t.Fatalf("cascade stopped working after the rebuild: %d", ledger)
+	}
+}
+
+// 009 把「家庭级」的完成勾选改成按孩子：旧的 done 行必须落到当初拿分的那个孩子
+// 头上（不是家庭里最早的孩子），台账 key 也要一起加上孩子，否则第二个孩子勾
+// 同一科会被唯一键吞掉；没有孩子的家庭里的孤儿行直接丢弃。
+func TestHomeworkDoneRebuildAttributesLegacyRowsToTheChildThatEarnedThem(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{DBPath: filepath.Join(dir, "done-child.db"), MediaDir: filepath.Join(dir, "media")}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s, err := Open(cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := func(query string) {
+		t.Helper()
+		if _, err := s.db.Exec(query); err != nil {
+			t.Fatalf("%v: %s", err, query)
+		}
+	}
+	exec(`INSERT INTO families(id,code,name,timezone,created_at) VALUES('family-done','DONE','Done','Asia/Shanghai','2025-01-01T00:00:00Z')`)
+	exec(`INSERT INTO families(id,code,name,timezone,created_at) VALUES('family-empty','EMPTY','Empty','Asia/Shanghai','2025-01-02T00:00:00Z')`)
+	exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,created_at) VALUES('child-older','family-done','Older','x','#000',1,0,'2025-01-01T00:00:00Z')`)
+	exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,created_at) VALUES('child-earner','family-done','Earner','x','#000',1,0,'2025-02-01T00:00:00Z')`)
+	exec(`INSERT INTO homework(id,family_id,date,end_date,subject,description,created_at) VALUES('hw-legacy','family-done','2026-10-01','2026-10-07','语文','','2026-09-30T00:00:00Z')`)
+	exec(`INSERT INTO homework(id,family_id,date,end_date,subject,description,created_at) VALUES('hw-orphan','family-empty','2026-10-01','2026-10-01','语文','','2026-09-30T00:00:00Z')`)
+	// 退回 009 之前的样子：homework_done 没有 child_id，台账 key 也不带孩子。
+	exec(`DROP TABLE homework_done`)
+	exec(`CREATE TABLE homework_done(family_id TEXT NOT NULL REFERENCES families(id) ON DELETE CASCADE, homework_id TEXT NOT NULL REFERENCES homework(id) ON DELETE CASCADE, date TEXT NOT NULL, completed_at TEXT NOT NULL, PRIMARY KEY(homework_id,date))`)
+	exec(`INSERT INTO homework_done VALUES('family-done','hw-legacy','2026-10-02','2026-10-02T10:00:00Z')`)
+	exec(`INSERT INTO homework_done VALUES('family-empty','hw-orphan','2026-10-01','2026-10-01T10:00:00Z')`)
+	exec(`INSERT INTO point_ledger VALUES('led-hw','family-done','child-earner',5,'earned','homework','hw-legacy:2026-10-02','完成「语文」','2026-10-02T10:00:00Z')`)
+	exec(`INSERT INTO point_ledger VALUES('led-bonus','family-done','child-earner',5,'earned','homework_bonus','2026-10-02','当天作业全部完成','2026-10-02T10:00:00Z')`)
+	exec(`INSERT INTO point_ledger VALUES('led-manual','family-done','child-earner',20,'earned','manual','led-manual','家长奖励','2026-10-02T11:00:00Z')`)
+	exec(`DELETE FROM schema_migrations WHERE version=9`)
+	if err = s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = Open(cfg, logger)
+	if err != nil {
+		t.Fatalf("upgrade to 009: %v", err)
+	}
+	defer s.Close()
+
+	var childID string
+	if err = s.db.QueryRow(`SELECT child_id FROM homework_done WHERE homework_id='hw-legacy'`).Scan(&childID); err != nil {
+		t.Fatal(err)
+	}
+	if childID != "child-earner" {
+		t.Fatalf("legacy done row went to %q, want the child the ledger credits", childID)
+	}
+	var rows int
+	if err = s.db.QueryRow(`SELECT COUNT(*) FROM homework_done`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("homework_done rows=%d, want the childless family's row dropped", rows)
+	}
+	for id, want := range map[string]string{
+		"led-hw":     "hw-legacy:2026-10-02:child-earner",
+		"led-bonus":  "2026-10-02:child-earner",
+		"led-manual": "led-manual",
+	} {
+		var ref string
+		if err = s.db.QueryRow(`SELECT reference_id FROM point_ledger WHERE id=?`, id).Scan(&ref); err != nil {
+			t.Fatal(err)
+		}
+		if ref != want {
+			t.Fatalf("%s reference_id=%q, want %q", id, ref, want)
+		}
+	}
+	// 迁移之后，家庭里的另一个孩子勾同一天不再撞唯一键。
+	if _, err = s.db.Exec(`INSERT INTO homework_done VALUES('family-done','hw-legacy','child-older','2026-10-02','2026-10-02T12:00:00Z')`); err != nil {
+		t.Fatalf("second child tick after 009: %v", err)
+	}
+	if _, err = s.db.Exec(`INSERT INTO point_ledger VALUES('led-hw-older','family-done','child-older',5,'earned','homework','hw-legacy:2026-10-02:child-older','完成「语文」','2026-10-02T12:00:00Z')`); err != nil {
+		t.Fatalf("second child credit after 009: %v", err)
 	}
 }

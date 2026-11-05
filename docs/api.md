@@ -103,9 +103,9 @@
 | `PUT /api/v1/homework/{id}` | 家长 | multipart 编辑，`200 {id, skipped}` |
 | `DELETE /api/v1/homework/{id}` | 家长 | `204`，级联删除媒体 |
 | `DELETE /api/v1/homework/{id}/media/{mediaID}` | 家长 | 删单个附件与文件，`204` |
-| `POST /api/v1/homework/{id}/done` | 任意 | 卡片上的「完成」勾选，JSON `{date, done}`，`200 {id, awarded}`；按天记录，幂等（重放不再加/扣分），不加 `Idempotency-Key` |
+| `POST /api/v1/homework/{id}/done` | 任意 | 卡片上的「完成」勾选，JSON `{date, done}`，`200 {id, awarded}`；按「孩子 + 日期」记录，幂等（重放不再加/扣分），不加 `Idempotency-Key`；`date` 晚于家庭本地今天、或会话没选中孩子 → `400 invalid_request` |
 
-写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
+写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。解码前先读图片尺寸，超过 4000 万像素（`homeworkMaxPixels`）的图会被跳过，和格式不支持一样列进 `skipped`，避免一张压得很小的「解码炸弹」把进程内存撑爆。
 
 **假期作业。** `date`..`end_date` 是闭区间，这段时间内的每一天读到的都是同一条作业（`date<=? AND end_date>=?`），所以家长在假期前设置一次即可。服务端内置国办放假表（2025–2026 的法定假期区间与调休上班日），把每一段连续放假的日期合并成一个 `Holiday`：`{name,start,end,days,beforeFrom}`，`days` 是这段假期的自然天数，`beforeFrom` 为 `true` 表示这一天本身还是工作日、只是紧挨着假期（「假期前一天」，例如周五之于周末）。表单据此预填整段范围；表外年份退化为只按周末合并。校验：`end_date` 必须是 `YYYY-MM-DD`、不得早于 `date`、跨度上限 21 天（`homeworkMaxRangeDays`），否则 `400 invalid_request`（`end_date must be YYYY-MM-DD` / `end_date must not be before date` / `date range is too long`）。
 
@@ -115,13 +115,13 @@
 {"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-01","endDate":"2026-10-07","subject":"语文","description":"朗读第 5 课","createdAt":"2026-09-30T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}],"done":false}],"holiday":{"name":"国庆节","start":"2026-10-01","end":"2026-10-07","days":7,"beforeFrom":false}}
 ```
 
-`done` 是「看的那一天」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾，所以同一条作业在不同日期读到的 `done` 可能不同。
+`done` 是「看的那一天 + 看的那个人」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾，兄弟姐妹各自勾同一天也互不影响（`homework_done` 的主键是 `(homework_id,date,child_id)`），所以同一条作业在不同日期、不同孩子的会话里读到的 `done` 都可能不同。
 
-**完成积分。** 勾上一科当天完成 +5，当天在区间内的作业全部勾完再额外 +5；`awarded` 是这次真正进出的分数（勾上 5/10，取消 −5/−10，重放 0），前端据此给反馈。积分记在勾选的那个孩子（会话选中的孩子）头上，走的是和确认任务同一条 `point_ledger`：`reference_type` 为 `homework`（`reference_id` = `<作业 id>:<日期>`）与 `homework_bonus`（`reference_id` = 日期），`UNIQUE(family_id,reference_type,reference_id)` 保证同一科同一天只会有一笔、当天奖励只会有一笔。取消完成时删掉这两笔台账行并把分数扣回（积分可能已经被花掉，所以余额可以扣成负数；成长值下限 0。负余额不能兑换心愿，`redeemWish` 仍然要求 `points_balance>=points_cost`）。作业删除后已发的积分不会被追回，和删除任务保留历史台账一致。
+**完成积分。** 勾上一科当天完成 +5，当天在区间内的作业全部勾完再额外 +5；`awarded` 是这次真正进出的分数（勾上 5/10，取消 −5/−10，重放 0），前端据此给反馈。积分记在勾选的那个孩子（会话选中的孩子）头上，走的是和确认任务同一条 `point_ledger`：`reference_type` 为 `homework`（`reference_id` = `<作业 id>:<日期>:<孩子 id>`）与 `homework_bonus`（`reference_id` = `<日期>:<孩子 id>`），`UNIQUE(family_id,reference_type,reference_id)` 保证同一科同一天每个孩子只会有一笔、每个孩子的当天奖励只会有一笔。取消完成时删掉这两笔台账行并把分数扣回（按台账行记录的 `child_id`，所以取消的是当初得分那个孩子的分；积分可能已经被花掉，所以余额可以扣成负数；成长值下限 0。负余额不能兑换心愿，`redeemWish` 仍然要求 `points_balance>=points_cost`）。作业删除后已发的积分不会被追回，和删除任务保留历史台账一致。
 
 ## 媒体
 
-`GET /api/v1/media/{id}` → 原始字节，`Content-Disposition: inline`，支持 Range。需要登录且只能读本家庭的媒体。前端把 `url` 直接交给 `<img>` / `<video>`，浏览器会带上同一个会话 cookie。
+`GET /api/v1/media/{id}` → 原始字节，`Content-Disposition: inline`，支持 Range。需要登录且只能读本家庭的媒体；任务提交与心愿完成产生的附件还要求「是家长，或会话选中的正是它的主人」，否则一律 404（`homework_media` 属于家庭，仍对全家可读）。前端把 `url` 直接交给 `<img>` / `<video>`，浏览器会带上同一个会话 cookie。
 
 ## 统计
 
@@ -136,7 +136,7 @@
 }
 ```
 
-两个参数都是家庭本地日期、闭区间。只传一个、`from > to`、日期不合法或跨度超过 92 天都返回 `400 invalid_request`。省略时是最近 7 天。
+两个参数都是家庭本地日期、闭区间。只传一个、`from > to`、日期不合法或跨度超过 92 天都返回 `400 invalid_request`。省略时是最近 7 天。统计窗口在 SQL 里就收窄（确认记录的 `reviewed_at`、台账的 `created_at` 都限定在窗口内），请求代价跟窗口大小相关，不随家庭历史增长。
 
 ## 健康检查
 

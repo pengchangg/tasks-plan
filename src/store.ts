@@ -360,19 +360,28 @@ export function useAppStore() {
       void run(() => request("/auth/child", { method: "POST" })),
     setActiveChild: (childId: string) =>
       void run(() => request("/session/child", json("PATCH", { childId }))),
-    saveChild: (draft: ChildDraft, id?: string) =>
-      void run(() =>
-        request(`/children/${id ?? ""}`, json(id ? "PUT" : "POST", draft)),
-      ),
+    saveChild: (draft: ChildDraft, id?: string): Promise<boolean> =>
+      run(async () => {
+        await request(
+          `/children/${id ?? ""}`,
+          json(id ? "PUT" : "POST", draft),
+        );
+        return true;
+      }).then((result) => result === true),
     deleteChild: (id: string) =>
       void run(() => request(`/children/${id}`, json("DELETE"))),
-    awardPoints: (childId: string, amount: number, note = "") =>
-      void run(() =>
-        request(
+    awardPoints: (
+      childId: string,
+      amount: number,
+      note = "",
+    ): Promise<boolean> =>
+      run(async () => {
+        await request(
           `/children/${childId}/points`,
           json("POST", { amount, note }, true),
-        ),
-      ),
+        );
+        return true;
+      }).then((result) => result === true),
     // 孩子端一键提交：服务端仍接受 note/files，但任务卡不再收集证据，所以这里
     // 只发一个空 note 保证请求体是 multipart（非 multipart 会被 413 拒掉）。
     submitTask: (taskId: string) =>
@@ -426,26 +435,29 @@ export function useAppStore() {
       completed: boolean,
       note = "",
       attachments: Attachment[] = [],
-    ) =>
-      void run(() => {
+    ): Promise<boolean> =>
+      run(async () => {
         const body = new FormData();
         body.set("completed", completed ? "true" : "false");
         if (note) body.set("note", note);
         for (const attachment of attachments) {
           if (attachment.file) body.append("files", attachment.file);
         }
-        return request(`/redemptions/${id}`, { method: "PATCH", body });
-      }),
-    saveTask: (draft: TaskDraft, id?: string) =>
-      void run(() =>
-        request(`/tasks/${id ?? ""}`, json(id ? "PUT" : "POST", draft)),
-      ),
+        await request(`/redemptions/${id}`, { method: "PATCH", body });
+        return true;
+      }).then((result) => result === true),
+    saveTask: (draft: TaskDraft, id?: string): Promise<boolean> =>
+      run(async () => {
+        await request(`/tasks/${id ?? ""}`, json(id ? "PUT" : "POST", draft));
+        return true;
+      }).then((result) => result === true),
     deleteTask: (id: string) =>
       void run(() => request(`/tasks/${id}`, json("DELETE"))),
-    saveWish: (draft: WishDraft, id?: string) =>
-      void run(() =>
-        request(`/wishes/${id ?? ""}`, json(id ? "PUT" : "POST", draft)),
-      ),
+    saveWish: (draft: WishDraft, id?: string): Promise<boolean> =>
+      run(async () => {
+        await request(`/wishes/${id ?? ""}`, json(id ? "PUT" : "POST", draft));
+        return true;
+      }).then((result) => result === true),
     deleteWish: (id: string) =>
       void run(() => request(`/wishes/${id}`, json("DELETE"))),
     toggleWish: (id: string) => {
@@ -462,12 +474,14 @@ export function useAppStore() {
       };
       void run(() => request(`/wishes/${id}`, json("PUT", body)));
     },
-    setHomeworkDate: (date: string) => void loadHomework(date),
+    // 必须是 loadHomework 本身（useCallback([]) 的稳定引用）：三个作业屏的 effect
+    // 都把它放进依赖里，包一层箭头函数会让它们每次渲染都重跑。
+    setHomeworkDate: loadHomework,
     // 作业是 multipart 写入：字段名与 Go 侧的 FormValue/Value 一一对应，files 与
     // remove_media 都是可重复字段。成功提示在操作内部 setMessage，否则会被 run 的
     // 通用失败文案/空文案覆盖。
-    saveHomework: (draft: HomeworkDraft, id?: string) =>
-      void run(async () => {
+    saveHomework: (draft: HomeworkDraft, id?: string): Promise<boolean> =>
+      run(async () => {
         const body = new FormData();
         body.set("date", draft.date);
         body.set("end_date", draft.endDate || draft.date);
@@ -494,12 +508,14 @@ export function useAppStore() {
               ? `已保存，但跳过了 ${saved.skipped.length} 个不支持的文件：${saved.skipped.join("、")}`
               : "作业已保存",
           );
-      }),
-    deleteHomework: (id: string) =>
-      void run(async () => {
+        return true;
+      }).then((result) => result === true),
+    deleteHomework: (id: string): Promise<boolean> =>
+      run(async () => {
         await request(`/homework/${id}`, json("DELETE"));
         if (await loadHomework(homework.date)) setOkMessage("作业已删除");
-      }),
+        return true;
+      }).then((result) => result === true),
     // 完成勾选按「看的那一天」记录，所以假期作业可以逐天勾；勾上每科 +5、当天全部
     // 完成再 +5（服务端算账）。先把本地那一行翻过来（重新读整天的作业会让受控勾选
     // 在往返期间跳回未勾），再发这次写入，并把服务端算出的 awarded 回给调用方，
@@ -513,15 +529,26 @@ export function useAppStore() {
         ),
       }));
       return run(async () => {
-        const response = await request(
-          `/homework/${id}/done`,
-          json("POST", { date, done }),
-        );
-        const { awarded = 0 } = (await response.json()) as {
-          awarded?: number;
-        };
-        if (awarded < 0) setOkMessage(`已取消完成，扣回 ${-awarded} 积分`);
-        return awarded;
+        try {
+          const response = await request(
+            `/homework/${id}/done`,
+            json("POST", { date, done }),
+          );
+          const { awarded = 0 } = (await response.json()) as {
+            awarded?: number;
+          };
+          if (awarded < 0) setOkMessage(`已取消完成，扣回 ${-awarded} 积分`);
+          return awarded;
+        } catch (error) {
+          // 刷新只拉 /state，不拉这一天作业；不回滚的话勾选会停在服务端没记住的状态。
+          setHomework((prev) => ({
+            ...prev,
+            items: prev.items.map((item) =>
+              item.id === id ? { ...item, done: !done } : item,
+            ),
+          }));
+          throw error;
+        }
       });
     },
   };

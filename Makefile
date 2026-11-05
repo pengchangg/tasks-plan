@@ -86,24 +86,33 @@ install-hooks: ## 安装提交前钩子（.githooks/pre-commit → make precommi
 	git config core.hooksPath .githooks
 	@echo "✔ 已启用 .githooks/pre-commit（提交前跑 make test build）"
 
-deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd64 + rsync + 重启用户服务 + 健康校验
+deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd64 + rsync + 重启用户服务 + 健康校验（校验失败自动回滚）
 	@command -v npm >/dev/null 2>&1 || { echo "✗ 未找到 npm：需要 Node.js 22.22.2+"; exit 1; }
 	@[ -d node_modules ] || { echo "✗ 依赖未安装，先运行: make install"; exit 1; }
 	@set -euo pipefail; \
 	STAGE=$$(mktemp -d "$(DEPLOY_STAGE).XXXXXX"); \
-	trap 'rm -rf "$$STAGE"' EXIT; \
+	SWAPPED=0; \
+	rollback() { \
+	  [ "$$SWAPPED" = "1" ] || return 0; \
+	  echo "▶ 校验未通过，回滚到上一版"; \
+	  ssh $(SSH_OPTS) $(DEPLOY_HOST) 'if [ -f $(DEPLOY_DIR)/bin/growjoy.prev ]; then mv -f $(DEPLOY_DIR)/bin/growjoy.prev $(DEPLOY_DIR)/bin/growjoy; fi; if [ -d $(DEPLOY_DIR)/dist.prev ]; then rm -rf $(DEPLOY_DIR)/dist && mv $(DEPLOY_DIR)/dist.prev $(DEPLOY_DIR)/dist; fi; systemctl --user restart $(DEPLOY_UNIT)' || true; \
+	}; \
+	cleanup() { STATUS=$$?; rollback; rm -rf "$$STAGE"; exit $$STATUS; }; \
+	trap cleanup EXIT; \
 	VERSION=$$(git describe --always --dirty); \
 	echo "▶ 构建 SPA（dist/）与 linux/amd64 二进制（version=$${VERSION}）"; \
 	npm run build; \
 	[ -f dist/index.html ] || { echo "✗ dist/index.html 缺失：SPA 没有构建出来（spaHandler 对任何路径都回 index.html，缺了也不会 404）"; exit 1; }; \
-	ASSET=$$(basename "$$(ls dist/assets/*.js | head -1)"); \
+	ASSET=$$(grep -o 'assets/[^"]*\.js' dist/index.html | head -1); \
+	[ -n "$$ASSET" ] || { echo "✗ dist/index.html 里没有入口 JS 引用"; exit 1; }; \
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$${VERSION}" -o "$$STAGE/growjoy" ./cmd/growjoy; \
 	file "$$STAGE/growjoy" | grep -q 'ELF 64-bit.*x86-64' || { echo "✗ 产物不是 linux/amd64 ELF"; exit 1; }; \
 	echo "▶ 传输 dist/ 与二进制到 $(DEPLOY_HOST):$(DEPLOY_DIR)"; \
-	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'mkdir -p $(DEPLOY_DIR)/bin $(DEPLOY_DIR)/dist'; \
+	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'mkdir -p $(DEPLOY_DIR)/bin $(DEPLOY_DIR)/dist; rm -rf $(DEPLOY_DIR)/bin/growjoy.prev $(DEPLOY_DIR)/dist.prev; if [ -f $(DEPLOY_DIR)/bin/growjoy ]; then cp -p $(DEPLOY_DIR)/bin/growjoy $(DEPLOY_DIR)/bin/growjoy.prev; fi; if [ -d $(DEPLOY_DIR)/dist ]; then cp -a $(DEPLOY_DIR)/dist $(DEPLOY_DIR)/dist.prev; fi'; \
 	rsync -a --delete -e "ssh $(SSH_OPTS)" dist/ $(DEPLOY_HOST):$(DEPLOY_DIR)/dist/; \
 	rsync -a -e "ssh $(SSH_OPTS)" "$$STAGE/growjoy" $(DEPLOY_HOST):$(DEPLOY_DIR)/bin/growjoy; \
 	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'chmod +x $(DEPLOY_DIR)/bin/growjoy && systemctl --user restart $(DEPLOY_UNIT)'; \
+	SWAPPED=1; \
 	echo "▶ 等待 $(DEPLOY_URL)/health/ready"; \
 	CODE=; \
 	for i in $$(seq 1 60); do \
@@ -119,12 +128,12 @@ deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd6
 	  *) echo "✗ 远端版本与本次构建不一致（期望 $${VERSION}）"; exit 1;; \
 	esac; \
 	# 同一个 commit 重复部署时 version 字符串不变，光看它分不清新进程与旧进程；\
-	# SPA 入口要真的指向这次构建出来的那个 JS 产物，才算这轮 dist/ 上线了。\
-	SERVED=$$(curl -sS --max-time 5 "$(DEPLOY_URL)/" | grep -o "assets/index-[A-Za-z0-9_-]*\.js" | head -1); \
-	case "$$SERVED" in \
-	  *"$$ASSET") echo "✔ 已部署并复检通过：$(DEPLOY_URL) version=$${VERSION} asset=$$ASSET";; \
-	  *) echo "✗ 首页仍在引用 $$SERVED（期望 $$ASSET）：dist/ 可能没落盘或缓存未清"; exit 1;; \
-	esac
+	# SPA 入口要真的指向这次构建出来的那个 JS 产物，才算这轮 dist/ 上线了（入口从\
+	# index.html 解析，不再靠「assets 目录里第一个 js」，拆分 chunk 后也不会认错）。\
+	SERVED=$$(curl -sS --max-time 5 "$(DEPLOY_URL)/" | grep -o 'assets/[^"]*\.js' | head -1); \
+	if [ "$$SERVED" != "$$ASSET" ]; then echo "✗ 首页仍在引用 $${SERVED:-（无）}（期望 $$ASSET）：dist/ 可能没落盘或缓存未清"; exit 1; fi; \
+	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'rm -rf $(DEPLOY_DIR)/bin/growjoy.prev $(DEPLOY_DIR)/dist.prev'; \
+	echo "✔ 已部署并复检通过：$(DEPLOY_URL) version=$${VERSION} asset=$$ASSET"
 
 logs: ## 跟随后端开发日志
 	tail -f $(DEV_LOG)

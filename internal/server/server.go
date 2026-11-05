@@ -1280,7 +1280,13 @@ func (s *Server) deleteChild(w http.ResponseWriter, r *http.Request) {
 	mediaFiles := mediaForChild(r.Context(), tx, x.FamilyID, cid)
 	var replacement string
 	if err = tx.QueryRow(`SELECT id FROM children WHERE family_id=? AND id<>? ORDER BY created_at LIMIT 1`, x.FamilyID, cid).Scan(&replacement); err != nil {
-		problem(w, 409, "last_child", "at least one child is required")
+		if errors.Is(err, sql.ErrNoRows) {
+			problem(w, 409, "last_child", "at least one child is required")
+			return
+		}
+		// 查询本身失败（连接、锁）不是「只剩一个孩子」：按 409 回会把内部故障
+		// 说成业务规则，还会让人以为数据没问题。
+		s.internalError(w, r, err)
 		return
 	}
 	if _, err = tx.Exec(`DELETE FROM sessions WHERE family_id=? AND actor_type='child' AND actor_id=?`, x.FamilyID, cid); err == nil {
@@ -2257,29 +2263,32 @@ func (s *Server) completeRedemption(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	// 一次完成请求带的是「这次完成」的全部凭证，而不是增量：重放或再点一次应当替换
+	// 上一次的备注与附件，不能越叠越多。旧行在事务里删、旧文件在提交后删。
 	var stale []string
-	if !completed {
-		var rows *sql.Rows
-		rows, err = tx.Query(`SELECT storage_name FROM attachments WHERE family_id=? AND redemption_id=?`, x.FamilyID, rid)
-		for err == nil && rows.Next() {
-			var name string
-			if err = rows.Scan(&name); err == nil {
-				stale = append(stale, name)
-			}
+	rows, err := tx.Query(`SELECT storage_name FROM attachments WHERE family_id=? AND redemption_id=?`, x.FamilyID, rid)
+	for err == nil && rows.Next() {
+		var name string
+		if err = rows.Scan(&name); err == nil {
+			stale = append(stale, name)
 		}
-		if rows != nil {
-			rows.Close()
+	}
+	if rows != nil {
+		rows.Close()
+		if cerr := rows.Err(); err == nil {
+			err = cerr
 		}
+	}
+	if err == nil {
+		_, err = tx.Exec(`DELETE FROM attachments WHERE family_id=? AND redemption_id=?`, x.FamilyID, rid)
 	}
 	now := nowText(s.now())
 	var res sql.Result
-	if err == nil && completed {
-		res, err = tx.Exec(`UPDATE redemptions SET completed_at=?,completed_note=? WHERE id=? AND family_id=? AND child_id=?`, now, nullString(storedNote), rid, x.FamilyID, x.SelectedChildID)
-	}
-	if err == nil && !completed {
-		res, err = tx.Exec(`UPDATE redemptions SET completed_at=NULL,completed_note=NULL WHERE id=? AND family_id=? AND child_id=?`, rid, x.FamilyID, x.SelectedChildID)
-		if err == nil {
-			_, err = tx.Exec(`DELETE FROM attachments WHERE family_id=? AND redemption_id=?`, x.FamilyID, rid)
+	if err == nil {
+		if completed {
+			res, err = tx.Exec(`UPDATE redemptions SET completed_at=?,completed_note=? WHERE id=? AND family_id=? AND child_id=?`, now, nullString(storedNote), rid, x.FamilyID, x.SelectedChildID)
+		} else {
+			res, err = tx.Exec(`UPDATE redemptions SET completed_at=NULL,completed_note=NULL WHERE id=? AND family_id=? AND child_id=?`, rid, x.FamilyID, x.SelectedChildID)
 		}
 	}
 	if err != nil {
@@ -2316,13 +2325,20 @@ func (s *Server) completeRedemption(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) media(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
-	var storage, name, mimeType string
-	var created string
-	err := s.db.QueryRow(`SELECT storage_name,original_name,mime_type,created_at FROM attachments WHERE id=? AND family_id=?`, chi.URLParam(r, "id"), x.FamilyID).Scan(&storage, &name, &mimeType, &created)
+	mediaID := chi.URLParam(r, "id")
+	var storage, name, mimeType, created, owner string
+	err := s.db.QueryRow(`SELECT a.storage_name,a.original_name,a.mime_type,a.created_at,COALESCE(sub.child_id,red.child_id,'') FROM attachments a LEFT JOIN task_submissions sub ON sub.id=a.submission_id LEFT JOIN redemptions red ON red.id=a.redemption_id WHERE a.id=? AND a.family_id=?`, mediaID, x.FamilyID).Scan(&storage, &name, &mimeType, &created, &owner)
+	if err == nil && owner != "" && x.ActorType != "parent" && owner != x.SelectedChildID {
+		// 同一家庭里孩子之间也不能互读凭证：只按 family_id 过滤的话，知道 id 就能看
+		// 兄弟提交的照片。家长端要审作业与心愿，所以家长放行。
+		problem(w, 404, "not_found", "media not found")
+		return
+	}
 	if err != nil {
 		// 作业媒体不与 attachments 共用一张表（attachments 的 submission/redemption
-		// 二选一约束容不下第三个所有者），所以这里退一步查作业表。
-		err = s.db.QueryRow(`SELECT storage_name,original_name,mime_type,created_at FROM homework_media WHERE id=? AND family_id=?`, chi.URLParam(r, "id"), x.FamilyID).Scan(&storage, &name, &mimeType, &created)
+		// 二选一约束容不下第三个所有者），所以这里退一步查作业表；作业是家长布置的，
+		// 同一家庭的每个孩子都能看。
+		err = s.db.QueryRow(`SELECT storage_name,original_name,mime_type,created_at FROM homework_media WHERE id=? AND family_id=?`, mediaID, x.FamilyID).Scan(&storage, &name, &mimeType, &created)
 	}
 	if err != nil {
 		problem(w, 404, "not_found", "media not found")
@@ -2359,6 +2375,11 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	startDate, endDate := from.Format("2006-01-02"), to.Format("2006-01-02")
+	// 窗口下推到 SQL：台账与提交会一直变长，把整份历史读进内存再过滤只是把慢藏在后面。
+	// reviewed_at/created_at 都是 UTC 的 RFC3339Nano；边界用不带 Z 的秒级字符串做字典序
+	// 比较——行落在边界那一秒内时字符串更长、排在边界之后，所以「起点含、终点不含」精确。
+	windowStart := time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, loc).UTC().Format("2006-01-02T15:04:05")
+	windowEnd := time.Date(to.Year(), to.Month(), to.Day()+1, 0, 0, 0, 0, loc).UTC().Format("2006-01-02T15:04:05")
 	// Instance rows only exist for the days that were read, so a historical
 	// window would count zero scheduled tasks; derive the number from the
 	// templates instead. The query holds the pool's single connection, so it
@@ -2403,7 +2424,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	}
 	categoryCounts := map[string]int{}
 	completed := 0
-	rows, err := s.db.Query(`SELECT i.category,s.reviewed_at FROM task_submissions s JOIN task_instances i ON i.id=s.task_instance_id WHERE s.family_id=? AND s.child_id=? AND s.approved=1 AND s.reviewed_at IS NOT NULL`, x.FamilyID, cid)
+	rows, err := s.db.Query(`SELECT i.category,s.reviewed_at FROM task_submissions s JOIN task_instances i ON i.id=s.task_instance_id WHERE s.family_id=? AND s.child_id=? AND s.approved=1 AND s.reviewed_at IS NOT NULL AND s.reviewed_at>=? AND s.reviewed_at<?`, x.FamilyID, cid, windowStart, windowEnd)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
@@ -2434,7 +2455,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	earned, spent := 0, 0
-	rows, err = s.db.Query(`SELECT amount,created_at FROM point_ledger WHERE family_id=? AND child_id=?`, x.FamilyID, cid)
+	rows, err = s.db.Query(`SELECT amount,created_at FROM point_ledger WHERE family_id=? AND child_id=? AND created_at>=? AND created_at<?`, x.FamilyID, cid, windowStart, windowEnd)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
