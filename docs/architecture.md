@@ -27,7 +27,7 @@ flowchart LR
 | `cmd/growjoy/main.go` | 唯一入口与唯一的 `GROWJOY_*` 读取处；子命令 `serve` / `admin create-family` / `seed-demo` / `backup` / `gc`；`http.Server{ReadHeaderTimeout: 10s}` + 优雅关闭；每小时的清理 ticker |
 | `internal/server/server.go` | `Config`/`Server`、`Open`/`applyMigrations`、整个 chi 路由、全部 HTTP 处理器、认证、上传、DTO、统计 |
 | `internal/server/admin.go` | 非 HTTP 操作：`CreateFamily`、`SeedDemo`、`EnsureDemo` |
-| `internal/server/homework.go` | 作业资源：读某一天（`date..end_date` 闭区间，一天就能读到整段假期作业）、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85） |
+| `internal/server/homework.go` | 作业资源：读某一天（`date..end_date` 闭区间，一天就能读到整段假期作业）、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85），以及完成勾选的确认链路（`needs_confirm` / `confirmed_at`，`GET /homework/pending` 只列待确认的那几行） |
 | `internal/server/holidays.go` | 内置国办放假表（2025–2026 假期区间 + 调休上班日）：`restBlock` 把连续放假块合并、`holidayWindow` 给出某天所属的整段假期（含假期前一天）供作业表单预填 |
 | `internal/server/ratelimit.go` | 令牌桶、家长密码失败预算、argon2 并发闸门、panic 恢复与错误辅助函数 |
 | `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等 |
@@ -59,7 +59,7 @@ requestLog（安全响应头 + 一行访问日志）
 
 - **一次请求拿全量**：`GET /api/v1/state` 返回 `State` 聚合（角色、当前孩子、孩子、任务、提交与附件、愿望、账本、兑换记录、家庭 `timezone`，以及日历打标用的 `holidays` / `makeupWorkdays`）。前端没有任何按资源分页或按需加载。
 - **写操作返回极简结果**：成功返回 `{"id": "..."}`（200）或 204，然后 `src/store.ts` 重新拉取 `/state` 与 `/stats`。没有乐观更新，服务端是唯一真相。
-- **读也会写**：`state()` 先调 `ensureInstances`，用 `INSERT OR IGNORE` 幂等地为「今天 / 本周 / 创建日」生成任务实例。因此读接口不是纯只读的，实例的生成与读取共用同一个唯一键 `UNIQUE(template_id, period_key)`。
+- **读也会写**：`state()` 先调 `ensureInstances`，用 `INSERT OR IGNORE` 幂等地为「今天 / 本周 / 创建日」生成任务实例。因此读接口不是纯只读的，实例的生成与读取共用同一个唯一键 `UNIQUE(template_id, period_key)`。`weekly` 模板可以排好几天（`repeat_weekdays`）：那时每一天一个 `period_key`，形式是 `<本周周一>:<星期>`（如 `2026-10-19:3`）；没配多选（或只选一天）的任务仍旧只用 `<本周周一>`，所以单星期任务的历史键不变。
 - 列表顺序是 UI 契约：孩子、账本、兑换、提交升序；任务与愿望按 `created_at` 降序；所有切片都规范化为非 `null` 数组。
 - 前端 `childTasks` 记忆化后会隐藏「已完成且早于家庭今天」的实例：任务列表表达的是「现在要做什么」，历史留在成长日历里；但任意一天的 `todo` / `pending_review` / `rejected` 仍然可见，因为家长还要处理。
 
@@ -72,7 +72,8 @@ requestLog（安全响应头 + 一行访问日志）
 | 每条语句都带来自会话的 `family_id`；`RowsAffected() == 0` → 404 | 防跨家庭泄漏；漏掉 `AND family_id = ?` 就是越权 |
 | `point_ledger UNIQUE(family_id, reference_type, reference_id)` + `INSERT OR IGNORE` 后检查 `RowsAffected()==1` | 积分只入账一次 |
 | `UPDATE ... WHERE status IN ('todo','rejected')` / `WHERE reviewed_at IS NULL` | 状态机迁移并发安全，改到 0 行就是 `409 conflict` |
-| `task_instances UNIQUE(template_id, period_key)` + `INSERT OR IGNORE` | 同一天/同一周只生成一个实例 |
+| `task_instances UNIQUE(template_id, period_key)` + `INSERT OR IGNORE` | 同一天/同一周只生成一个实例（多选星期时一天一个键） |
+| `homework_done PRIMARY KEY(homework_id, date)` + `confirmed_at` 只能从 NULL 写成时间 | 一天一科只记一笔；孩子那一勾只有第一次家长确认才结算 |
 | `idempotency_keys PRIMARY KEY(family_id, actor_id, operation, key)` | 重放只返回历史结果，不重复副作用 |
 
 **幂等写入**：`submit` / `review` / `redeem` / 手动加减分要求 `Idempotency-Key` 头，缺失是 `400 idempotency_required`。键作为事务的第一笔写入（`INSERT ... ON CONFLICT DO NOTHING`，哨兵 `status_code = -1`）抢占：并发同键请求只有赢家执行，输家回滚并返回已记录的状态；赢家也回滚时输家看到 `409 conflict`。前端只在失败后重放同一个键，因此重试是安全的。
@@ -114,6 +115,8 @@ requestLog（安全响应头 + 一行访问日志）
 - 路由表：`ChildLayout`（`/child`、`/child/tasks`、`/child/homework`、`/child/wishes`、`/child/growth`）与 `ParentLayout`（`/parent`、`/parent/children`、`/parent/tasks`、`/parent/wishes`、`/parent/homework`、`/parent/stats`），未知路径回落到各自的首页。
 - 家长端解锁是客户端状态（`Shell` 的 `parentGate`）+ 12 小时的服务端家长会话；刷新回到孩子端，`/parent` 深链会在解锁后被恢复。
 - 作业是 `/state` 之外的第二份数据（`store.homework`，含日期与当日列表），三个写操作自己重新加载当天数据并设置成功提示。增长日历完全由 `State` 推导，不读 `/stats`。
+- `store.homeworkPending`（待确认作业）是第三份数据，但只在 `pull()` 里随 `/state`、`/stats` 一起拿：拉失败就保留旧行、不报错——屏幕上的旧数据比一句凭空冒出来的报错有用。
+- 两端共用一块屏，所以页面会自己动：`useAppStore` 每 `autoRefreshMs`（60s）静默重拉一次，只在 `document.visibilityState === "visible"` 时跑。它走 `pull(true)` 保留当前角色：家长会话在后台过期时 `request()` 会顺手改开孩子端，一次没人看的重拉不能把家长从当前页面踢掉（正在填的表单会一起没了）。
 - 样式只有一个 `src/styles.css`：每行一条压缩规则、`:root` 自定义属性、手写类名，只有 760px / 430px 两个断点。
 
 ## 明确不做的事

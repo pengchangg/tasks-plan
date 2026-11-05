@@ -42,7 +42,7 @@
   "role": "child",
   "activeChildId": "child_ab12",
   "children": [{"id":"child_ab12","name":"米娅","avatar":"🦊","color":"mint","level":2,"experience":34,"pointsBalance":20,"streakDays":3}],
-  "tasks": [{"id":"task_9f","childId":"child_ab12","title":"阅读 20 分钟","description":"","category":"学习成长","points":20,"repeatRule":"daily","repeatWeekday":0,"dueDate":"2026-10-21","status":"todo","createdAt":"2026-10-01T02:00:00Z"}],
+  "tasks": [{"id":"task_9f","childId":"child_ab12","title":"阅读 20 分钟","description":"","category":"学习成长","points":20,"repeatRule":"daily","repeatWeekday":0,"repeatWeekdays":[],"dueDate":"2026-10-21","status":"todo","createdAt":"2026-10-01T02:00:00Z"}],
   "submissions": [{"id":"sub_1","taskId":"task_9f","childId":"child_ab12","note":"读完了","attachments":[],"submittedAt":"2026-10-21T09:30:00Z"}],
   "wishes": [{"id":"wish_1","title":"选择一次晚餐","description":"","pointsCost":80,"icon":"🍜","color":"coral","isActive":true}],
   "ledger": [{"id":"led_1","childId":"child_ab12","amount":20,"type":"earned","referenceType":"task","referenceId":"task_9f","description":"任务确认完成","createdAt":"2026-10-21T09:31:00Z"}],
@@ -68,13 +68,13 @@
 
 | 接口 | 角色 | 说明 |
 |---|---|---|
-| `POST /api/v1/tasks/` | 家长 | `TaskInput {childId,title,description,category,points,repeatRule,repeatWeekday}` → `200 {id}`（**任务实例 id**） |
+| `POST /api/v1/tasks/` | 家长 | `TaskInput {childId,title,description,category,points,repeatRule,repeatWeekday,repeatWeekdays}` → `200 {id}`（**任务实例 id**） |
 | `PUT /api/v1/tasks/{id}` | 家长 | 同字段。模板总会更新，实例只在仍是 `todo`/`rejected` 且未提交时同步 |
 | `DELETE /api/v1/tasks/{id}` | 家长 | 软删除模板并删除其实例，`204` |
 | `POST /api/v1/tasks/{id}/submit` | **孩子** | `multipart/form-data`，见下 |
-| `POST /api/v1/tasks/{id}/review` | 家长 | `{"approved":true,"note":"..."}`，需要 `Idempotency-Key`；`200 {"approved":true}` |
+| `POST /api/v1/tasks/{id}/review` | 家长 | `{"approved":true,"note":"..."}`，需要 `Idempotency-Key`；`200 {"approved":true}`。退回时的 `note` 存在提交行上（上限 30 字），随 `/state` 以 `submission.reviewNote` 回给孩子端 |
 
-- `repeatRule`：`once` / `daily` / `weekly`；`weekly` 时 `repeatWeekday` 为 `0..6`（周日=0）。`points ≥ 1`。
+- `repeatRule`：`once` / `daily` / `weekly`；`weekly` 时 `repeatWeekday` 为 `0..6`（周日=0）。`repeatWeekdays` 只在 `weekly` 下有意义：一组 `0..6` 表示一周排好几天（服务端去重排序后存成 `"1,3,5"`），空数组回到只看 `repeatWeekday` 的单日语义；超出 `0..6` 的元素 `400 invalid_request`（`repeatWeekdays must be between 0 and 6`）。`points ≥ 1`。
 - `submit`：字段 `files`（0–6 个，可空）、`note`（≤30 字）。`200 {id}`；状态不允许 `409 invalid_state`，并发抢占失败 `409 conflict`；`413`/`415`/`400 too_many_files` 见上传规则。
 - `review`：提交必须是 `pending_review`，否则 `409 invalid_state`；同一提交重复审核由幂等键挡住。
 
@@ -100,19 +100,20 @@
 |---|---|---|
 | `GET /api/v1/homework/?date=YYYY-MM-DD` | 任意 | `200 {date, items, holiday?}`，省略 `date` 时返回家庭本地的今天；`holiday` 是这一天所属的连续假期 |
 | `POST /api/v1/homework/` | 家长 | multipart 新建，`200 {id, skipped}` |
+| `GET /api/v1/homework/pending` | 任意 | `200 [{id,homeworkId,date,subject,doneAt}]`——孩子勾了、还没家长确认的勾选，`id` 是 `<homeworkId>:<date>`，按勾的时间倒序最多 50 条 |
 | `PUT /api/v1/homework/{id}` | 家长 | multipart 编辑，`200 {id, skipped}` |
 | `DELETE /api/v1/homework/{id}` | 家长 | `204`，级联删除媒体 |
 | `DELETE /api/v1/homework/{id}/media/{mediaID}` | 家长 | 删单个附件与文件，`204` |
-| `POST /api/v1/homework/{id}/done` | 任意 | 孩子端卡片上的「完成」勾选，JSON `{date, done}`，`200 {id, awarded}`；按天记录，幂等（重放不再加/扣分），不加 `Idempotency-Key` |
+| `POST /api/v1/homework/{id}/done` | 任意 | 卡片上的「完成」勾选，JSON `{date, done}`，`200 {id, awarded, pending}`；按天记录，幂等（重放不再加/扣分），不加 `Idempotency-Key`。作业要确认时孩子那一勾只进待确认（`pending:true`、`awarded:0`），家长在总览点「确认」走同一接口把 `confirmed_at` 补上才结算 |
 
-写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
+写入字段：`date`、`end_date`（可选，省略等于 `date`）、`subject`、`description`、`needs_confirm`（可选，`"false"`/`"0"` 以外都算需要确认，缺省为要确认）、重复的 `files`、编辑时可带重复的 `remove_media`（媒体 id）。学科固定为：语文、数学、英语、科学、道德与法治、音乐、美术、体育、劳动、其他；`description` 与媒体至少有一项。不支持的图片/视频格式会被跳过并在 `skipped` 里列出文件名，不影响同批其它文件。图片会按 EXIF 方向摆正、最长边压到 2560、重编码为 JPEG q85；视频原样保存。
 
 **假期作业。** `date`..`end_date` 是闭区间，这段时间内的每一天读到的都是同一条作业（`date<=? AND end_date>=?`），所以家长在假期前设置一次即可。服务端内置国办放假表（2025–2026 的法定假期区间与调休上班日），把每一段连续放假的日期合并成一个 `Holiday`：`{name,start,end,days,beforeFrom}`，`days` 是这段假期的自然天数，`beforeFrom` 为 `true` 表示这一天本身还是工作日、只是紧挨着假期（「假期前一天」，例如周五之于周末）。表单据此预填整段范围；表外年份退化为只按周末合并。校验：`end_date` 必须是 `YYYY-MM-DD`、不得早于 `date`、跨度上限 21 天（`homeworkMaxRangeDays`），否则 `400 invalid_request`（`end_date must be YYYY-MM-DD` / `end_date must not be before date` / `date range is too long`）。
 
 `HomeworkDay` 形状：
 
 ```json
-{"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-01","endDate":"2026-10-07","subject":"语文","description":"朗读第 5 课","createdAt":"2026-09-30T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}],"done":false}],"holiday":{"name":"国庆节","start":"2026-10-01","end":"2026-10-07","days":7,"beforeFrom":false}}
+{"date":"2026-10-21","items":[{"id":"hw_1","date":"2026-10-01","endDate":"2026-10-07","subject":"语文","description":"朗读第 5 课","createdAt":"2026-09-30T12:00:00Z","media":[{"id":"media_x","name":"lesson5.png","type":"image","url":"/api/v1/media/media_x"}],"needsConfirm":true,"confirmed":false,"done":false}],"holiday":{"name":"国庆节","start":"2026-10-01","end":"2026-10-07","days":7,"beforeFrom":false}}
 ```
 
 `done` 是「看的那一天」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾，所以同一条作业在不同日期读到的 `done` 可能不同。
