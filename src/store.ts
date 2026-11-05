@@ -207,13 +207,16 @@ export function useAppStore() {
   }, [connect]);
 
   const run = useCallback(
-    async (operation: () => Promise<unknown>) => {
+    // 把操作结果透出来（失败时是 undefined），勾作业才拿得到服务端算出的 awarded。
+    async <T>(operation: () => Promise<T>): Promise<T | undefined> => {
       try {
         setMessage("");
-        await operation();
+        const result = await operation();
         await refresh();
+        return result;
       } catch (error) {
         setMessage(describe(error, "操作失败，请重试"));
+        return undefined;
       }
     },
     [refresh],
@@ -450,10 +453,10 @@ export function useAppStore() {
         if (await loadHomework(homework.date)) setOkMessage("作业已删除");
       }),
     // 完成勾选按「看的那一天」记录，所以假期作业可以逐天勾；勾上每科 +5、当天全部
-    // 完成再 +5（服务端算账，加分由奖励横幅呈现）。先把本地那一行翻过来（重新读整
-    // 天的作业会让受控勾选在往返期间跳回未勾），再发这次写入；取消完成会扣分，
-    // 扣分没有奖励横幅，用一条提示说明。
-    toggleHomeworkDone: (id: string, done: boolean) => {
+    // 完成再 +5（服务端算账）。先把本地那一行翻过来（重新读整天的作业会让受控勾选
+    // 在往返期间跳回未勾），再发这次写入，并把服务端算出的 awarded 回给调用方，
+    // 让那张卡自己标出加了几分；加分另有奖励横幅，取消完成没有横幅、用提示说明。
+    toggleHomeworkDone: (id: string, done: boolean): Promise<number | undefined> => {
       const date = homework.date;
       setHomework((prev) => ({
         ...prev,
@@ -461,7 +464,7 @@ export function useAppStore() {
           item.id === id ? { ...item, done } : item,
         ),
       }));
-      void run(async () => {
+      return run(async () => {
         const response = await request(
           `/homework/${id}/done`,
           json("POST", { date, done }),
@@ -470,6 +473,7 @@ export function useAppStore() {
           awarded?: number;
         };
         if (awarded < 0) setOkMessage(`已取消完成，扣回 ${-awarded} 积分`);
+        return awarded;
       });
     },
   };

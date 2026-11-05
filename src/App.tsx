@@ -1628,9 +1628,22 @@ function HomeworkDay({
   items: Homework[];
   title: string;
   compact?: boolean;
-  onDone?: (item: Homework, done: boolean) => void;
+  onDone?: (item: Homework, done: boolean) => Promise<number | undefined>;
 }) {
   const [viewing, setViewing] = useState<number | null>(null);
+  // 加分徽章跟着手指按住的那张卡：服务端算出的 awarded 只比本地翻勾晚几十毫秒，
+  // 却是真账（重放、取消完成、积分不够都不会虚报），所以不拿本地猜测去画它。
+  const [award, setAward] = useState<{ id: string; amount: number } | null>(null);
+  const awardTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(awardTimer.current), []);
+  const tick = async (item: Homework, done: boolean) => {
+    window.clearTimeout(awardTimer.current);
+    if (!done) setAward(null);
+    const awarded = await onDone?.(item, done);
+    if (!awarded || awarded <= 0) return;
+    setAward({ id: item.id, amount: awarded });
+    awardTimer.current = window.setTimeout(() => setAward(null), 2000);
+  };
   const media = items.flatMap((item) => item.media);
   return (
     <>
@@ -1644,10 +1657,15 @@ function HomeworkDay({
               <input
                 type="checkbox"
                 checked={item.done}
-                onChange={(event) => onDone(item, event.target.checked)}
+                onChange={(event) => tick(item, event.target.checked)}
               />
               完成
             </label>
+          )}
+          {award?.id === item.id && (
+            <span className="homework-award" aria-hidden="true">
+              +{award.amount}
+            </span>
           )}
           <span className={`subject-chip ${subjectClass(item.subject)}`}>
             <span>{subjectEmoji[item.subject] ?? subjectEmoji["其他"]}</span>

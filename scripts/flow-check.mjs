@@ -782,6 +782,29 @@ assert.ok(
 );
 const homeworkThumb = homeworkCard.locator(".homework-thumb img").first();
 await assertRealImage(homeworkThumb, proofSize);
+// 勾上完成的即时反馈：那张卡立刻标出加了几分，余额真的涨同样多；取消完成则徽章消失、
+// 只留一条退回提示（服务端 awarded 是双向的）。
+const pointsBalance = async () =>
+  await page.evaluate(
+    async () =>
+      (await (await fetch("/api/v1/state")).json()).children[0].pointsBalance,
+  );
+const balanceBeforeTick = await pointsBalance();
+await homeworkCard.locator(".homework-check input").check();
+const awardedText = (await homeworkCard.locator(".homework-award").textContent())?.trim();
+assert.match(awardedText ?? "", /^\+\d+$/);
+assert.equal(
+  (await pointsBalance()) - balanceBeforeTick,
+  Number(awardedText?.slice(1)),
+);
+await homeworkCard.locator(".homework-check input").uncheck();
+await homeworkCard.locator(".homework-award").waitFor({ state: "detached" });
+assert.equal(await pointsBalance(), balanceBeforeTick);
+const undoToast = page.locator(".app-toast").filter({ hasText: "已取消完成，扣回" });
+await undoToast.waitFor();
+await page.getByRole("button", { name: "关闭提示" }).click();
+await homeworkCard.locator(".homework-check input").check();
+assert.equal(await homeworkCard.locator(".homework-check input").isChecked(), true);
 const viewer = page.locator(".homework-viewer");
 const viewerCount = async () =>
   (await viewer.locator(".viewer-count").innerText()).trim();
