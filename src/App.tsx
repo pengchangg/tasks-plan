@@ -885,6 +885,63 @@ function SectionTitle({
     </div>
   );
 }
+// 家长端的确认/退回。退回一定要写一句话：review_note 是孩子唯一能看到「为什么被退回」
+// 的通道（服务端收 30 字，随每条 submission 进 /state），空话不如不退回，所以空输入
+// 时确认按钮是禁用的。两处（任务卡、任务管理行）共用，两端的退回口径不会走偏。
+function ReviewActions({
+  taskId,
+  approveLabel = "确认",
+  onReview,
+}: {
+  taskId: string;
+  approveLabel?: string;
+  onReview?: (id: string, approved: boolean, note?: string) => void;
+}) {
+  const [rejecting, setRejecting] = useState(false);
+  const [note, setNote] = useState("");
+  if (!rejecting)
+    return (
+      <div className="review-actions">
+        <button className="approve" onClick={() => onReview?.(taskId, true)}>
+          {approveLabel}
+        </button>
+        <button className="reject" onClick={() => setRejecting(true)}>
+          退回
+        </button>
+      </div>
+    );
+  const cancel = () => {
+    setRejecting(false);
+    setNote("");
+  };
+  return (
+    <div className="review-actions rejecting">
+      <input
+        className="review-note"
+        aria-label="退回原因"
+        maxLength={30}
+        autoFocus
+        placeholder="告诉孩子要改哪里（30 字内）"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
+      <button
+        className="reject"
+        disabled={!note.trim()}
+        onClick={() => {
+          onReview?.(taskId, false, note.trim());
+          cancel();
+        }}
+      >
+        确认退回
+      </button>
+      <button className="reject" onClick={cancel}>
+        取消退回
+      </button>
+    </div>
+  );
+}
+
 function TaskCard({
   task,
   today,
@@ -937,20 +994,11 @@ function TaskCard({
             </button>
           )}
           {task.status === "pending_review" && parent && (
-            <div className="review-actions">
-              <button
-                className="approve"
-                onClick={() => onReview?.(task.id, true)}
-              >
-                确认完成
-              </button>
-              <button
-                className="reject"
-                onClick={() => onReview?.(task.id, false, "再检查一下哦")}
-              >
-                退回
-              </button>
-            </div>
+            <ReviewActions
+              taskId={task.id}
+              approveLabel="确认完成"
+              onReview={onReview}
+            />
           )}
           {task.status === "rejected" && !parent && (
             <button
@@ -3044,6 +3092,9 @@ function SubmissionEvidence({
           {familyTime(submission.submittedAt, timezone)}
         </time>
       </div>
+      {submission.reviewNote && (
+        <p className="review-note-line">家长：{submission.reviewNote}</p>
+      )}
       {(submission.note || submission.attachments.length > 0) && (
         <>
           {submission.note && (
@@ -3103,17 +3154,7 @@ function AdminTaskRow({
           {statusLabel[task.status]}
         </div>
         {task.status === "pending_review" && (
-          <div className="review-actions">
-            <button className="approve" onClick={() => onReview(task.id, true)}>
-              确认
-            </button>
-            <button
-              className="reject"
-              onClick={() => onReview(task.id, false, "再检查一下哦")}
-            >
-              退回
-            </button>
-          </div>
+          <ReviewActions taskId={task.id} onReview={onReview} />
         )}
         <button
           className="icon-button"

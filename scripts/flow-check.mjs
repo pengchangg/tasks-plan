@@ -318,7 +318,11 @@ await page.getByRole("link", { name: "任务管理" }).click();
 const readingTask = page
   .locator(".admin-row")
   .filter({ hasText: "阅读 20 分钟" });
+// 退回必须带原因：孩子端只能从 submission.reviewNote 看到「为什么要重做」。
+const rejectNote = "先把书签放好再拍照";
 await readingTask.getByRole("button", { name: "退回" }).click();
+await readingTask.getByLabel("退回原因").fill(rejectNote);
+await readingTask.getByRole("button", { name: "确认退回" }).click();
 await waitForState(
   (s) => currentTask(s, "阅读 20 分钟")?.status === "rejected",
 );
@@ -338,6 +342,10 @@ await page.getByRole("link", { name: "任务", exact: true }).click();
 const rejectedTask = page
   .locator(".task-card")
   .filter({ hasText: "阅读 20 分钟" });
+assert.ok(
+  (await rejectedTask.innerText()).includes(`家长：${rejectNote}`),
+  "退回原因没有显示在孩子的 rejected 卡片上",
+);
 await rejectedTask.getByRole("button", { name: "重新提交" }).click();
 await waitForState(
   (s) =>
