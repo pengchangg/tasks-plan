@@ -1720,20 +1720,27 @@ function HomeworkDay({
   items: Homework[];
   title: string;
   compact?: boolean;
-  onDone?: (item: Homework, done: boolean) => Promise<number | undefined>;
+  onDone?: (
+    item: Homework,
+    done: boolean,
+  ) => Promise<{ awarded: number; pending: boolean } | undefined>;
 }) {
   const [viewing, setViewing] = useState<number | null>(null);
   // 加分徽章跟着手指按住的那张卡：服务端算出的 awarded 只比本地翻勾晚几十毫秒，
   // 却是真账（重放、取消完成、积分不够都不会虚报），所以不拿本地猜测去画它。
   const [award, setAward] = useState<{ id: string; amount: number } | null>(null);
+  // 「待家长确认」这块小牌平时读服务端那一列（confirmed），但刚勾上的那一勾要等
+  // 下一次重载才有结果，所以本地也记住是哪张卡。
+  const [justTicked, setJustTicked] = useState<string | null>(null);
   const awardTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(awardTimer.current), []);
   const tick = async (item: Homework, done: boolean) => {
     window.clearTimeout(awardTimer.current);
     if (!done) setAward(null);
-    const awarded = await onDone?.(item, done);
-    if (!awarded || awarded <= 0) return;
-    setAward({ id: item.id, amount: awarded });
+    const result = await onDone?.(item, done);
+    setJustTicked(result?.pending ? item.id : null);
+    if (!result || result.awarded <= 0) return;
+    setAward({ id: item.id, amount: result.awarded });
     awardTimer.current = window.setTimeout(() => setAward(null), 2000);
   };
   const media = items.flatMap((item) => item.media);
@@ -1757,6 +1764,12 @@ function HomeworkDay({
           {award?.id === item.id && (
             <span className="homework-award" aria-hidden="true">
               +{award.amount}
+            </span>
+          )}
+          {(justTicked === item.id ||
+            (item.done && item.needsConfirm && !item.confirmed)) && (
+            <span className="homework-pending" aria-hidden="true">
+              待家长确认
             </span>
           )}
           <span className={`subject-chip ${subjectClass(item.subject)}`}>
@@ -2536,6 +2549,61 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
           <small>孩子可兑换</small>
         </div>
       </div>
+      {store.homeworkPending.length > 0 && (
+        <>
+          <div className="parent-section-head">
+            <h2>
+              作业待确认 <span>{store.homeworkPending.length}</span>
+            </h2>
+          </div>
+          {/* 孩子勾了作业不等于done：要家长点这一句才算数。确认/取消走同一个 done
+              端点，服务端才会结算积分，所以这里不拿本地猜测去改数字。 */}
+          <div className="pending-list">
+            {store.homeworkPending.map((item) => (
+              <div className="pending-row" key={item.id}>
+                <span className={`subject-chip ${subjectClass(item.subject)}`}>
+                  <span>
+                    {subjectEmoji[item.subject] ?? subjectEmoji["其他"]}
+                  </span>
+                  {item.subject}
+                </span>
+                <span className="pending-when">
+                  {monthDayText(item.date)} ·{" "}
+                  {familyTime(item.doneAt, store.state.timezone)} 勾的
+                </span>
+                <span className="pending-actions">
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() =>
+                      store.actions.confirmHomework(
+                        item.homeworkId,
+                        item.date,
+                        false,
+                      )
+                    }
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() =>
+                      store.actions.confirmHomework(
+                        item.homeworkId,
+                        item.date,
+                        true,
+                      )
+                    }
+                  >
+                    确认
+                  </button>
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
       <div className="parent-section-head">
         <h2>
           需要你的确认 <span>{pending.length}</span>
@@ -3710,6 +3778,8 @@ function HomeworkForm({
       : "语文",
   );
   const [description, setDescription] = useState(homework?.description ?? "");
+  // 默认要确认：宁可家长多点一下，也好过孩子自己勾完把分拿走。编辑时读作业自己那一列。
+  const [needsConfirm, setNeedsConfirm] = useState(homework?.needsConfirm ?? true);
   const [files, setFiles] = useState<File[]>([]);
   const [previews, setPreviews] = useState<string[]>([]);
   const [removed, setRemoved] = useState<string[]>([]);
@@ -3757,6 +3827,7 @@ function HomeworkForm({
             endDate: endValue || value,
             subject,
             description: description.trim(),
+            needsConfirm,
             files,
             removeMedia: removed,
           });
@@ -3835,6 +3906,14 @@ function HomeworkForm({
             onChange={(event) => setDescription(event.target.value)}
             placeholder="抄写老师布置的作业内容…"
           />
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={needsConfirm}
+            onChange={(event) => setNeedsConfirm(event.target.checked)}
+          />
+          完成需要我确认
         </label>
         <div className="form-field">
           <span>图片 / 视频</span>

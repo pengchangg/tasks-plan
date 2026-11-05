@@ -8,6 +8,7 @@ import type {
   Child,
   HomeworkDay,
   HomeworkDraft,
+  HomeworkPendingItem,
   StatsPayload,
   TaskSubmission,
   Wish,
@@ -124,6 +125,9 @@ async function request(path: string, init?: RequestInit) {
   return response;
 }
 
+// 完成勾选的回执：awarded 是服务端算出的积分增减，pending 表示这一勾还在等家长确认。
+type HomeworkToggle = { awarded: number; pending: boolean };
+
 // 两端在同一块屏上轮流用，孩子提交完就走开、家长却可能还在自己那一页上，
 // 所以屏幕要自己动：每 60 秒静默重拉一次（只在页面可见时）。
 const autoRefreshMs = 60_000;
@@ -160,16 +164,24 @@ export function useAppStore() {
     date: "",
     items: [],
   });
+  // 待确认作业不进 /state：它是家长总览上的一小排，孩子端一辈子用不上一次。
+  const [homeworkPending, setHomeworkPending] = useState<
+    HomeworkPendingItem[]
+  >([]);
 
   // keepRole 给静默轮询用：家长会话在后台过期时 request() 会顺手改开孩子端，
   // 一次没人看的重拉不能因此把家长从当前页面踢走（正在填的表单会一起没了）。
   const pull = useCallback(async (keepRole: boolean) => {
-    const [stateResponse, statsResponse] = await Promise.all([
+    // 待确认列表只给家长总览看，拉失败不影响这一屏：保留上一次的行比空一下好。
+    const [stateResponse, statsResponse, pendingResponse] = await Promise.all([
       request("/state"),
       request("/stats"),
+      request("/homework/pending").catch(() => null),
     ]);
     const next = (await stateResponse.json()) as AppState;
     setStats(await statsResponse.json());
+    if (pendingResponse?.ok)
+      setHomeworkPending((await pendingResponse.json()) as HomeworkPendingItem[]);
     setState((prev) => (!keepRole || prev.role === next.role ? next : prev));
   }, []);
 
@@ -473,6 +485,8 @@ export function useAppStore() {
         body.set("end_date", draft.endDate || draft.date);
         body.set("subject", draft.subject);
         body.set("description", draft.description);
+        // 不确认的作业孩子勾上就当场给分，所以这个字段得跟着表单走（缺省由服务端当 1）。
+        body.set("needs_confirm", draft.needsConfirm === false ? "false" : "true");
         for (const file of draft.files) body.append("files", file);
         for (const mediaId of draft.removeMedia) {
           body.append("remove_media", mediaId);
@@ -502,9 +516,13 @@ export function useAppStore() {
       }),
     // 完成勾选按「看的那一天」记录，所以假期作业可以逐天勾；勾上每科 +5、当天全部
     // 完成再 +5（服务端算账）。先把本地那一行翻过来（重新读整天的作业会让受控勾选
-    // 在往返期间跳回未勾），再发这次写入，并把服务端算出的 awarded 回给调用方，
-    // 让那张卡自己标出加了几分；加分另有奖励横幅，取消完成没有横幅、用提示说明。
-    toggleHomeworkDone: (id: string, done: boolean): Promise<number | undefined> => {
+    // 在往返期间跳回未勾），再发这次写入，并把服务端算出的 awarded/pending 回给
+    // 调用方，让那张卡自己标出加了几分或「待家长确认」；加分另有奖励横幅，取消完成
+    // 没有横幅、用提示说明，而待确认不值得报错。
+    toggleHomeworkDone: (
+      id: string,
+      done: boolean,
+    ): Promise<HomeworkToggle | undefined> => {
       const date = homework.date;
       setHomework((prev) => ({
         ...prev,
@@ -517,13 +535,24 @@ export function useAppStore() {
           `/homework/${id}/done`,
           json("POST", { date, done }),
         );
-        const { awarded = 0 } = (await response.json()) as {
+        const { awarded = 0, pending = false } = (await response.json()) as {
           awarded?: number;
+          pending?: boolean;
         };
         if (awarded < 0) setOkMessage(`已取消完成，扣回 ${-awarded} 积分`);
-        return awarded;
+        return { awarded, pending };
       });
     },
+    // 家长在总览上确认（或取消）孩子勾过的那一天：走同一个 done 端点，服务端把
+    // confirmed_at 补上并结算积分，所以这里不新增写接口。
+    confirmHomework: (homeworkId: string, date: string, ok: boolean) =>
+      void run(async () => {
+        await request(
+          `/homework/${homeworkId}/done`,
+          json("POST", { date, done: ok }),
+        );
+        setOkMessage(ok ? "作业已确认" : "已取消这一天的完成");
+      }),
   };
   return {
     state,
@@ -539,6 +568,7 @@ export function useAppStore() {
     stats,
     today,
     homework,
+    homeworkPending,
     dismissMessage: () => setNotice(null),
   };
 }

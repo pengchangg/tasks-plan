@@ -30,7 +30,7 @@ export interface WishInput { title: string; description: string; pointsCost: num
 
 // GET /api/v1/homework/?date= 的载荷：某一天的作业，按录入顺序。
 // date..endDate 含首尾：假期作业一条覆盖整段假期，区间里每一天都读得到它。
-export interface Homework { id: string; date: string; endDate: string; subject: string; description: string; createdAt: string; media: Attachment[]; done: boolean }
+export interface Homework { id: string; date: string; endDate: string; subject: string; description: string; createdAt: string; media: Attachment[]; needsConfirm: boolean; confirmed: boolean; done: boolean }
 // 这一天所属的连续假期（服务端按国办放假表算好，含「假前日」起点）。
 export interface Holiday { name: string; start: string; end: string; days: number; beforeFrom: boolean }
 export interface HomeworkDay { date: string; items: Homework[]; holiday?: Holiday }
@@ -39,4 +39,7 @@ export interface HomeworkDay { date: string; items: Homework[]; holiday?: Holida
 // （服务端那条路径没有 decode()）：date/subject/description 是普通字段，
 // files 以重复的 files 字段提交，removeMedia 以重复的 remove_media 字段提交；
 // endDate 以 end_date 提交，缺省（空串）时服务端按单日处理。
-export interface HomeworkDraft { date: string; endDate: string; subject: string; description: string; files: File[]; removeMedia: string[] }
+export interface HomeworkDraft { date: string; endDate: string; subject: string; description: string; needsConfirm: boolean; files: File[]; removeMedia: string[] }
+
+// GET /homework/pending 的一行：孩子勾了、还没家长确认的那一笔（id = <homeworkId>:<date>）。
+export interface HomeworkPendingItem { id: string; homeworkId: string; date: string; subject: string; doneAt: string }
