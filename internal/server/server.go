@@ -410,8 +410,6 @@ func (s *Server) Handler() http.Handler {
 			})
 			a.Route("/homework", func(hw chi.Router) {
 				hw.Get("/", s.getHomework)
-				// 家长确认之前，孩子勾过的每一条都列在这里。
-				hw.Get("/pending", s.homeworkPending)
 				hw.Post("/", s.parentOnly(s.saveHomework))
 				hw.Put("/{id}", s.parentOnly(s.saveHomework))
 				hw.Delete("/{id}", s.parentOnly(s.deleteHomework))

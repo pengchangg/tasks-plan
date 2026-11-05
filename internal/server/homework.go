@@ -57,11 +57,6 @@ type Homework struct {
 	Media       []Attachment `json:"media"`
 	// Done 是「看的那一天」的完成勾选，不是整条作业的属性：假期作业区间内可以逐天勾。
 	Done bool `json:"done"`
-	// NeedsConfirm 是这条作业要不要家长确认（录入时选的，默认要）；Confirmed 是
-	// 「看的那一天」的勾已经被确认了。孩子勾上但 Confirmed=false 就是还在等家长，
-	// 积分那时还没进账。
-	NeedsConfirm bool `json:"needsConfirm"`
-	Confirmed    bool `json:"confirmed"`
 }
 
 // HomeworkDay 是某个家庭本地日期的全部作业，按录入顺序。Holiday 是这一天所属的
@@ -107,18 +102,16 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 	out := HomeworkDay{Date: date, Items: []Homework{}}
 	// 假期作业的区间覆盖多天，所以按 date<=今天<=end_date 取，而不是精确等于日期。
 	// created_at 是裁剪过尾零的 RFC3339Nano，同一秒内的字典序不可靠，rowid 才是录入顺序。
-	rows, err := s.db.QueryContext(ctx, `SELECT id,date,end_date,subject,description,created_at,needs_confirm FROM homework WHERE family_id=? AND date<=? AND end_date>=? ORDER BY date,rowid`, family, date, date)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,date,end_date,subject,description,created_at FROM homework WHERE family_id=? AND date<=? AND end_date>=? ORDER BY date,rowid`, family, date, date)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		item := Homework{Media: []Attachment{}}
-		var needsConfirm int
-		if err = rows.Scan(&item.ID, &item.Date, &item.EndDate, &item.Subject, &item.Description, &item.CreatedAt, &needsConfirm); err != nil {
+		if err = rows.Scan(&item.ID, &item.Date, &item.EndDate, &item.Subject, &item.Description, &item.CreatedAt); err != nil {
 			rows.Close()
 			return out, err
 		}
-		item.NeedsConfirm = needsConfirm != 0
 		out.Items = append(out.Items, item)
 	}
 	if err = rows.Err(); err != nil {
@@ -131,21 +124,19 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 			return out, err
 		}
 	}
-	// 完成勾选按天记录，只取这一天；confirmed_at 为空就是孩子勾了还等家长确认。
-	doneRows, err := s.db.QueryContext(ctx, `SELECT homework_id,COALESCE(confirmed_at,'') FROM homework_done WHERE family_id=? AND date=?`, family, date)
+	// 完成勾选按天记录，只取这一天。
+	doneRows, err := s.db.QueryContext(ctx, `SELECT homework_id FROM homework_done WHERE family_id=? AND date=?`, family, date)
 	if err != nil {
 		return out, err
 	}
 	done := map[string]bool{}
-	confirmed := map[string]bool{}
 	for doneRows.Next() {
-		var hid, at string
-		if err = doneRows.Scan(&hid, &at); err != nil {
+		var hid string
+		if err = doneRows.Scan(&hid); err != nil {
 			doneRows.Close()
 			return out, err
 		}
 		done[hid] = true
-		confirmed[hid] = at != ""
 	}
 	if err = doneRows.Err(); err != nil {
 		doneRows.Close()
@@ -154,7 +145,6 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 	doneRows.Close()
 	for i := range out.Items {
 		out.Items[i].Done = done[out.Items[i].ID]
-		out.Items[i].Confirmed = out.Items[i].Done && confirmed[out.Items[i].ID]
 	}
 	return out, nil
 }
@@ -162,12 +152,10 @@ func (s *Server) homeworkDay(ctx context.Context, family, date string) (Homework
 // homeworkDonePoints 是作业完成一次给的分：勾上一科 +5，当天全部勾完再额外 +5。
 const homeworkDonePoints = 5
 
-// setHomeworkDone 是作业卡片的「完成」勾选，两端同一个入口：孩子勾了是要确认，
-// 家长勾了就是确认（所以没有单独的确认接口）。需要确认的作业，confirmed_at 为空
-// 就一直挂在 /homework/pending 里，积分到确认那一刻才进。按日期记录，所以假期作业
-// 在区间内可以逐天勾；写入天然幂等（INSERT OR IGNORE / DELETE），不需要 Idempotency-Key。
+// setHomeworkDone 是孩子端作业卡片的「完成」勾选。按日期记录，所以假期作业在区间内
+// 可以逐天勾；写入天然幂等（INSERT OR IGNORE / DELETE），不需要 Idempotency-Key。
 // 勾选进出都带着积分账本，所以三件事必须在同一个事务里：勾记录、台账、孩子余额。
-// shortcut: homework_done 是家庭级的，积分只记在勾选（或确认）时选中的那个孩子身上；
+// shortcut: homework_done 是家庭级的，积分只记在勾选的那个孩子身上；
 // 若作业要按孩子分开，这里需要一张带 child_id 的完成表。
 func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
@@ -191,9 +179,8 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var subject string
-	var needsConfirm int
 	// 只认区间内的那一天：区间外勾选会写出一个读不回来的行。
-	if err = tx.QueryRow(`SELECT subject,needs_confirm FROM homework WHERE id=? AND family_id=? AND date<=? AND end_date>=?`, hid, x.FamilyID, in.Date, in.Date).Scan(&subject, &needsConfirm); err != nil {
+	if err = tx.QueryRow(`SELECT subject FROM homework WHERE id=? AND family_id=? AND date<=? AND end_date>=?`, hid, x.FamilyID, in.Date, in.Date).Scan(&subject); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			problem(w, 404, "not_found", "homework not found")
 			return
@@ -201,51 +188,20 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	// 取消勾选要回冲的是「确认过的那一笔」。还挂在待确认里的勾没欠着积分，而账本
-	// 是按家庭记的，误去回冲会扣到当天已经确认的别科（或别的孩子）头上。
-	priorConfirmed := ""
-	if !in.Done {
-		if err = tx.QueryRow(`SELECT COALESCE(confirmed_at,'') FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date).Scan(&priorConfirmed); errors.Is(err, sql.ErrNoRows) {
-			priorConfirmed, err = "", nil
-		}
-	}
-	// confirmed_at 为空 = 这一勾还在等家长确认。家长端自己勾就是确认；不要确认的
-	// 作业孩子勾上就当场生效。
-	confirmed := ""
-	if in.Done && (needsConfirm == 0 || x.ActorType == "parent") {
-		confirmed = nowText(s.now())
-	}
-	// 没确认就得写 NULL：写空串会是个「非空」的值，IS NULL 就认不出待确认了。
-	var confirmedAt any
-	if confirmed != "" {
-		confirmedAt = confirmed
-	}
 	var res sql.Result
-	if err == nil {
-		if in.Done {
-			// INSERT OR IGNORE：重放既不会把待确认补成已确认，也不会重发积分。
-			res, err = tx.Exec(`INSERT OR IGNORE INTO homework_done(family_id,homework_id,date,completed_at,confirmed_at) VALUES(?,?,?,?,?)`, x.FamilyID, hid, in.Date, nowText(s.now()), confirmedAt)
-		} else {
-			res, err = tx.Exec(`DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date)
-		}
+	if in.Done {
+		res, err = tx.Exec(`INSERT OR IGNORE INTO homework_done(family_id,homework_id,date,completed_at) VALUES(?,?,?,?)`, x.FamilyID, hid, in.Date, nowText(s.now()))
+	} else {
+		res, err = tx.Exec(`DELETE FROM homework_done WHERE family_id=? AND homework_id=? AND date=?`, x.FamilyID, hid, in.Date)
 	}
 	var changed int64
 	if err == nil {
 		changed, err = res.RowsAffected()
-		// 行已经在那儿了（孩子先勾了），家长这一次就是来确认的：把还挂着的 NULL 补
-		// 上时间。已经确认过的行一句也改不到，所以重发确认不会重发积分。
-		if err == nil && changed == 0 && in.Done && confirmed != "" {
-			if res, err = tx.Exec(`UPDATE homework_done SET confirmed_at=? WHERE family_id=? AND homework_id=? AND date=? AND confirmed_at IS NULL`, confirmed, x.FamilyID, hid, in.Date); err == nil {
-				changed, err = res.RowsAffected()
-			}
-		}
 	}
 	// 只有状态真的翻了一下的那次才动积分，重放既不加也不扣。积分必须记在某个孩子
-	// 头上，所以没有选中孩子的会话只记勾选。勾上要这一勾已经确认，取消要它曾经确认过。
-	pending := changed == 1 && in.Done && confirmed == ""
-	credited := changed == 1 && (confirmed != "" || (!in.Done && priorConfirmed != ""))
+	// 头上，所以没有选中孩子的会话（家长端不渲染这个开关）只记勾选。
 	awarded := 0
-	if err == nil && credited && x.SelectedChildID != "" {
+	if err == nil && changed == 1 && x.SelectedChildID != "" {
 		awarded, err = s.homeworkPoints(tx, x.FamilyID, x.SelectedChildID, hid, in.Date, subject, in.Done)
 	}
 	if err != nil {
@@ -256,47 +212,8 @@ func (s *Server) setHomeworkDone(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, r, err)
 		return
 	}
-	// awarded 是这次实际进出的分数（勾上 5/10，取消 -5/-10），pending 是「孩子勾了
-	// 但还等家长确认」：前端据此区分「+5」与「待家长确认」，不自己猜。
-	writeJSON(w, 200, map[string]any{"id": hid, "awarded": awarded, "pending": pending})
-}
-
-// homeworkPendingItem 是待确认列表上的一行。id 就是 homework_done 的键拼起来，
-// 家长点确认只需拿 homeworkId + date 再 POST 一次 /homework/{id}/done。
-type homeworkPendingItem struct {
-	ID         string `json:"id"`
-	HomeworkID string `json:"homeworkId"`
-	Date       string `json:"date"`
-	Subject    string `json:"subject"`
-	DoneAt     string `json:"doneAt"`
-}
-
-// homeworkPending 是家长端的待确认列表：孩子勾了、还没人确认的每一条。家长点确认时
-// 积分记在家长当前选中的那个孩子头上（homework_done 本来就是家庭级的，见下面的 shortcut）。
-// shortcut: 只回最近 50 条，一屏看得完；真积压到要翻页再加分页参数。
-func (s *Server) homeworkPending(w http.ResponseWriter, r *http.Request) {
-	x := sess(r)
-	rows, err := s.db.QueryContext(r.Context(), `SELECT d.homework_id,d.date,h.subject,d.completed_at FROM homework_done d JOIN homework h ON h.family_id=d.family_id AND h.id=d.homework_id WHERE d.family_id=? AND d.confirmed_at IS NULL ORDER BY d.completed_at DESC LIMIT 50`, x.FamilyID)
-	if err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	defer rows.Close()
-	items := []homeworkPendingItem{}
-	for rows.Next() {
-		item := homeworkPendingItem{}
-		if err = rows.Scan(&item.HomeworkID, &item.Date, &item.Subject, &item.DoneAt); err != nil {
-			s.internalError(w, r, err)
-			return
-		}
-		item.ID = item.HomeworkID + ":" + item.Date
-		items = append(items, item)
-	}
-	if err = rows.Err(); err != nil {
-		s.internalError(w, r, err)
-		return
-	}
-	writeJSON(w, 200, items)
+	// awarded 是这次实际进出的分数（勾上 5/10，取消 -5/-10），前端据此给反馈。
+	writeJSON(w, 200, map[string]any{"id": hid, "awarded": awarded})
 }
 
 // homeworkPoints 让勾选进出积分账本：勾上时先加这一科的分，当天已经全部完成再加一笔；
@@ -366,11 +283,9 @@ func (s *Server) reverseHomeworkPoints(tx *sql.Tx, family, refType, refID string
 }
 
 // homeworkDayAllDone 判断这一天（按在区间内的作业计）是不是每一科都勾上了。
-// homeworkDayAllDone 看当天的每一条作业：要不要确认，所以「已完成」只数已经生效的勾。
-// 不排掉待确认的勾，确认第一科时就会误判「当天全部完成」，白送一笔 +5 奖金。
 func (s *Server) homeworkDayAllDone(tx *sql.Tx, family, date string) (bool, error) {
 	var total, done int
-	err := tx.QueryRow(`SELECT COUNT(*),COUNT(d.homework_id) FROM homework h LEFT JOIN homework_done d ON d.family_id=h.family_id AND d.homework_id=h.id AND d.date=? AND (h.needs_confirm=0 OR d.confirmed_at IS NOT NULL) WHERE h.family_id=? AND h.date<=? AND h.end_date>=?`, date, family, date, date).Scan(&total, &done)
+	err := tx.QueryRow(`SELECT COUNT(*),COUNT(d.homework_id) FROM homework h LEFT JOIN homework_done d ON d.family_id=h.family_id AND d.homework_id=h.id AND d.date=? WHERE h.family_id=? AND h.date<=? AND h.end_date>=?`, date, family, date, date).Scan(&total, &done)
 	return total > 0 && done == total, err
 }
 
@@ -530,11 +445,6 @@ func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 	date := strings.TrimSpace(r.FormValue("date"))
 	subject := strings.TrimSpace(r.FormValue("subject"))
 	description := strings.TrimSpace(r.FormValue("description"))
-	// 默认要家长确认：宁可多一步确认，也不要孩子自己勾完就自己拿分。
-	needsConfirm := 1
-	if v := strings.TrimSpace(r.FormValue("needs_confirm")); v == "false" || v == "0" {
-		needsConfirm = 0
-	}
 	if !validDateValue(date) {
 		problem(w, 400, "invalid_request", "date must be YYYY-MM-DD")
 		return
@@ -646,10 +556,10 @@ func (s *Server) saveHomework(w http.ResponseWriter, r *http.Request) {
 	now := nowText(s.now())
 	if hid == "" {
 		hid = id("hw")
-		_, err = tx.Exec(`INSERT INTO homework(id,family_id,date,end_date,subject,description,needs_confirm,created_at) VALUES(?,?,?,?,?,?,?,?)`, hid, x.FamilyID, date, endDate, subject, description, needsConfirm, now)
+		_, err = tx.Exec(`INSERT INTO homework(id,family_id,date,end_date,subject,description,created_at) VALUES(?,?,?,?,?,?,?)`, hid, x.FamilyID, date, endDate, subject, description, now)
 	} else {
 		var res sql.Result
-		res, err = tx.Exec(`UPDATE homework SET date=?,end_date=?,subject=?,description=?,needs_confirm=? WHERE id=? AND family_id=?`, date, endDate, subject, description, needsConfirm, hid, x.FamilyID)
+		res, err = tx.Exec(`UPDATE homework SET date=?,end_date=?,subject=?,description=? WHERE id=? AND family_id=?`, date, endDate, subject, description, hid, x.FamilyID)
 		if err == nil {
 			var changed int64
 			if changed, err = res.RowsAffected(); err == nil && changed == 0 {

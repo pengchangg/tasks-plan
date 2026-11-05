@@ -744,9 +744,6 @@ const homeworkModal = page.locator(".form-modal");
 await homeworkModal.waitFor();
 await homeworkModal.getByRole("button", { name: "语文" }).click();
 await homeworkModal.getByLabel("文字描述").fill("抄写第三课生字各三遍，明天听写。");
-// 这一条故意关掉「完成需要我确认」：孩子勾完当场给分，下面那一大段 +N 徽章与取消
-// 回冲的旧链路才能接着验（默认是要确认的，确认链路另起一段）。
-await homeworkModal.getByLabel("完成需要我确认").uncheck();
 await homeworkModal.locator('input[type="file"]').setInputFiles([
   { name: "homework-a.png", mimeType: "image/png", buffer: proofPng },
   { name: "homework-b.png", mimeType: "image/png", buffer: proofPng },
@@ -1088,75 +1085,6 @@ await page.locator(".empty-state").waitFor();
 await page.getByRole("link", { name: "今日", exact: true }).click();
 await page.waitForURL(/\/child$/);
 
-// 作业确认（默认）：孩子勾上只进「待确认」——余额不动、卡上标「待家长确认」，
-// 家长在总览点确认才真的结算。这条作业保留表单默认的勾选，所以走的是确认链路。
-await enterParent(false, "1357");
-await page.getByRole("link", { name: "作业管理" }).click();
-await page.waitForURL(/\/parent\/homework$/);
-await page.getByRole("button", { name: "新增作业" }).click();
-const confirmModal = page.locator(".form-modal");
-await confirmModal.waitFor();
-await confirmModal.getByRole("button", { name: "数学" }).click();
-await confirmModal.getByLabel("文字描述").fill("完成练习册第 12 页。");
-assert.equal(
-  await confirmModal.getByLabel("完成需要我确认").isChecked(),
-  true,
-  "新增作业默认就要家长确认",
-);
-await confirmModal.getByRole("button", { name: "保存作业" }).click();
-await page.getByText("作业已保存").waitFor();
-
-await enterChild();
-await page.getByRole("link", { name: "作业" }).click();
-await page.waitForURL(/\/child\/homework$/);
-const pendingCard = page
-  .locator(".homework-card")
-  .filter({ hasText: "完成练习册第 12 页" });
-await pendingCard.waitFor();
-const balanceBeforeConfirm = await pointsBalance();
-await pendingCard.locator(".homework-check input").check();
-await pendingCard.locator(".homework-pending").waitFor();
-assert.equal(
-  await pendingCard.locator(".homework-award").count(),
-  0,
-  "没确认就发分，那张卡不该标 +N",
-);
-assert.equal(await pointsBalance(), balanceBeforeConfirm, "没确认就不该给分");
-
-await enterParent(false, "1357");
-const pendingRow = page.locator(".pending-row").filter({ hasText: "数学" });
-await pendingRow.waitFor();
-assert.ok(
-  (await page.locator(".parent-section-head").filter({ hasText: "作业待确认" }).innerText()).includes(
-    "作业待确认",
-  ),
-);
-await pendingRow.getByRole("button", { name: "确认" }).click();
-await page.getByText("作业已确认").waitFor();
-await page.locator(".pending-list").waitFor({ state: "detached" });
-// 今天只有这一科，所以确认后是「5 分 + 全天完成奖 5 分」还是只有 5 分，取决于假期
-// 那条作业今天是否也在名单里（两者都是服务端的真账），这里只钉住它是 5 的倍数且大于 0。
-const confirmedDelta = (await pointsBalance()) - balanceBeforeConfirm;
-assert.ok(
-  confirmedDelta >= 5 && confirmedDelta % 5 === 0,
-  `确认后应结算 5 或 10 分，实得 ${confirmedDelta}`,
-);
-
-await enterChild();
-await page.getByRole("link", { name: "作业" }).click();
-await page.waitForURL(/\/child\/homework$/);
-await pendingCard.waitFor();
-assert.equal(
-  await pendingCard.locator(".homework-pending").count(),
-  0,
-  "确认之后孩子那一屏不该再标待家长确认",
-);
-assert.equal(
-  await pendingCard.locator(".homework-check input").isChecked(),
-  true,
-  "确认后孩子那一屏仍是已完成",
-);
-
 // 顶栏刷新：数据往往和屏幕上一样，所以必须给一句回执，否则按钮看起来没反应；
 // 这条提示只认「已刷新」自己，2 秒后自收（别把后来换成别的提示的消息一起清掉）。
 const refreshed = page.waitForResponse((response) =>
@@ -1326,7 +1254,6 @@ console.log(
     homeworkDateNav: true,
     homeworkFont: true,
     homeworkHolidayRange: true,
-    homeworkPendingConfirm: true,
     refreshButton: true,
     reviewReason: true,
     autoRefresh: true,

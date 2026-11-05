@@ -1993,10 +1993,9 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 		t.Fatalf("cross-family: %d %s", w.Code, w.Body.String())
 	}
 	// 勾选进出积分：每一科当天完成 +5，当天全部完成再额外 +5，取消完成按同样的数扣回。
-	// needs_confirm=false：这一段测的是「勾上就算」的老行为，需要确认的作业见下一个用例。
 	for _, subject := range []string{"语文", "数学"} {
 		if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
-			{"date", "2026-10-09"}, {"subject", subject}, {"description", "作业"}, {"needs_confirm", "false"},
+			{"date", "2026-10-09"}, {"subject", subject}, {"description", "作业"},
 		}, nil); w.Code != 200 {
 			t.Fatalf("create %s: %d %s", subject, w.Code, w.Body.String())
 		}
@@ -2060,113 +2059,6 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 	}
 	if left != 0 {
 		t.Fatalf("homework_done rows survived the delete: %d", left)
-	}
-}
-
-// 作业默认要家长确认：孩子自勾只算一条待确认记录，积分到家长确认（家长端在
-// 待确认列表上点确认，戒家长自己在卡片上勾）那一刻才进账。待确认的勾既不发科
-// 目的 +5，也不能让 homeworkDayAllDone 误判「当天全部完成」而白送额外的 +5。
-func TestHomeworkPendingConfirmationIsParentVisibleAndCreditsOnce(t *testing.T) {
-	s := testServer(t)
-	h := s.Handler()
-	parent := parentCookie(t, h)
-	child := childCookie(t, h, "")
-	for _, subject := range []string{"语文", "数学"} {
-		if w := runHomework(t, h, "POST", "/api/v1/homework/", parent, [][2]string{
-			{"date", "2026-10-09"}, {"subject", subject}, {"description", "作业"},
-		}, nil); w.Code != 200 {
-			t.Fatalf("create %s: %d %s", subject, w.Code, w.Body.String())
-		}
-	}
-	items := homeworkDay(t, h, parent, "2026-10-09").Items
-	if len(items) != 2 {
-		t.Fatalf("2026-10-09 should hold 2 items, got %d", len(items))
-	}
-	if !items[0].NeedsConfirm {
-		t.Fatal("homework should ask for confirmation by default")
-	}
-	balance := getStateTest(t, h, child).Children[0].PointsBalance
-	toggle := func(cookie *http.Cookie, id string, done bool) (awarded int, pending bool) {
-		w := doJSON(t, h, "POST", "/api/v1/homework/"+id+"/done", map[string]any{"date": "2026-10-09", "done": done}, cookie, "")
-		if w.Code != 200 {
-			t.Fatalf("toggle done: %d %s", w.Code, w.Body.String())
-		}
-		var out struct {
-			Awarded int  `json:"awarded"`
-			Pending bool `json:"pending"`
-		}
-		if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
-			t.Fatal(err)
-		}
-		return out.Awarded, out.Pending
-	}
-	waitList := func(cookie *http.Cookie) []homeworkPendingItem {
-		w := doJSON(t, h, "GET", "/api/v1/homework/pending", nil, cookie, "")
-		if w.Code != 200 {
-			t.Fatalf("pending list: %d %s", w.Code, w.Body.String())
-		}
-		var out []homeworkPendingItem
-		if err := json.NewDecoder(w.Body).Decode(&out); err != nil {
-			t.Fatal(err)
-		}
-		return out
-	}
-	// 孩子自勾：一分不得，卡片上是「已勾但等确认」，待确认列表里多一行。
-	if awarded, pending := toggle(child, items[0].ID, true); awarded != 0 || !pending {
-		t.Fatalf("child tick: awarded %d pending %v, want 0 true", awarded, pending)
-	}
-	if got := getStateTest(t, h, child).Children[0].PointsBalance; got != balance {
-		t.Fatalf("balance after an unconfirmed tick=%d, want it frozen at %d", got, balance)
-	}
-	if item := homeworkDay(t, h, child, "2026-10-09").Items[0]; !item.Done || item.Confirmed {
-		t.Fatalf("unconfirmed tick should read done=%v confirmed=%v", item.Done, item.Confirmed)
-	}
-	list := waitList(parent)
-	if len(list) != 1 || list[0].HomeworkID != items[0].ID || list[0].Date != "2026-10-09" || list[0].Subject != "语文" || list[0].ID != items[0].ID+":2026-10-09" {
-		t.Fatalf("pending list=%+v", list)
-	}
-	// 重放同一次勾选：不报错，也不多发一行、不多发一分。
-	if awarded, pending := toggle(child, items[0].ID, true); awarded != 0 || pending {
-		t.Fatalf("replayed tick: awarded %d pending %v, want 0 false", awarded, pending)
-	}
-	if list = waitList(child); len(list) != 1 {
-		t.Fatalf("the child should read its own pending row, got %+v", list)
-	}
-	// 取消一个还没确认的勾：什么也不扣。积分是按家庭记的，误去回冲会扣到
-	// 当天已经确认的别科头上。
-	if awarded, _ := toggle(child, items[1].ID, true); awarded != 0 {
-		t.Fatalf("second subject should also wait: awarded %d", awarded)
-	}
-	if awarded, _ := toggle(child, items[1].ID, false); awarded != 0 {
-		t.Fatalf("un-ticking a pending row must not deduct: awarded %d", awarded)
-	}
-	if list = waitList(parent); len(list) != 1 {
-		t.Fatalf("pending list after the cancel=%+v, want the first row only", list)
-	}
-	// 家长确认：这一勾现在算数了，+5；额外的那 5 分还不该来，因为另一科没交。
-	if awarded, pending := toggle(parent, items[0].ID, true); awarded != homeworkDonePoints || pending {
-		t.Fatalf("parent confirm: awarded %d pending %v, want %d false", awarded, pending, homeworkDonePoints)
-	}
-	if got := getStateTest(t, h, child).Children[0].PointsBalance; got != balance+homeworkDonePoints {
-		t.Fatalf("balance after the confirm=%d, want %d", got, balance+homeworkDonePoints)
-	}
-	if !homeworkDay(t, h, child, "2026-10-09").Items[0].Confirmed {
-		t.Fatal("the confirmed day must read back confirmed")
-	}
-	// 确认重放不再加钱（行已存在，INSERT OR IGNORE 不会把 confirmed_at 补上去）。
-	if awarded, _ := toggle(parent, items[0].ID, true); awarded != 0 {
-		t.Fatalf("replayed confirm must not re-credit: awarded %d", awarded)
-	}
-	// 孩子勾上第二科、家长再确认：这一回才是「当天全部完成」，+5 再 +5。
-	toggle(child, items[1].ID, true)
-	if awarded, _ := toggle(parent, items[1].ID, true); awarded != 2*homeworkDonePoints {
-		t.Fatalf("day bonus on the last confirm: awarded %d, want %d", awarded, 2*homeworkDonePoints)
-	}
-	if got := getStateTest(t, h, child).Children[0].PointsBalance; got != balance+3*homeworkDonePoints {
-		t.Fatalf("balance at the end=%d, want %d", got, balance+3*homeworkDonePoints)
-	}
-	if list = waitList(parent); len(list) != 0 {
-		t.Fatalf("nothing should stay pending, got %+v", list)
 	}
 }
 

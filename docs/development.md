@@ -75,7 +75,7 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 
 - 全部 UI 在 `src/App.tsx`（约 49 个顶层组件），不建单功能文件。
 - 状态只在 `useAppStore()` 里，作为 `store` prop 往下传；没有 Context、Redux、按页面取数或 `localStorage`。
-- 写操作加在 `actions` 上并通过 `run(() => ...)` 执行（它会清空消息、执行、刷新服务端状态）。统计和作业是两处例外，见 `store.ts` 的注释。`run` 会把操作结果透出来（失败是 `undefined`），`toggleHomeworkDone` 就靠它把服务端的 `awarded`/`pending` 交给那张卡，前端不自己猜数字。
+- 写操作加在 `actions` 上并通过 `run(() => ...)` 执行（它会清空消息、执行、刷新服务端状态）。统计和作业是两处例外，见 `store.ts` 的注释。`run` 会把操作结果透出来（失败是 `undefined`），`toggleHomeworkDone` 就靠它把服务端的 `awarded` 交给那张卡，前端不自己猜数字。
 - `TaskForm` 选 `weekly` 时是一排 `.weekday-chip` 复选（`repeatWeekdays`，加 `工作日`/`周末`/`全选` 快捷），`repeatWeekday` 只是首日；`repeatWeekdays: []` 回到旧的单日语义。
 - 请求都走 `request()`；需要幂等的写操作必须用 `json(method, value, true)`。`idempotencyKey()` 在非 HTTPS 环境会退化到 `crypto.getRandomValues`，不要在请求路径上直接调 `crypto.randomUUID()`。
 - `src/types.ts` 与 Go DTO 一一对应；写请求体只用 `ChildInput` / `TaskInput` / `WishInput`，禁止回传服务端 DTO。
