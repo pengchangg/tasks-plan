@@ -176,3 +176,11 @@
 .preset-chip{display:inline-flex;align-items:center;gap:5px;min-height:32px;padding:6px 10px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--ink);font-size:12px;font-weight:600}
 .preset-chip b{font:700 11px Fredoka;color:var(--coral-ink)}
 .preset-chip:hover,.preset-chip:focus-visible{border-color:var(--mint);background:#e4f2ed}
+.weekday-picker{display:flex;flex-direction:column;gap:7px}
+.weekday-label{font-size:12px;font-weight:700}
+.weekday-row{display:flex;flex-wrap:wrap;gap:6px}
+.weekday-chip{min-width:40px;justify-content:center}
+.weekday-chip[aria-pressed="true"]{border-color:var(--mint-ink);background:#ddf0ea;color:var(--mint-ink);font-weight:700}
+.weekday-quick{display:flex;gap:4px;margin-top:-3px}
+.weekday-quick button{border:0;background:none;padding:4px 7px;border-radius:6px;font-size:11px;font-weight:700;color:var(--mint-ink)}
+.weekday-quick button:hover,.weekday-quick button:focus-visible{background:#e4f2ed}

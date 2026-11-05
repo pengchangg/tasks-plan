@@ -20,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,17 +73,18 @@ type Child struct {
 	StreakDays    int     `json:"streakDays"`
 }
 type Task struct {
-	ID            string `json:"id"`
-	ChildID       string `json:"childId"`
-	Title         string `json:"title"`
-	Description   string `json:"description"`
-	Category      string `json:"category"`
-	Points        int    `json:"points"`
-	RepeatRule    string `json:"repeatRule"`
-	RepeatWeekday int    `json:"repeatWeekday"`
-	DueDate       string `json:"dueDate"`
-	Status        string `json:"status"`
-	CreatedAt     string `json:"createdAt"`
+	ID             string `json:"id"`
+	ChildID        string `json:"childId"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	Category       string `json:"category"`
+	Points         int    `json:"points"`
+	RepeatRule     string `json:"repeatRule"`
+	RepeatWeekday  int    `json:"repeatWeekday"`
+	RepeatWeekdays []int  `json:"repeatWeekdays"`
+	DueDate        string `json:"dueDate"`
+	Status         string `json:"status"`
+	CreatedAt      string `json:"createdAt"`
 }
 type Attachment struct {
 	ID   string `json:"id,omitempty"`
@@ -894,21 +896,24 @@ func (s *Server) ensureInstances(ctx context.Context, family string) error {
 	}
 	now := s.now().In(loc)
 	date := now.Format("2006-01-02")
-	mondayOffset := (int(now.Weekday()) + 6) % 7
-	monday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -mondayOffset)
+	monday, err := s.weekStart(ctx, family)
+	if err != nil {
+		return err
+	}
 	week := monday.Format("2006-01-02")
-	rows, err := s.db.QueryContext(ctx, `SELECT id,child_id,title,description,category,points,repeat_rule,repeat_weekday,created_at FROM task_templates WHERE family_id=? AND active=1`, family)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,child_id,title,description,category,points,repeat_rule,repeat_weekday,repeat_weekdays,created_at FROM task_templates WHERE family_id=? AND active=1`, family)
 	if err != nil {
 		return err
 	}
 	type template struct {
 		tid, cid, title, desc, cat, rule, created string
 		points, weekday                           int
+		weekdays                                  string
 	}
 	var templates []template
 	for rows.Next() {
 		var v template
-		if err = rows.Scan(&v.tid, &v.cid, &v.title, &v.desc, &v.cat, &v.points, &v.rule, &v.weekday, &v.created); err != nil {
+		if err = rows.Scan(&v.tid, &v.cid, &v.title, &v.desc, &v.cat, &v.points, &v.rule, &v.weekday, &v.weekdays, &v.created); err != nil {
 			rows.Close()
 			return err
 		}
@@ -919,28 +924,53 @@ func (s *Server) ensureInstances(ctx context.Context, family string) error {
 		return err
 	}
 	rows.Close()
+	// 一个实例要占的期次：一次任务只有创建那天一个，每日任务只有今天一个，
+	// 每周任务按选中的星期各一个。
+	type bucket struct {
+		key     string
+		due     string
+		weekday int
+	}
 	for _, v := range templates {
-		key, due := "once", date
-		if v.rule == "daily" {
-			key = date
-		} else if v.rule == "weekly" {
-			key = week
-			weekdayOffset := (v.weekday + 6) % 7
-			due = monday.AddDate(0, 0, weekdayOffset).Format("2006-01-02")
-		}
+		buckets := []bucket{{key: date, due: date, weekday: v.weekday}}
 		if v.rule == "once" {
 			created, parseErr := time.Parse(time.RFC3339Nano, v.created)
 			if parseErr != nil {
 				return fmt.Errorf("parse task template creation time: %w", parseErr)
 			}
-			due = created.In(loc).Format("2006-01-02")
+			buckets = []bucket{{key: "once", due: created.In(loc).Format("2006-01-02"), weekday: v.weekday}}
 		}
-		_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO task_instances(id,family_id,template_id,child_id,period_key,title,description,category,points,repeat_rule,repeat_weekday,due_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id("task"), family, v.tid, v.cid, key, v.title, v.desc, v.cat, v.points, v.rule, v.weekday, due, "todo", nowText(s.now()))
-		if err != nil {
-			return err
+		if v.rule == "weekly" {
+			// 多选星期把那天编进 period_key，同一周的周一和周三才是两回事；
+			// 只选一天（repeat_weekdays 是空串）沿用整周一个 key 的老格式。
+			days := repeatWeekdayList(v.weekdays, v.weekday)
+			buckets = nil
+			for _, day := range days {
+				key := week
+				if len(days) > 1 {
+					key = week + ":" + strconv.Itoa(day)
+				}
+				buckets = append(buckets, bucket{key: key, due: monday.AddDate(0, 0, (day+6)%7).Format("2006-01-02"), weekday: day})
+			}
+		}
+		for _, b := range buckets {
+			_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO task_instances(id,family_id,template_id,child_id,period_key,title,description,category,points,repeat_rule,repeat_weekday,repeat_weekdays,due_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id("task"), family, v.tid, v.cid, b.key, v.title, v.desc, v.cat, v.points, v.rule, b.weekday, v.weekdays, b.due, "todo", nowText(s.now()))
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// weekStart 是本周一零点（家庭时区）——排期与改星期时算 period_key 共用一个口径。
+func (s *Server) weekStart(ctx context.Context, family string) (time.Time, error) {
+	loc, err := s.familyLocation(ctx, family)
+	if err != nil {
+		return time.Time{}, err
+	}
+	now := s.now().In(loc)
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -(int(now.Weekday())+6)%7), nil
 }
 
 // streakLookbackDays 限制 /state 读账本的深度：连续天数只从今天往回逐日走，
@@ -1031,16 +1061,18 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 		out.Children = append(out.Children, c)
 	}
 	rows.Close()
-	rows, err = s.db.QueryContext(ctx, `SELECT id,child_id,title,description,category,points,repeat_rule,repeat_weekday,due_date,status,created_at FROM task_instances WHERE family_id=? AND template_id IS NOT NULL AND (?='parent' OR child_id=?) ORDER BY created_at DESC`, x.FamilyID, x.ActorType, x.SelectedChildID)
+	rows, err = s.db.QueryContext(ctx, `SELECT id,child_id,title,description,category,points,repeat_rule,repeat_weekday,repeat_weekdays,due_date,status,created_at FROM task_instances WHERE family_id=? AND template_id IS NOT NULL AND (?='parent' OR child_id=?) ORDER BY created_at DESC`, x.FamilyID, x.ActorType, x.SelectedChildID)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var v Task
-		if err = rows.Scan(&v.ID, &v.ChildID, &v.Title, &v.Description, &v.Category, &v.Points, &v.RepeatRule, &v.RepeatWeekday, &v.DueDate, &v.Status, &v.CreatedAt); err != nil {
+		var weekdays string
+		if err = rows.Scan(&v.ID, &v.ChildID, &v.Title, &v.Description, &v.Category, &v.Points, &v.RepeatRule, &v.RepeatWeekday, &weekdays, &v.DueDate, &v.Status, &v.CreatedAt); err != nil {
 			rows.Close()
 			return out, err
 		}
+		v.RepeatWeekdays = parseRepeatWeekdays(weekdays)
 		out.Tasks = append(out.Tasks, v)
 	}
 	rows.Close()
@@ -1327,13 +1359,71 @@ func mediaForTemplate(ctx context.Context, q queryer, family, template string) [
 }
 
 type taskInput struct {
-	ChildID       string `json:"childId"`
-	Title         string `json:"title"`
-	Description   string `json:"description"`
-	Category      string `json:"category"`
-	Points        int    `json:"points"`
-	RepeatRule    string `json:"repeatRule"`
-	RepeatWeekday int    `json:"repeatWeekday"`
+	ChildID        string `json:"childId"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	Category       string `json:"category"`
+	Points         int    `json:"points"`
+	RepeatRule     string `json:"repeatRule"`
+	RepeatWeekday  int    `json:"repeatWeekday"`
+	RepeatWeekdays []int  `json:"repeatWeekdays"`
+}
+
+// parseRepeatWeekdays 解析 repeat_weekdays 列（升序去重的 "0".."6" 逗号串），
+// 脏数据逐段丢掉；空串返回空集合，调用方按老语义退回 repeat_weekday。
+// 永远返回非 nil，/state 的数组不能是 null。
+func parseRepeatWeekdays(value string) []int {
+	out, seen := []int{}, map[int]bool{}
+	for _, part := range strings.Split(value, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		day, err := strconv.Atoi(part)
+		if err != nil || day < 0 || day > 6 || seen[day] {
+			continue
+		}
+		seen[day] = true
+		out = append(out, day)
+	}
+	sort.Ints(out)
+	return out
+}
+
+// repeatWeekdayList 是读取端的口径：集合为空就用旧字段的那一天。
+func repeatWeekdayList(value string, fallback int) []int {
+	if days := parseRepeatWeekdays(value); len(days) > 0 {
+		return days
+	}
+	return []int{fallback}
+}
+
+// repeatWeekdaysOf 是写入端的口径：把请求里的集合整理成升序去重，一个都没选
+// （或全是脏数据）就用旧字段的那一天。调用方已把超出 0..6 的值当成 400 拒掉了。
+func repeatWeekdaysOf(days []int, fallback int) []int {
+	out, seen := []int{}, map[int]bool{}
+	for _, day := range days {
+		if day < 0 || day > 6 || seen[day] {
+			continue
+		}
+		seen[day] = true
+		out = append(out, day)
+	}
+	if len(out) == 0 {
+		return []int{fallback}
+	}
+	sort.Ints(out)
+	return out
+}
+
+// repeatWeekdaysText 把集合写成 repeat_weekdays 列：空集合写空串，也就是「只有
+// repeat_weekday 那一天」——单天任务保持老形状，实例的 period_key 不会因此变。
+func repeatWeekdaysText(days []int) string {
+	parts := make([]string, len(days))
+	for i, day := range days {
+		parts[i] = strconv.Itoa(day)
+	}
+	return strings.Join(parts, ",")
 }
 
 func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
@@ -1351,6 +1441,24 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 		problem(w, 400, "invalid_request", "repeatWeekday must be between 0 and 6")
 		return
 	}
+	for _, day := range in.RepeatWeekdays {
+		if day < 0 || day > 6 {
+			problem(w, 400, "invalid_request", "repeatWeekdays must be between 0 and 6")
+			return
+		}
+	}
+	// 星期集合只有每周任务用。只选一天（或老客户端一个都没发）就把列留空，
+	// 用 repeat_weekday 表示；选多天才写串，同时把 repeat_weekday 写成第一天，
+	// 只读旧字段的代码不会吃亏。
+	firstDay, weekdaysText := in.RepeatWeekday, ""
+	var weeklyDays []int
+	if in.RepeatRule == "weekly" {
+		weeklyDays = repeatWeekdaysOf(in.RepeatWeekdays, in.RepeatWeekday)
+		firstDay = weeklyDays[0]
+		if len(weeklyDays) > 1 {
+			weekdaysText = repeatWeekdaysText(weeklyDays)
+		}
+	}
 	var childExists int
 	if s.db.QueryRow(`SELECT 1 FROM children WHERE id=? AND family_id=?`, in.ChildID, x.FamilyID).Scan(&childExists) != nil {
 		problem(w, 404, "not_found", "child not found")
@@ -1360,7 +1468,7 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 	now := nowText(s.now())
 	if instance == "" {
 		tid := id("tpl")
-		_, err := s.db.Exec(`INSERT INTO task_templates(id,family_id,child_id,title,description,category,points,repeat_rule,repeat_weekday,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, tid, x.FamilyID, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, now, now)
+		_, err := s.db.Exec(`INSERT INTO task_templates(id,family_id,child_id,title,description,category,points,repeat_rule,repeat_weekday,repeat_weekdays,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, tid, x.FamilyID, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, firstDay, weekdaysText, now, now)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -1384,7 +1492,16 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		res, err := s.db.Exec(`UPDATE task_templates SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=?,updated_at=? WHERE family_id=? AND id=(SELECT template_id FROM task_instances WHERE id=? AND family_id=?)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, now, x.FamilyID, instance, x.FamilyID)
+		// 改星期之前先看清原来排的是哪几天：只有星期真的变了才重排本周实例，
+		// 纯改个标题不该让孩子手里那个 id 消失。
+		var templateID, oldRule, oldSet string
+		var oldWeekday int
+		err := s.db.QueryRow(`SELECT task_instances.template_id,task_templates.repeat_rule,task_templates.repeat_weekday,task_templates.repeat_weekdays FROM task_instances JOIN task_templates ON task_templates.id=task_instances.template_id WHERE task_instances.id=? AND task_instances.family_id=?`, instance, x.FamilyID).Scan(&templateID, &oldRule, &oldWeekday, &oldSet)
+		if err != nil {
+			problem(w, 404, "not_found", "task not found")
+			return
+		}
+		res, err := s.db.Exec(`UPDATE task_templates SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=?,repeat_weekdays=?,updated_at=? WHERE family_id=? AND id=?`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, firstDay, weekdaysText, now, x.FamilyID, templateID)
 		if err != nil {
 			s.internalError(w, r, err)
 			return
@@ -1394,9 +1511,45 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request) {
 			problem(w, 404, "not_found", "task not found")
 			return
 		}
+		// 本周已经排好但还没做的实例按新星期重排；交过或确认过的是历史，
+		// 留在原日期不动。
+		if in.RepeatRule == "weekly" && (oldRule != "weekly" || oldWeekday != firstDay || oldSet != weekdaysText) {
+			monday, weekErr := s.weekStart(r.Context(), x.FamilyID)
+			if weekErr != nil {
+				s.internalError(w, r, weekErr)
+				return
+			}
+			week := monday.Format("2006-01-02")
+			if oldSet == "" && oldRule == "weekly" && slices.Contains(weeklyDays, oldWeekday) {
+				// 老行用的是「整周一个 key」，那天又还在新集合里，就先把它的 key
+				// 迁成新格式：不迁的话 INSERT OR IGNORE 会当成没排过，孩子已经
+				// 交过的那一条旁边又冒出一个待办，同一星期几能被确认两次。
+				if _, err = s.db.Exec(`UPDATE task_instances SET period_key=? WHERE family_id=? AND template_id=? AND period_key=?`, week+":"+strconv.Itoa(oldWeekday), x.FamilyID, templateID, week); err != nil {
+					s.internalError(w, r, err)
+					return
+				}
+			}
+			if _, err = s.db.Exec(`DELETE FROM task_instances WHERE family_id=? AND template_id=? AND status='todo' AND (period_key=? OR period_key LIKE ?) AND NOT EXISTS(SELECT 1 FROM task_submissions WHERE task_instance_id=task_instances.id)`, x.FamilyID, templateID, week, week+":%"); err != nil {
+				s.internalError(w, r, err)
+				return
+			}
+		}
 		// Zero rows is the expected outcome when the instance is already
 		// submitted or no longer todo/rejected, so only the error matters.
-		if _, err = s.db.Exec(`UPDATE task_instances SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=? WHERE id=? AND family_id=? AND status IN ('todo','rejected') AND NOT EXISTS(SELECT 1 FROM task_submissions WHERE task_instance_id=task_instances.id)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, in.RepeatWeekday, instance, x.FamilyID); err != nil {
+		if _, err = s.db.Exec(`UPDATE task_instances SET child_id=?,title=?,description=?,category=?,points=?,repeat_rule=?,repeat_weekday=?,repeat_weekdays=? WHERE id=? AND family_id=? AND status IN ('todo','rejected') AND NOT EXISTS(SELECT 1 FROM task_submissions WHERE task_instance_id=task_instances.id)`, in.ChildID, strings.TrimSpace(in.Title), in.Description, in.Category, in.Points, in.RepeatRule, firstDay, weekdaysText, instance, x.FamilyID); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		// 上面的重排可能刚好把被编辑的那一条删掉了，所以回给前端的 id 要在
+		// ensureInstances 排完之后重新取一次，它必须能在随后的 /state 里列出来。
+		if err = s.ensureInstances(r.Context(), x.FamilyID); err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		if err = s.db.QueryRow(`SELECT id FROM task_instances WHERE template_id=? AND family_id=? ORDER BY rowid DESC LIMIT 1`, templateID, x.FamilyID).Scan(&instance); err != nil || instance == "" {
+			if err == nil {
+				err = fmt.Errorf("task template %s has no instance", templateID)
+			}
 			s.internalError(w, r, err)
 			return
 		}
@@ -2380,16 +2533,16 @@ func statsWindow(r *http.Request, today time.Time, loc *time.Location) (time.Tim
 // zero. Inactive templates are excluded: deleting one cascades to its
 // submissions, so counting it would report a gap nobody can close.
 func (s *Server) scheduledTaskCount(ctx context.Context, family, child string, from, to time.Time, loc *time.Location) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT repeat_rule,repeat_weekday,created_at FROM task_templates WHERE family_id=? AND child_id=? AND active=1`, family, child)
+	rows, err := s.db.QueryContext(ctx, `SELECT repeat_rule,repeat_weekday,repeat_weekdays,created_at FROM task_templates WHERE family_id=? AND child_id=? AND active=1`, family, child)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 	total := 0
 	for rows.Next() {
-		var rule, created string
+		var rule, created, set string
 		var weekday int
-		if err = rows.Scan(&rule, &weekday, &created); err != nil {
+		if err = rows.Scan(&rule, &weekday, &set, &created); err != nil {
 			return 0, err
 		}
 		at, parseErr := time.Parse(time.RFC3339Nano, created)
@@ -2408,12 +2561,15 @@ func (s *Server) scheduledTaskCount(ctx context.Context, family, child string, f
 		if first.Before(from) {
 			first = from
 		}
+		// 多选星期要在集合里查，老数据（空串）就是 repeat_weekday 那一天；
+		// 不这么算的话 /stats 的分母会比实际排期少算几天。
+		days := repeatWeekdayList(set, weekday)
 		for offset := 0; ; offset++ {
 			day := time.Date(first.Year(), first.Month(), first.Day()+offset, 0, 0, 0, 0, loc)
 			if day.After(to) {
 				break
 			}
-			if rule == "weekly" && int(day.Weekday()) != weekday {
+			if rule == "weekly" && !slices.Contains(days, int(day.Weekday())) {
 				continue
 			}
 			total++

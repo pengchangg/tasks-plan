@@ -3,7 +3,7 @@ export type TaskStatus = 'todo' | 'pending_review' | 'completed' | 'rejected'
 export type RepeatRule = 'once' | 'daily' | 'weekly'
 
 export interface Child { id: string; name: string; avatar: string; color: string; level: number; experience: number; pointsBalance: number; streakDays: number }
-export interface Task { id: string; childId: string; title: string; description: string; category: string; points: number; repeatRule: RepeatRule; repeatWeekday: number; dueDate: string; status: TaskStatus; createdAt: string }
+export interface Task { id: string; childId: string; title: string; description: string; category: string; points: number; repeatRule: RepeatRule; repeatWeekday: number; repeatWeekdays: number[]; dueDate: string; status: TaskStatus; createdAt: string }
 export interface Attachment { id?: string; name: string; type: 'image' | 'video'; url?: string; file?: File }
 export interface TaskSubmission { id: string; taskId: string; childId: string; note: string; attachments: Attachment[]; submittedAt: string; reviewedAt?: string; reviewNote?: string }
 export interface Wish { id: string; title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
@@ -25,7 +25,7 @@ export interface StatsPayload { from: string; to: string; totalTasks: number; co
 // 多一个字段就是 400。所以写请求体只允许用这三个类型，禁止展开服务端 DTO——DTO 里的
 // id / dueDate / status 都是只读字段，回传即 400。
 export interface ChildInput { name: string; avatar: string; color: string }
-export interface TaskInput { childId: string; title: string; description: string; category: string; points: number; repeatRule: RepeatRule; repeatWeekday: number }
+export interface TaskInput { childId: string; title: string; description: string; category: string; points: number; repeatRule: RepeatRule; repeatWeekday: number; repeatWeekdays: number[] }
 export interface WishInput { title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
 
 // GET /api/v1/homework/?date= 的载荷：某一天的作业，按录入顺序。

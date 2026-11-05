@@ -69,6 +69,8 @@ import type {
 import "./styles.css";
 
 const categories = ["全部", "生活自理", "学习成长", "家庭责任"];
+// 星期的短名，顺序就是周日..周六（和 repeat_weekday / repeat_weekdays 里的数字同口径）。
+const weekdayShort = ["日", "一", "二", "三", "四", "五", "六"];
 // 新建任务时摆上一排能照着抄的推荐——对着空白表单想点子才是家长真正卡住的地方。
 // 只做前端：点一下把字段填好，保存仍走 POST /tasks/，服务端没有新资源也没有新列。
 const taskPresets: {
@@ -3220,7 +3222,11 @@ function AdminTaskRow({
               {task.repeatRule === "daily"
                 ? "每天"
                 : task.repeatRule === "weekly"
-                  ? `每周${["日", "一", "二", "三", "四", "五", "六"][task.repeatWeekday]}`
+                  ? task.repeatWeekdays.length > 1
+                    ? `每周 ${task.repeatWeekdays
+                        .map((day) => weekdayShort[day])
+                        .join("/")}`
+                    : `每周${weekdayShort[task.repeatWeekday]}`
                   : "一次性"}
             </p>
           </div>
@@ -3273,6 +3279,7 @@ function TaskForm({
     points: number;
     repeatRule: RepeatRule;
     repeatWeekday: number;
+    repeatWeekdays: number[];
   }) => void;
 }) {
   const [title, setTitle] = useState(task?.title ?? "");
@@ -3282,9 +3289,20 @@ function TaskForm({
   const [repeatRule, setRepeatRule] = useState<RepeatRule>(
     task?.repeatRule ?? "once",
   );
-  const [repeatWeekday, setRepeatWeekday] = useState(
-    task?.repeatWeekday ?? weekdayIndex(familyToday(timezone)),
+  const repeatWeekday = task?.repeatWeekday ?? weekdayIndex(familyToday(timezone));
+  // 每周任务可以多选星期。单天任务（包括所有老数据）的 repeatWeekdays 是空数组，
+  // 所以这里退回 repeatWeekday 那一天；集合始终升序，服务端拿它拼 period_key。
+  const [weekdays, setWeekdays] = useState<number[]>(() =>
+    task?.repeatWeekdays?.length
+      ? [...task.repeatWeekdays].sort((left, right) => left - right)
+      : [repeatWeekday],
   );
+  const toggleWeekday = (day: number) =>
+    setWeekdays((current) =>
+      current.includes(day)
+        ? current.filter((picked) => picked !== day)
+        : [...current, day].sort((left, right) => left - right),
+    );
   const dialog = useDialog(onClose);
   return (
     <div className="modal-backdrop" ref={dialog}>
@@ -3302,7 +3320,8 @@ function TaskForm({
               category,
               points,
               repeatRule,
-              repeatWeekday,
+              repeatWeekday: weekdays[0] ?? repeatWeekday,
+              repeatWeekdays: weekdays,
             });
         }}
       >
@@ -3394,29 +3413,48 @@ function TaskForm({
           </select>
         </label>
         {repeatRule === "weekly" && (
-          <label>
-            每周星期
-            <select
-              value={repeatWeekday}
-              onChange={(e) => setRepeatWeekday(Number(e.target.value))}
-            >
-              {[
-                "星期日",
-                "星期一",
-                "星期二",
-                "星期三",
-                "星期四",
-                "星期五",
-                "星期六",
-              ].map((day, index) => (
-                <option key={day} value={index}>
+          <div className="weekday-picker">
+            <span className="weekday-label">每周星期</span>
+            <div className="weekday-row" role="group" aria-label="每周星期">
+              {weekdayShort.map((day, index) => (
+                <button
+                  type="button"
+                  key={day}
+                  className="preset-chip weekday-chip"
+                  aria-label={`每周${day}`}
+                  aria-pressed={weekdays.includes(index)}
+                  onClick={() => toggleWeekday(index)}
+                >
                   {day}
-                </option>
+                </button>
               ))}
-            </select>
-          </label>
+            </div>
+            <div className="weekday-quick">
+              <button type="button" onClick={() => setWeekdays([1, 2, 3, 4, 5])}>
+                工作日
+              </button>
+              <button type="button" onClick={() => setWeekdays([0, 6])}>
+                周末
+              </button>
+              <button
+                type="button"
+                onClick={() => setWeekdays([0, 1, 2, 3, 4, 5, 6])}
+              >
+                全选
+              </button>
+            </div>
+          </div>
         )}
-        <button className="wide-primary" type="submit">
+        <button
+          className="wide-primary"
+          type="submit"
+          disabled={repeatRule === "weekly" && weekdays.length === 0}
+          title={
+            repeatRule === "weekly" && weekdays.length === 0
+              ? "至少选一个星期"
+              : undefined
+          }
+        >
           {task ? "保存修改" : "发布任务"}
         </button>
       </form>

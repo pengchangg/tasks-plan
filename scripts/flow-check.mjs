@@ -406,9 +406,18 @@ await page.getByRole("link", { name: "任务管理" }).click();
 await page.getByRole("button", { name: "新建任务" }).click();
 await page.getByLabel("任务名称").fill("每周整理书架");
 await page.getByLabel("重复方式").selectOption("weekly");
-await page
-  .getByLabel("每周星期")
-  .selectOption(String((familyToday.weekday + 3) % 7));
+// 勾选式星期：默认勾着今天，这条要排在别的日子才验得出补录，所以先取消今天、
+// 再勾上目标那天（顺便验一遍这个开关两个方向都能动）。
+const otherWeekday = (familyToday.weekday + 3) % 7;
+const weekdayChip = (index) =>
+  page.getByRole("button", { name: `每周${"日一二三四五六"[index]}` });
+await weekdayChip(familyToday.weekday).click();
+await weekdayChip(otherWeekday).click();
+assert.deepEqual(
+  await page.locator('.weekday-chip[aria-pressed="true"]').allInnerTexts(),
+  ["日一二三四五六"[otherWeekday]],
+  `只该勾上${"日一二三四五六"[otherWeekday]}`,
+);
 await page.getByRole("button", { name: "发布任务" }).click();
 state = await waitForState((s) => Boolean(currentTask(s, "每周整理书架")));
 const weeklyTask = currentTask(state, "每周整理书架");

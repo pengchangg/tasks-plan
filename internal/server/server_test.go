@@ -281,6 +281,45 @@ func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {
 	if due != "2025-01-01" {
 		t.Fatalf("weekly due date=%s, want 2025-01-01", due)
 	}
+	// 多选星期：这一周（周一 2024-12-30）选了日/二/四，就要恰好三个实例，
+	// 各自落在自己那天，period_key 也各自带上天。
+	if _, err := s.db.Exec(`INSERT INTO task_templates(id,family_id,child_id,title,description,category,points,repeat_rule,repeat_weekday,repeat_weekdays,created_at,updated_at) VALUES('weekly-multi',?,?,?,?,?,10,'weekly',0,'0,2,4',?,?)`, family, child, "Weekly Multi", "", "学习成长", nowText(s.now()), nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ensureInstances(context.Background(), family); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.db.Query(`SELECT period_key,due_date FROM task_instances WHERE template_id='weekly-multi' ORDER BY due_date`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scheduled [][2]string
+	for rows.Next() {
+		var key, day string
+		if err := rows.Scan(&key, &day); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		scheduled = append(scheduled, [2]string{key, day})
+	}
+	rows.Close()
+	want := [][2]string{{"2024-12-30:2", "2024-12-31"}, {"2024-12-30:4", "2025-01-02"}, {"2024-12-30:0", "2025-01-05"}}
+	if len(scheduled) != len(want) {
+		t.Fatalf("multi-weekday instances=%d %v, want 3", len(scheduled), scheduled)
+	}
+	for index, bucket := range want {
+		if scheduled[index] != bucket {
+			t.Fatalf("multi-weekday instance %d=%v, want %v", index, scheduled[index], bucket)
+		}
+	}
+	// 只排一天的老任务不受影响：一周还是一个实例，key 里不带天。
+	var legacy int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_instances WHERE template_id='weekly-test' AND period_key='2024-12-30'`).Scan(&legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy != 1 {
+		t.Fatalf("legacy weekly instances=%d, want 1", legacy)
+	}
 	var seededDue string
 	if err := s.db.QueryRow(`SELECT due_date FROM task_instances WHERE family_id=? AND repeat_rule='daily' ORDER BY due_date DESC LIMIT 1`, family).Scan(&seededDue); err != nil {
 		t.Fatal(err)
@@ -314,6 +353,95 @@ func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {
 	}
 	if payload.Timezone != "America/Los_Angeles" {
 		t.Fatalf("state timezone=%q, want America/Los_Angeles", payload.Timezone)
+	}
+}
+
+func TestWeeklyTaskEditToMultipleWeekdaysReplacesThisWeeksTodoInstances(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	// 2025-01-08 是周三，家长时区 Asia/Shanghai，本周周一就是 2025-01-06。
+	s.now = func() time.Time { return time.Date(2025, 1, 8, 1, 0, 0, 0, time.UTC) }
+	parent := parentCookie(t, h)
+	child := getStateTest(t, h, parent).Children[0].ID
+	created := doJSON(t, h, "POST", "/api/v1/tasks/", map[string]any{"childId": child, "title": "整理书架", "description": "", "category": "家庭责任", "points": 10, "repeatRule": "weekly", "repeatWeekday": 1, "repeatWeekdays": []int{}}, parent, "")
+	if created.Code != 200 {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	var first struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(created.Body).Decode(&first); err != nil {
+		t.Fatal(err)
+	}
+	var template, legacyKey string
+	if err := s.db.QueryRow(`SELECT template_id,period_key FROM task_instances WHERE id=?`, first.ID).Scan(&template, &legacyKey); err != nil {
+		t.Fatal(err)
+	}
+	if legacyKey != "2025-01-06" {
+		t.Fatalf("legacy period_key=%s, want 2025-01-06", legacyKey)
+	}
+
+	// 孩子已经把周二这一条交上去了，家长才把一周一天改成一三五。
+	kid := childCookie(t, h, child)
+	submit := httptest.NewRecorder()
+	h.ServeHTTP(submit, multipartRequest(t, "POST", "/api/v1/tasks/"+first.ID+"/submit", kid, "weekly-edit-submit", map[string]string{"note": "交过了"}, nil))
+	if submit.Code != 200 {
+		t.Fatalf("submit: %d %s", submit.Code, submit.Body.String())
+	}
+	updated := doJSON(t, h, "PUT", "/api/v1/tasks/"+first.ID, map[string]any{"childId": child, "title": "整理书架", "description": "", "category": "家庭责任", "points": 10, "repeatRule": "weekly", "repeatWeekday": 1, "repeatWeekdays": []int{1, 3, 5}}, parent, "")
+	if updated.Code != 200 {
+		t.Fatalf("update: %d %s", updated.Code, updated.Body.String())
+	}
+	var moved struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(updated.Body).Decode(&moved); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := s.db.Query(`SELECT id,period_key,due_date,status FROM task_instances WHERE template_id=? ORDER BY due_date`, template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scheduled [][4]string
+	for rows.Next() {
+		var row [4]string
+		if err := rows.Scan(&row[0], &row[1], &row[2], &row[3]); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		scheduled = append(scheduled, row)
+	}
+	rows.Close()
+	want := [][4]string{{first.ID, "2025-01-06:1", "2025-01-06", "pending_review"}, {"", "2025-01-06:3", "2025-01-08", "todo"}, {"", "2025-01-06:5", "2025-01-10", "todo"}}
+	if len(scheduled) != len(want) {
+		t.Fatalf("instances after the edit=%d %v, want 3", len(scheduled), scheduled)
+	}
+	for index, bucket := range want {
+		if scheduled[index][1] != bucket[1] || scheduled[index][2] != bucket[2] || scheduled[index][3] != bucket[3] {
+			t.Fatalf("instance %d=%v, want key=%s due=%s status=%s", index, scheduled[index], bucket[1], bucket[2], bucket[3])
+		}
+	}
+	// 周二那条已经交了的行只被追了 key，没被重建：它的提交记录还在身上。
+	var evidence int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_submissions WHERE task_instance_id=?`, first.ID).Scan(&evidence); err != nil {
+		t.Fatal(err)
+	}
+	if evidence != 1 {
+		t.Fatalf("submissions on the migrated instance=%d, want 1", evidence)
+	}
+	// 回答的 id 必须是 /state 列得出来的实例，否则家长改完刷新就看见 404。
+	var listed bool
+	for _, task := range getStateTest(t, h, parent).Tasks {
+		if task.ID == moved.ID {
+			listed = true
+			if len(task.RepeatWeekdays) != 3 {
+				t.Fatalf("repeatWeekdays=%v, want three days", task.RepeatWeekdays)
+			}
+		}
+	}
+	if !listed {
+		t.Fatalf("created id %s is not listable in /state", moved.ID)
 	}
 }
 
@@ -575,6 +703,25 @@ func TestStatsFollowRequestedRangeScheduleAndCategories(t *testing.T) {
 	}
 	if !found || counted != todayStats.CompletedTasks {
 		t.Fatalf("categories=%v of %d completions", todayStats.Categories, todayStats.CompletedTasks)
+	}
+
+	// 一周排几天的任务，分母要按选中的星期算：全选七天，七天窗口就多七天；
+	// 再挑两天就只多两天，没选的日子不算。
+	weekBase := readStats("/api/v1/stats?from=" + today + "&to=" + day(6)).TotalTasks
+	createWeekly := func(title string, days []int) {
+		t.Helper()
+		body := map[string]any{"childId": task.ChildID, "title": title, "description": "", "category": "学习成长", "points": 10, "repeatRule": "weekly", "repeatWeekday": 0, "repeatWeekdays": days}
+		if w := doJSON(t, h, "POST", "/api/v1/tasks/", body, parent, ""); w.Code != 200 {
+			t.Fatalf("create %s: %d %s", title, w.Code, w.Body.String())
+		}
+	}
+	createWeekly("七天都排", []int{0, 1, 2, 3, 4, 5, 6})
+	if total := readStats("/api/v1/stats?from=" + today + "&to=" + day(6)).TotalTasks; total != weekBase+7 {
+		t.Fatalf("every-weekday total=%d, want %d", total, weekBase+7)
+	}
+	createWeekly("只排两天", []int{0, 6})
+	if total := readStats("/api/v1/stats?from=" + today + "&to=" + day(6)).TotalTasks; total != weekBase+9 {
+		t.Fatalf("two-weekday total=%d, want %d", total, weekBase+9)
 	}
 
 	// A sibling's window is its own: no templates, no confirmations, no ledger.
