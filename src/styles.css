@@ -165,3 +165,6 @@
 .review-note{flex:1 1 150px;min-width:0;border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit;font-size:12px;background:#fff}
 .review-note:focus{outline:2px solid var(--yellow);outline-offset:1px}
 .review-note-line{margin:0 0 9px;font-size:12px;line-height:1.5;color:#7a5a2f}
+.nav-badge{min-width:18px;padding:1px 5px;border-radius:999px;background:var(--coral-ink);color:#fff;font:700 11px Fredoka;display:grid;place-items:center}
+.parent-section-head .section-actions{display:flex;align-items:center;gap:10px}
+@media(max-width:760px){.side-nav a{position:relative}.nav-badge{position:absolute;top:1px;right:6px;min-width:16px;padding:0 4px;font-size:10px}}

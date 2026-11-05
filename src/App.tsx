@@ -2286,6 +2286,11 @@ function ConfirmModal({
 }
 
 function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
+  // 待确认的数量必须在任何页面都能看到，否则家长得先点进任务管理才知道有活要干。
+  // 口径与总览的「需要你的确认」一致：同一个当前孩子的 childTasks。
+  const pendingReview = store.childTasks.filter(
+    (task) => task.status === "pending_review",
+  ).length;
   return (
     <div className="parent-layout">
       <aside className="sidebar">
@@ -2317,6 +2322,7 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
             icon={<ClipboardCheck size={18} />}
             label="任务管理"
             short="任务"
+            badge={pendingReview}
           />
           <SideLink
             to="/parent/wishes"
@@ -2383,11 +2389,13 @@ function SideLink({
   icon,
   label,
   short,
+  badge = 0,
 }: {
   to: string;
   icon: React.ReactNode;
   label: string;
   short: string;
+  badge?: number;
 }) {
   const location = useLocation();
   return (
@@ -2397,6 +2405,11 @@ function SideLink({
       <span className="nav-short" aria-hidden="true">
         {short}
       </span>
+      {badge > 0 && (
+        <span className="nav-badge" title={`${badge} 项待确认`}>
+          {badge}
+        </span>
+      )}
       <ChevronRight size={14} />
     </Link>
   );
@@ -2423,6 +2436,7 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
   const done = store.stats.completedTasks;
   const total = store.stats.totalTasks;
   const [awarding, setAwarding] = useState(false);
+  const [confirmAll, setConfirmAll] = useState(false);
   return (
     <div className="parent-content">
       <ParentHeader
@@ -2482,9 +2496,19 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
         <h2>
           需要你的确认 <span>{pending.length}</span>
         </h2>
-        <Link to="/parent/tasks">
-          查看全部 <ChevronRight size={15} />
-        </Link>
+        <span className="section-actions">
+          {pending.length > 1 && (
+            <button
+              className="outline-button"
+              onClick={() => setConfirmAll(true)}
+            >
+              全部确认
+            </button>
+          )}
+          <Link to="/parent/tasks">
+            查看全部 <ChevronRight size={15} />
+          </Link>
+        </span>
       </div>
       {pending.length ? (
         <div className="review-list">
@@ -2540,6 +2564,18 @@ function ParentOverview({ store }: { store: ReturnType<typeof useAppStore> }) {
             </div>
           ))}
       </div>
+      {confirmAll && (
+        <ConfirmModal
+          title={`全部确认 ${pending.length} 项？`}
+          text={`确认后这 ${pending.length} 项任务会一起加上积分，这一步不能撤销。`}
+          confirm="确认全部"
+          onClose={() => setConfirmAll(false)}
+          onConfirm={() => {
+            setConfirmAll(false);
+            void store.actions.reviewAll(pending.map((task) => task.id));
+          }}
+        />
+      )}
       {awarding && (
         <PointsForm
           child={store.activeChild}

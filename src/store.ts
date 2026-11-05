@@ -124,6 +124,10 @@ async function request(path: string, init?: RequestInit) {
   return response;
 }
 
+// 两端在同一块屏上轮流用，孩子提交完就走开、家长却可能还在自己那一页上，
+// 所以屏幕要自己动：每 60 秒静默重拉一次（只在页面可见时）。
+const autoRefreshMs = 60_000;
+
 export function useAppStore() {
   const [state, setState] = useState<AppState>({ ...seedState, role: "child" });
   const [ready, setReady] = useState(false);
@@ -157,14 +161,19 @@ export function useAppStore() {
     items: [],
   });
 
-  const refresh = useCallback(async () => {
+  // keepRole 给静默轮询用：家长会话在后台过期时 request() 会顺手改开孩子端，
+  // 一次没人看的重拉不能因此把家长从当前页面踢走（正在填的表单会一起没了）。
+  const pull = useCallback(async (keepRole: boolean) => {
     const [stateResponse, statsResponse] = await Promise.all([
       request("/state"),
       request("/stats"),
     ]);
-    setState((await stateResponse.json()) as AppState);
+    const next = (await stateResponse.json()) as AppState;
     setStats(await statsResponse.json());
+    setState((prev) => (!keepRole || prev.role === next.role ? next : prev));
   }, []);
+
+  const refresh = useCallback(() => pull(false), [pull]);
 
   // 作业与任务不同：它按「看的是哪一天」取，所以载荷不进 /state，而是单独一个端点，
   // 由 homework.date 决定当前这一天。失败时保留上一次的内容并提示，并返回 false：
@@ -205,6 +214,20 @@ export function useAppStore() {
   useEffect(() => {
     void connect();
   }, [connect]);
+
+  useEffect(() => {
+    if (!ready || !connected) return;
+    const tick = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        await pull(true);
+      } catch {
+        // 静默：屏幕上的旧数据比一句凭空冒出来的报错有用，下一轮再试。
+      }
+    };
+    const timer = window.setInterval(() => void tick(), autoRefreshMs);
+    return () => window.clearInterval(timer);
+  }, [ready, connected, pull]);
 
   const run = useCallback(
     // 把操作结果透出来（失败时是 undefined），勾作业才拿得到服务端算出的 awarded。
@@ -369,6 +392,31 @@ export function useAppStore() {
           json("POST", { approved, note }, true),
         ),
       ),
+    // 待确认一排十几条，逐条点太慢。批量不新增端点：逐条 POST 同一条 review 路由，
+    // json(..., true) 每条现生成 Idempotency-Key，所以恰好一次的保证跟手动确认一模一样。
+    // 另一端已经先确认过的那一条会拿 409，计个数接着走，循环里的失败不当整批失败。
+    reviewAll: (taskIds: string[]) =>
+      run(async () => {
+        let approved = 0;
+        let skipped = 0;
+        for (const taskId of taskIds) {
+          try {
+            await request(
+              `/tasks/${taskId}/review`,
+              json("POST", { approved: true, note: "" }, true),
+            );
+            approved += 1;
+          } catch {
+            skipped += 1;
+          }
+        }
+        setOkMessage(
+          skipped
+            ? `已确认 ${approved} 项，${skipped} 项没能确认`
+            : `已确认 ${approved} 项`,
+        );
+        return { approved, skipped };
+      }),
     redeemWish: (wish: Wish) =>
       void run(() =>
         request(`/wishes/${wish.id}/redeem`, json("POST", {}, true)),

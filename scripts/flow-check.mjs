@@ -1084,6 +1084,126 @@ await refreshedToast.waitFor();
 await refreshedToast.waitFor({ state: "detached", timeout: 3000 });
 assert.ok(page.url().endsWith("/child"));
 
+// 静默轮询（src/store.ts 的 autoRefreshMs）：两端共用一块屏，孩子交完就走开，
+// 家长那一屏得自己动。这里不点任何按钮，只把页面时钟拨快 90 秒，看它自己有没有
+// 再去拿一次 /state（时钟在页面加载前装好，不先把启动阶段的 setTimeout 冻住不行）。
+const pollPage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+collectErrors(pollPage);
+await pollPage.clock.install();
+await pollPage.goto(`${baseUrl}/child`, { waitUntil: "load" });
+await pollPage.locator(".bottom-nav").waitFor();
+assert.equal(
+  await pollPage.evaluate(() => document.visibilityState),
+  "visible",
+  "headless 页面不可见的话这一段的断言就没有意义了",
+);
+// 启动自己的那一次 /state 先走完，再把时钟拨过一轮轮询区间。
+await pollPage.waitForTimeout(400);
+const autoPolled = pollPage.waitForResponse((response) =>
+  response.url().includes("/api/v1/state"),
+);
+await pollPage.clock.fastForward("01:30");
+assert.equal((await autoPolled).status(), 200);
+await pollPage.close();
+
+// 全部确认：家长一次点完所有待确认。它逐条 POST 同一条 review 路由（每条自己的
+// Idempotency-Key），所以服务端「恰好一次」的保证和手动确认一模一样。任务用接口造、
+// 用接口提交，只为了把屏幕上那个按钮和角标验到；这个页面自己一套 cookie，
+// 不会动到主页那一屏的会话。
+const batchPage = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+collectErrors(batchPage);
+const batchApi = (path, init) =>
+  batchPage.evaluate(async ([path, init]) => {
+    const response = await fetch(`/api/v1${path}`, init);
+    return [response.status, await response.text()];
+  }, [path, init]);
+const jsonBody = (value) => ({
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(value),
+});
+await batchPage.goto(`${baseUrl}/child`, { waitUntil: "load" });
+await batchPage.locator(".bottom-nav").waitFor();
+let [batchStatus] = await batchApi(
+  "/auth/parent",
+  jsonBody({ password: "2468" }),
+);
+assert.equal(batchStatus, 200, "批量确认段没能进入家长端");
+const batchState = JSON.parse((await batchApi("/state", {}))[1]);
+const batchTitles = ["批量确认甲", "批量确认乙"];
+for (const title of batchTitles) {
+  [batchStatus] = await batchApi(
+    "/tasks/",
+    jsonBody({
+      childId: batchState.activeChildId,
+      title,
+      description: "一次点完",
+      category: "生活自理",
+      points: 10,
+      repeatRule: "daily",
+      repeatWeekday: 0,
+    }),
+  );
+  assert.equal(batchStatus, 200, `创建 ${title} 失败`);
+}
+[batchStatus] = await batchApi("/auth/child", { method: "POST" });
+assert.equal(batchStatus, 200);
+// 一键提交就是 multipart 空 body + Idempotency-Key，和孩子端点一下一模一样。
+const submitStatuses = await batchPage.evaluate(async (titles) => {
+  const state = await (await fetch("/api/v1/state")).json();
+  const statuses = [];
+  for (const title of titles) {
+    const task = state.tasks
+      .filter((item) => item.title === title)
+      .sort((left, right) => right.dueDate.localeCompare(left.dueDate))[0];
+    const form = new FormData();
+    form.append("note", "");
+    const response = await fetch(`/api/v1/tasks/${task.id}/submit`, {
+      method: "POST",
+      body: form,
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+    });
+    statuses.push(response.status);
+  }
+  return statuses;
+}, batchTitles);
+assert.deepEqual(submitStatuses, [200, 200]);
+await batchPage.goto(`${baseUrl}/parent`, { waitUntil: "load" });
+// 页面加载会重新开孩子端（家长会话是一次性升级），所以这里要重新输密码。
+const batchPin = batchPage.locator(".pin-modal");
+await batchPin.waitFor();
+await batchPin.getByLabel("家长密码").fill("2468");
+await batchPin.getByRole("button", { name: "验证并进入" }).click();
+await batchPage.waitForURL(/\/parent$/);
+const pendingBefore = await batchPage.evaluate(async () => {
+  const state = await (await fetch("/api/v1/state")).json();
+  return state.tasks.filter(
+    (task) =>
+      task.status === "pending_review" && task.childId === state.activeChildId,
+  ).length;
+});
+assert.ok(pendingBefore >= 2, `待确认只有 ${pendingBefore} 条，造数据没生效`);
+assert.equal(
+  Number(await batchPage.locator(".nav-badge").first().innerText()),
+  pendingBefore,
+  "侧边栏角标和 /state 里的待确认条数不一致",
+);
+await batchPage.getByRole("button", { name: "全部确认" }).click();
+await batchPage.getByRole("button", { name: "确认全部" }).click();
+await batchPage
+  .getByRole("status")
+  .filter({ hasText: `已确认 ${pendingBefore} 项` })
+  .waitFor();
+const batchDone = JSON.parse((await batchApi("/state", {}))[1]);
+for (const title of batchTitles) {
+  assert.equal(
+    batchDone.tasks.filter((task) => task.title === title).every((task) => task.status === "completed"),
+    true,
+    `${title} 没被全部确认`,
+  );
+}
+await batchPage.locator(".nav-badge").first().waitFor({ state: "detached" });
+await batchPage.close();
+
 assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({
@@ -1122,6 +1242,9 @@ console.log(
     homeworkFont: true,
     homeworkHolidayRange: true,
     refreshButton: true,
+    reviewReason: true,
+    autoRefresh: true,
+    batchReview: true,
     consoleErrors: errors.length,
   }),
 );
