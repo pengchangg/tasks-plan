@@ -133,6 +133,10 @@ const initialBalance = state.children.find(
 ).pointsBalance;
 const deskId = currentTask(state, "整理自己的书桌").id;
 const task = page.locator(".task-card").filter({ hasText: "整理自己的书桌" });
+// 一键提交就要在点击前挂好响应监听：没有第二次点击可等了。
+const submitResponse = page.waitForResponse((response) =>
+  response.url().includes(`/tasks/${deskId}/submit`),
+);
 // A real PNG rendered by the same engine that must decode it later: the old
 // hand-written JPEG header was not decodable, so an <img> could never prove
 // anything beyond the element existing.
@@ -152,23 +156,8 @@ const proofPng = Buffer.from(
   "base64",
 );
 await task.getByRole("button", { name: "完成任务" }).click();
-await task
-  .getByPlaceholder("写一句话告诉家长吧（可选）")
-  .fill("书本都放整齐了");
-await task.locator('input[accept="image/*"]').setInputFiles({
-  name: "desk-proof.png",
-  mimeType: "image/png",
-  buffer: proofPng,
-});
-await task.locator('input[accept="video/*"]').setInputFiles({
-  name: "desk-proof.mp4",
-  mimeType: "video/mp4",
-  buffer: Buffer.from(
-    "00000018667479706d703432000000006d70343269736f6d",
-    "hex",
-  ),
-});
-await task.getByRole("button", { name: "提交给家长确认" }).click();
+const taskSubmit = await submitResponse;
+assert.equal(taskSubmit.status(), 200);
 state = await waitForState(
   (s) => s.tasks.find((t) => t.id === deskId)?.status === "pending_review",
 );
@@ -176,8 +165,17 @@ assert.equal(
   state.children.find((c) => c.name === "米娅").pointsBalance,
   initialBalance,
 );
-const childEvidence = task.locator(".media-thumb img");
-await assertRealImage(childEvidence, proofSize);
+// 提交不再收集备注与照片/视频：两端都只剩「提交时间」这一行，既没有缩略图，
+// 也不再输出「未填写文字备注」/「未添加照片或视频」占位。
+const childEvidence = task.locator(".submission-evidence");
+await childEvidence.waitFor();
+await childEvidence.locator(".evidence-heading time").waitFor();
+assert.equal(
+  await childEvidence.locator(".media-thumb, .media-video").count(),
+  0,
+);
+assert.ok(!(await childEvidence.innerText()).includes("未填写"));
+assert.ok(!(await childEvidence.innerText()).includes("未添加"));
 await page.screenshot({
   path: ".artifacts/ui/evidence-child.png",
   fullPage: true,
@@ -190,29 +188,19 @@ await page.getByRole("link", { name: "任务管理" }).click();
 const parentTask = page
   .locator(".admin-task-item")
   .filter({ hasText: "整理自己的书桌" });
-await parentTask.getByText("书本都放整齐了").waitFor();
-await parentTask.getByAltText("desk-proof.png").waitFor();
-await parentTask.locator(".media-video").waitFor();
-assert.equal(await parentTask.locator(".media-thumb, .media-video").count(), 2);
-const evidenceImage = parentTask.locator(".media-thumb img");
-await assertRealImage(evidenceImage, proofSize);
-await parentTask.locator(".media-thumb").click();
-await page.locator(".media-viewer img").waitFor();
+// 孩子端提交不带货，所以家长端这一行只能看到提交时间：证据展示（缩略图、
+// 查看器、内联播放器与 mp4 的 content-type）全部由下面的愿望「标记完成」证据覆盖。
+const parentEvidence = parentTask.locator(".submission-evidence");
+await parentEvidence.waitFor();
+await parentEvidence.locator(".evidence-heading time").waitFor();
+assert.equal(
+  await parentEvidence.locator(".media-thumb, .media-video").count(),
+  0,
+);
 await page.screenshot({
   path: ".artifacts/ui/evidence-parent.png",
   fullPage: true,
 });
-await page.locator(".modal-backdrop .modal-close").click();
-await page.locator(".media-viewer").waitFor({ state: "detached" });
-const video = parentTask.locator(".media-video");
-assert.ok(await video.evaluate((node) => node.controls));
-assert.deepEqual(
-  await page.evaluate(async () => {
-    const response = await fetch(document.querySelector(".media-video").src);
-    return [response.status, response.headers.get("content-type")];
-  }),
-  [200, "video/mp4"],
-);
 await parentTask.getByRole("button", { name: "确认", exact: true }).click();
 await waitForState(
   (s) =>
@@ -278,14 +266,26 @@ await starRow.locator('input[accept="image/*"]').setInputFiles({
   mimeType: "image/png",
   buffer: proofPng,
 });
+await starRow.locator('input[accept="video/*"]').setInputFiles({
+  name: "wish-proof.mp4",
+  mimeType: "video/mp4",
+  buffer: Buffer.from(
+    "00000018667479706d703432000000006d70343269736f6d",
+    "hex",
+  ),
+});
 await starRow.getByRole("button", { name: "确认完成" }).click();
 state = await waitForState((s) => Boolean(s.redemptions.at(-1)?.completedAt));
 assert.equal(state.redemptions.at(-1).completedNote, wishNote);
-assert.equal(state.redemptions.at(-1).attachments.length, 1);
+assert.equal(state.redemptions.at(-1).attachments.length, 2);
 await page.reload({ waitUntil: "networkidle" });
 await starRow.getByText("已完成").waitFor();
 await starRow.getByText(wishNote).waitFor();
 await assertRealImage(starRow.locator(".media-thumb img"), proofSize);
+assert.equal(
+  await starRow.locator(".media-thumb, .media-video").count(),
+  2,
+);
 assert.equal(await starRow.getByRole("button", { name: "标记完成" }).count(), 0);
 assert.equal(await starRow.getByRole("button", { name: "撤销完成" }).count(), 1);
 
@@ -298,6 +298,20 @@ assert.ok((await parentStarRow.innerText()).includes("米娅"));
 await parentStarRow.getByText("已完成").waitFor();
 await parentStarRow.getByText(wishNote).waitFor();
 await assertRealImage(parentStarRow.locator(".media-thumb img"), proofSize);
+await parentStarRow.getByAltText("wish-proof.png").waitFor();
+await parentStarRow.locator(".media-thumb").click();
+await page.locator(".media-viewer img").waitFor();
+await page.locator(".modal-backdrop .modal-close").click();
+await page.locator(".media-viewer").waitFor({ state: "detached" });
+const video = parentStarRow.locator(".media-video");
+assert.ok(await video.evaluate((node) => node.controls));
+assert.deepEqual(
+  await page.evaluate(async () => {
+    const response = await fetch(document.querySelector(".media-video").src);
+    return [response.status, response.headers.get("content-type")];
+  }),
+  [200, "video/mp4"],
+);
 assert.equal(await parentStarRow.getByRole("button", { name: "标记完成" }).count(), 0);
 assert.equal(await parentStarRow.getByRole("button", { name: "撤销完成" }).count(), 0);
 await page.getByRole("link", { name: "任务管理" }).click();
@@ -315,14 +329,16 @@ await reopenRow.getByRole("button", { name: "撤销完成" }).click();
 await page.getByRole("button", { name: "确认撤销" }).click();
 await waitForState((s) => !s.redemptions.at(-1)?.completedAt);
 await reopenRow.getByText("未完成").waitFor();
-assert.equal(await reopenRow.locator(".media-thumb").count(), 0);
+assert.equal(
+  await reopenRow.locator(".media-thumb, .media-video").count(),
+  0,
+);
 assert.ok(!(await reopenRow.innerText()).includes(wishNote));
 await page.getByRole("link", { name: "任务", exact: true }).click();
 const rejectedTask = page
   .locator(".task-card")
   .filter({ hasText: "阅读 20 分钟" });
 await rejectedTask.getByRole("button", { name: "重新提交" }).click();
-await rejectedTask.getByRole("button", { name: "提交给家长确认" }).click();
 await waitForState(
   (s) =>
     s.submissions.filter(
@@ -428,7 +444,6 @@ const weeklyCard = page
   .locator(".task-card")
   .filter({ hasText: "每周整理书架" });
 await weeklyCard.getByRole("button", { name: "完成任务" }).click();
-await weeklyCard.getByRole("button", { name: "提交给家长确认" }).click();
 await waitForState(
   (s) =>
     currentTask(s, "每周整理书架")?.status === "pending_review",
@@ -623,11 +638,10 @@ const degradedCard = degraded
   .locator(".task-card")
   .filter({ hasText: "倒垃圾" });
 await degradedCard.waitFor();
-await degradedCard.getByRole("button", { name: "完成任务" }).click();
 const degradedSubmit = degraded.waitForResponse((response) =>
   response.url().includes("/submit"),
 );
-await degradedCard.getByRole("button", { name: "提交给家长确认" }).click();
+await degradedCard.getByRole("button", { name: "完成任务" }).click();
 const submitted = await degradedSubmit;
 assert.equal(submitted.status(), 200);
 assert.match(

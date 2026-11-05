@@ -898,16 +898,15 @@ function TaskCard({
   today: string;
   timezone: string;
   submission?: TaskSubmission;
-  onSubmit?: (id: string, note: string, attachments: Attachment[]) => void;
+  onSubmit?: (id: string) => unknown;
   parent?: boolean;
   onReview?: (id: string, approved: boolean, note?: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const [note, setNote] = useState("");
-  const [attachment, setAttachment] = useState<Attachment[]>([]);
-  const submit = () => {
-    onSubmit?.(task.id, note, attachment);
-    setOpen(false);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setBusy(true);
+    await onSubmit?.(task.id);
+    setBusy(false);
   };
   return (
     <article className={`task-card ${task.status}`}>
@@ -929,7 +928,11 @@ function TaskCard({
           </span>
           <span className="due">{dateText(task.dueDate, today)}</span>
           {task.status === "todo" && !parent && (
-            <button className="small-primary" onClick={() => setOpen(true)}>
+            <button
+              className="small-primary"
+              disabled={busy}
+              onClick={submit}
+            >
               完成任务
             </button>
           )}
@@ -950,7 +953,11 @@ function TaskCard({
             </div>
           )}
           {task.status === "rejected" && !parent && (
-            <button className="small-primary" onClick={() => setOpen(true)}>
+            <button
+              className="small-primary"
+              disabled={busy}
+              onClick={submit}
+            >
               重新提交
             </button>
           )}
@@ -964,75 +971,6 @@ function TaskCard({
           />
         )}
       </div>
-      {open && (
-        <div className="task-submit">
-          <div className="submit-head">
-            <strong>完成得怎么样？</strong>
-            <button onClick={() => setOpen(false)}>
-              <X size={17} />
-            </button>
-          </div>
-          <textarea
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="写一句话告诉家长吧（可选）"
-          />
-          <div className="attachment-row">
-            <label>
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(event) => {
-                  const selected = Array.from(event.target.files ?? []).map(
-                    (file) => ({
-                      name: file.name,
-                      type: "image" as const,
-                      file,
-                    }),
-                  );
-                  setAttachment((current) => [
-                    ...current.filter((item) => item.type !== "image"),
-                    ...selected,
-                  ]);
-                }}
-              />
-              <span>＋ 添加照片</span>
-            </label>
-            <label>
-              <input
-                type="file"
-                accept="video/*"
-                multiple
-                onChange={(event) => {
-                  const selected = Array.from(event.target.files ?? []).map(
-                    (file) => ({
-                      name: file.name,
-                      type: "video" as const,
-                      file,
-                    }),
-                  );
-                  setAttachment((current) => [
-                    ...current.filter((item) => item.type !== "video"),
-                    ...selected,
-                  ]);
-                }}
-              />
-              <span>＋ 添加视频</span>
-            </label>
-          </div>
-          {attachment.length > 0 && (
-            <div className="attachment-name">
-              {attachment.map((item, index) => (
-                <small key={`${item.name}-${index}`}>✓ {item.name}</small>
-              ))}
-            </div>
-          )}
-          <button className="wide-primary" onClick={submit}>
-            提交给家长确认
-          </button>
-        </div>
-      )}
     </article>
   );
 }
@@ -3088,21 +3026,21 @@ function SubmissionEvidence({
           {familyTime(submission.submittedAt, timezone)}
         </time>
       </div>
-      {submission.note ? (
-        <p className="submission-note">
-          <MessageSquare size={15} />
-          <span>{submission.note}</span>
-        </p>
-      ) : (
-        <p className="empty-evidence">未填写文字备注</p>
+      {(submission.note || submission.attachments.length > 0) && (
+        <>
+          {submission.note && (
+            <p className="submission-note">
+              <MessageSquare size={15} />
+              <span>{submission.note}</span>
+            </p>
+          )}
+          {submission.attachments.length > 0 && (
+            <div className="attachment-list">
+              <MediaGallery attachments={submission.attachments} />
+            </div>
+          )}
+        </>
       )}
-      <div className="attachment-list">
-        {submission.attachments.length > 0 ? (
-          <MediaGallery attachments={submission.attachments} />
-        ) : (
-          <span className="empty-evidence">未添加照片或视频</span>
-        )}
-      </div>
     </div>
   );
 }

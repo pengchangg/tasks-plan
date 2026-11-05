@@ -347,13 +347,12 @@ export function useAppStore() {
           json("POST", { amount, note }, true),
         ),
       ),
-    submitTask: (taskId: string, note: string, attachments: Attachment[]) =>
-      void run(() => {
+    // 孩子端一键提交：服务端仍接受 note/files，但任务卡不再收集证据，所以这里
+    // 只发一个空 note 保证请求体是 multipart（非 multipart 会被 413 拒掉）。
+    submitTask: (taskId: string) =>
+      run(() => {
         const body = new FormData();
-        body.set("note", note);
-        for (const attachment of attachments) {
-          if (attachment.file) body.append("files", attachment.file);
-        }
+        body.set("note", "");
         return request(`/tasks/${taskId}/submit`, {
           method: "POST",
           body,
