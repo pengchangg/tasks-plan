@@ -614,6 +614,10 @@ await enterParent(true, "1357", "2468");
 // idempotencyKey 的 UUID 兜底：家长补一条今天的任务给它。
 await page.getByRole("link", { name: "任务管理" }).click();
 await page.getByRole("button", { name: "新建任务" }).click();
+// 推荐任务只是把下面的字段填好（它不新建任何东西）：点一下，名称与重复方式就跟着变。
+await page.getByRole("button", { name: /^倒垃圾\s*10$/ }).click();
+assert.equal(await page.getByLabel("任务名称").inputValue(), "倒垃圾");
+assert.equal(await page.getByLabel("重复方式").inputValue(), "daily");
 await page.getByLabel("任务名称").fill("倒垃圾");
 await page.getByLabel("重复方式").selectOption("daily");
 await page.getByRole("button", { name: "发布任务" }).click();

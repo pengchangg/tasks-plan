@@ -69,6 +69,48 @@ import type {
 import "./styles.css";
 
 const categories = ["全部", "生活自理", "学习成长", "家庭责任"];
+// 新建任务时摆上一排能照着抄的推荐——对着空白表单想点子才是家长真正卡住的地方。
+// 只做前端：点一下把字段填好，保存仍走 POST /tasks/，服务端没有新资源也没有新列。
+const taskPresets: {
+  category: string;
+  items: {
+    title: string;
+    description: string;
+    points: number;
+    repeatRule: RepeatRule;
+  }[];
+}[] = [
+  {
+    category: "生活自理",
+    items: [
+      { title: "自己穿衣", description: "自己穿好衣服和鞋子", points: 10, repeatRule: "daily" },
+      { title: "自己整理书包", description: "按明天的课表把书包收好", points: 10, repeatRule: "daily" },
+      { title: "饭后收自己的碗", description: "吃完饭把自己的碗放到水池", points: 10, repeatRule: "daily" },
+      { title: "叠自己的衣服", description: "洗完的衣服叠好放进柜子", points: 10, repeatRule: "weekly" },
+      { title: "整理玩具角", description: "玩具全部归位，地垫收干净", points: 15, repeatRule: "weekly" },
+    ],
+  },
+  {
+    category: "学习成长",
+    items: [
+      { title: "阅读 20 分钟", description: "自己选一本书安静读完", points: 20, repeatRule: "daily" },
+      { title: "朗读课文一遍", description: "大声读给家长听", points: 15, repeatRule: "daily" },
+      { title: "口算 10 题", description: "计时做完再一起对答案", points: 15, repeatRule: "daily" },
+      { title: "讲一件今天的事", description: "用自己的话说说今天发生了什么", points: 10, repeatRule: "daily" },
+      { title: "拼图或积木 15 分钟", description: "自己完成一个作品", points: 10, repeatRule: "weekly" },
+    ],
+  },
+  {
+    category: "家庭责任",
+    items: [
+      { title: "倒垃圾", description: "把家里的垃圾送到楼下", points: 10, repeatRule: "daily" },
+      { title: "给植物浇水", description: "看看土干了再浇，不要溢出来", points: 10, repeatRule: "daily" },
+      { title: "擦桌子", description: "吃完饭把桌子擦干净", points: 10, repeatRule: "daily" },
+      { title: "帮忙拿拖鞋", description: "有人回家就把拖鞋放到脚边", points: 10, repeatRule: "daily" },
+      { title: "扫地", description: "把自己座位四周扫干净", points: 15, repeatRule: "weekly" },
+    ],
+  },
+];
 // 作业的学科固定 10 项，与 internal/server/homework.go 的 homeworkSubjects 同名同序；
 // 顺序就是表单里的单选顺序，也决定孩子端 chip 的 emoji 与配色。
 const homeworkSubjects = [
@@ -3272,6 +3314,34 @@ function TaskForm({
             <X size={18} />
           </button>
         </div>
+        {!task && (
+          <div className="preset-list">
+            <span className="preset-heading">推荐任务</span>
+            {taskPresets.map((group) => (
+              <div className="preset-group" key={group.category}>
+                <span className="preset-cat">{group.category}</span>
+                {group.items.map((preset) => (
+                  <button
+                    type="button"
+                    className="preset-chip"
+                    key={preset.title}
+                    title={`${preset.description} · ${preset.points} 积分`}
+                    onClick={() => {
+                      setTitle(preset.title);
+                      setDescription(preset.description);
+                      setCategory(group.category);
+                      setPoints(preset.points);
+                      setRepeatRule(preset.repeatRule);
+                    }}
+                  >
+                    {preset.title}
+                    <b>{preset.points}</b>
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
         <label>
           任务名称
           <input
