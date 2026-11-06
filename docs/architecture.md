@@ -30,7 +30,7 @@ flowchart LR
 | `internal/server/stats.go` | `GET /stats` 全部实现：`statsWindow`、`scheduledTaskCount`、按窗口读取提交与台账 |
 | `internal/server/admin.go` | 非 HTTP 操作：`CreateFamily`、`SeedDemo`、`EnsureDemo` |
 | `internal/server/homework.go` | 作业资源：读某一天（`date..end_date` 闭区间，一天就能读到整段假期作业）、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85） |
-| `internal/server/holidays.go` | 内置国办放假表（2025–2026 假期区间 + 调休上班日）：`restBlock` 把连续放假块合并、`holidayWindow` 给出某天所属的整段假期（含假期前一天）供作业表单预填 |
+| `internal/server/holidays.go` | 内置国办放假表（2025–2027 假期区间 + 调休上班日）：`restBlock` 把连续放假块合并、`holidayWindow` 给出某天所属的整段假期（含假期前一天）供作业表单预填 |
 | `internal/server/ratelimit.go` | 令牌桶、家长密码失败预算、argon2 并发闸门、panic 恢复与错误辅助函数 |
 | `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等；当前最新是 `009_homework_done_child.sql`（编号 8 曾被用过又整体回滚，不要再复用） |
 

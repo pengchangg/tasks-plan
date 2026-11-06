@@ -1869,6 +1869,44 @@ func TestHomeworkHolidayWindowsFollowTheOfficialCalendar(t *testing.T) {
 	if !ok || window.Start != "2026-10-10" || window.End != "2026-10-11" || window.Days != 2 || !window.BeforeFrom {
 		t.Fatalf("makeup saturday window: %+v ok=%v", window, ok)
 	}
+	// 2027 春节 2/5（周五）–2/13（周六）共 9 天；2/4 是假前一天。
+	window, ok = holidayWindow(mustDay("2027-02-13"))
+	if !ok || window.Name != "春节" || window.Start != "2027-02-05" || window.End != "2027-02-13" || window.Days != 9 || window.BeforeFrom {
+		t.Fatalf("2027 spring festival window: %+v ok=%v", window, ok)
+	}
+	window, ok = holidayWindow(mustDay("2027-02-04"))
+	if !ok || window.Start != "2027-02-04" || window.End != "2027-02-13" || window.Days != 10 || !window.BeforeFrom {
+		t.Fatalf("2027 day before the spring festival: %+v ok=%v", window, ok)
+	}
+	// 2027 元旦 1/1–1/3，1/31 是调休上班的周日，前后都不放假。
+	window, ok = holidayWindow(mustDay("2027-01-02"))
+	if !ok || window.Name != "元旦" || window.Start != "2027-01-01" || window.End != "2027-01-03" || window.Days != 3 {
+		t.Fatalf("2027 new year window: %+v ok=%v", window, ok)
+	}
+	if window, ok = holidayWindow(mustDay("2027-01-31")); ok {
+		t.Fatalf("2027 makeup workday looks like a holiday: %+v", window)
+	}
+	// 2027 端午、中秋都只放一天，单独一天就是完整假期。
+	window, ok = holidayWindow(mustDay("2027-06-09"))
+	if !ok || window.Name != "端午节" || window.Start != "2027-06-09" || window.End != "2027-06-09" || window.Days != 1 || window.BeforeFrom {
+		t.Fatalf("2027 dragon boat window: %+v ok=%v", window, ok)
+	}
+	window, ok = holidayWindow(mustDay("2027-09-15"))
+	if !ok || window.Name != "中秋节" || window.Start != "2027-09-15" || window.End != "2027-09-15" || window.Days != 1 || window.BeforeFrom {
+		t.Fatalf("2027 mid-autumn window: %+v ok=%v", window, ok)
+	}
+	// 2027 国庆 10/1–10/7；9/26 与 10/9 是调休上班日。
+	window, ok = holidayWindow(mustDay("2027-10-07"))
+	if !ok || window.Name != "国庆节" || window.Start != "2027-10-01" || window.End != "2027-10-07" || window.Days != 7 {
+		t.Fatalf("2027 national day window: %+v ok=%v", window, ok)
+	}
+	if window, ok = holidayWindow(mustDay("2027-09-26")); ok {
+		t.Fatalf("2027 makeup sunday looks like a holiday: %+v", window)
+	}
+	// 10/8 是节后工作日，但 10/9 调休、10/10 才是周末：10/8 不沾假期。
+	if window, ok = holidayWindow(mustDay("2027-10-08")); ok {
+		t.Fatalf("2027 day after national day looks like a holiday: %+v", window)
+	}
 	// 2025 国庆+中秋 10/1–10/8 共 8 天，假前一天 9/30 也算进来。
 	window, ok = holidayWindow(mustDay("2025-09-30"))
 	if !ok || window.Name != "国庆节、中秋节" || window.Start != "2025-09-30" || window.End != "2025-10-08" || window.Days != 9 || !window.BeforeFrom {
