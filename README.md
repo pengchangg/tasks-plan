@@ -56,7 +56,7 @@ Go 1.22 + chi + 纯 Go 的 `modernc.org/sqlite`（无 cgo）；React 19 + Vite +
 cmd/growjoy/                 唯一入口：serve | admin create-family | seed-demo | backup | gc
 internal/server/             整个后端：路由、处理器、认证、上传、统计
 internal/server/migrations/  嵌入式 SQL 迁移
-src/                         单页应用：App.tsx（全部界面）、store.ts（状态与 API 客户端）等
+src/                         单页应用：App.tsx（外壳与路由）、ui.tsx（共享原语）、features/（作业、统计）、store.ts（状态与 API 客户端）等
 scripts/                     Playwright 校验脚本（flow-check / visual-check / with-service）
 docs/                        架构、接口、开发与运维文档
 public/                      图标与自托管字体

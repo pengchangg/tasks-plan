@@ -73,7 +73,7 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 
 ### TypeScript / React
 
-- 全部 UI 在 `src/App.tsx`（约 49 个顶层组件），不建单功能文件。
+- `src/App.tsx` 只放外壳、路由表和任务/愿望/成长/家长管理这几屏；跨模块共用的展示原语放 `src/ui.tsx`，自成一体的功能（带自己的常量与多个组件）放 `src/features/<name>.tsx`（现有 `homework.tsx`、`stats.tsx`）。**不要继续往 `App.tsx` 里堆新功能**：新功能从 `src/features/` 开始，feature 不要反向 import `App.tsx`（会成环）。
 - 状态只在 `useAppStore()` 里，作为 `store` prop 往下传；没有 Context、Redux、按页面取数或 `localStorage`。
 - 写操作加在 `actions` 上并通过 `run(() => ...)` 执行（它会清空消息、执行、刷新服务端状态）。统计和作业是两处例外，见 `store.ts` 的注释。`run` 会把操作结果透出来（失败是 `undefined`），`toggleHomeworkDone` 就靠它把服务端的 `awarded` 交给那张卡，前端不自己猜数字。
 - `TaskForm` 选 `weekly` 时是一排 `.weekday-chip` 复选（`repeatWeekdays`，加 `工作日`/`周末`/`全选` 快捷），`repeatWeekday` 只是首日；`repeatWeekdays: []` 回到旧的单日语义。
