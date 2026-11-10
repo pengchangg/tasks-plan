@@ -88,6 +88,7 @@ growjoy backup --out /srv/growjoy/backup/2026-10-21
 - 用 `VACUUM INTO` 取数据库一致快照，**可以在服务运行时执行**；媒体目录打成 `media.tar`（平铺，无子目录）。
 - 输出目录已存在 `growjoy.db` 或 `media.tar` 时会拒绝覆盖，每次换个目录。
 - 备份单元是「数据库 + 媒体」两者，恢复时必须一起还原，否则附件记录会指向不存在的文件。
+- 生产实例用 systemd user timer（`growjoy-backup.timer` + `growjoy-backup.sh`）每天自动备份并轮转，安装步骤与保留策略见 [DEPLOY.md](../DEPLOY.md)「定时备份」。
 
 恢复：停服务 → 把 `growjoy.db` 放回 `GROWJOY_DB`、`media.tar` 解到 `GROWJOY_MEDIA` → 起服务 → 检查 `/health/ready` 与首页。数据库与媒体不一致时用 `gc` 报告孤儿文件。
 

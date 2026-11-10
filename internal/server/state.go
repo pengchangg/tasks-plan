@@ -147,7 +147,6 @@ func (s *Server) streaks(ctx context.Context, family string, loc *time.Location)
 
 func (s *Server) state(ctx context.Context, x session) (State, error) {
 	var out State
-	out.Version = 2
 	out.Role = x.ActorType
 	out.ActiveChildID = x.SelectedChildID
 	if err := s.ensureInstances(ctx, x.FamilyID); err != nil {

@@ -255,6 +255,24 @@ func TestRejectsCrossOriginMutation(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin login status=%d, want 403", w.Code)
 	}
+	// 同样跨站的 POST 只带 Sec-Fetch-Site（浏览器不再总是发 Origin）也必须拦下。
+	r2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/child", nil)
+	r2.Host = "growjoy.example"
+	r2.Header.Set("Sec-Fetch-Site", "cross-site")
+	w2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w2, r2)
+	if w2.Code != http.StatusForbidden || !strings.Contains(w2.Body.String(), "cross_site_request") {
+		t.Fatalf("cross-site fetch status=%d body=%s, want 403 cross_site_request", w2.Code, w2.Body.String())
+	}
+	// same-site 的标记放行；这条不带凭据的 child 会话请求最终落不到 403 家族。
+	r3 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/child", nil)
+	r3.Host = "growjoy.example"
+	r3.Header.Set("Sec-Fetch-Site", "same-site")
+	w3 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w3, r3)
+	if w3.Code == http.StatusForbidden {
+		t.Fatalf("same-site fetch status=%d body=%s, want non-403", w3.Code, w3.Body.String())
+	}
 }
 
 func TestFamilyTimezoneWeeklyScheduleAndConsecutiveStreak(t *testing.T) {

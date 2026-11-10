@@ -111,6 +111,7 @@ deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd6
 	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'mkdir -p $(DEPLOY_DIR)/bin $(DEPLOY_DIR)/dist; rm -rf $(DEPLOY_DIR)/bin/growjoy.prev $(DEPLOY_DIR)/dist.prev; if [ -f $(DEPLOY_DIR)/bin/growjoy ]; then cp -p $(DEPLOY_DIR)/bin/growjoy $(DEPLOY_DIR)/bin/growjoy.prev; fi; if [ -d $(DEPLOY_DIR)/dist ]; then cp -a $(DEPLOY_DIR)/dist $(DEPLOY_DIR)/dist.prev; fi'; \
 	rsync -a --delete -e "ssh $(SSH_OPTS)" dist/ $(DEPLOY_HOST):$(DEPLOY_DIR)/dist/; \
 	rsync -a -e "ssh $(SSH_OPTS)" "$$STAGE/growjoy" $(DEPLOY_HOST):$(DEPLOY_DIR)/bin/growjoy; \
+	rsync -a -e "ssh $(SSH_OPTS)" scripts/growjoy-backup.sh $(DEPLOY_HOST):$(DEPLOY_DIR)/bin/growjoy-backup.sh; \
 	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'chmod +x $(DEPLOY_DIR)/bin/growjoy && systemctl --user restart $(DEPLOY_UNIT)'; \
 	SWAPPED=1; \
 	echo "▶ 等待 $(DEPLOY_URL)/health/ready"; \

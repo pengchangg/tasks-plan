@@ -40,10 +40,13 @@
 ```
 /home/pengchang/growjoy/
 ├── bin/growjoy          # 交叉编译产物（0755，静态 linux/amd64）
+├── bin/growjoy-backup.sh # 每日备份轮转脚本（make deploy 同步）
 ├── dist/                # SPA 构建产物，rsync --delete 覆盖
 │   ├── index.html
 │   ├── assets/
 │   └── fonts/fredoka.woff2
+├── backup/              # 可选：定时备份根目录（装了 growjoy-backup.timer 才有）
+│   └── daily/<日期>/    # growjoy.db + media.tar，最旧 30 天自动轮转
 └── data/                # 0700，首次启动自动创建
     ├── growjoy.db       # SQLite（WAL）
     └── media/           # 上传的照片与视频
@@ -78,6 +81,7 @@ file /tmp/growjoy-deploy/growjoy
 ssh <host> 'mkdir -p ~/growjoy/bin ~/growjoy/dist'
 rsync -a --delete -e ssh dist/ <host>:~/growjoy/dist/
 rsync -a -e ssh /tmp/growjoy-deploy/growjoy <host>:~/growjoy/bin/growjoy
+rsync -a -e ssh scripts/growjoy-backup.sh <host>:~/growjoy/bin/growjoy-backup.sh  # 每日备份脚本（装定时备份才需要）
 ssh <host> 'chmod +x ~/growjoy/bin/growjoy'
 ```
 
@@ -478,6 +482,52 @@ ssh localhost 'GROWJOY_DB=$HOME/growjoy/data/growjoy.db \
 
 用 `VACUUM INTO` 取数据库一致性快照，再打包媒体目录，因此**可以在服务运行时执行**。目录里已存在 `growjoy.db` 或 `media.tar` 时会拒绝覆盖，换一个目录即可。输出包含 `growjoy.db` 与 `media.tar` 两个文件，两者必须一起保存。
 
+### 定时备份（systemd user timer）
+
+`scripts/growjoy-backup.sh` 随 `make deploy` 同步到 `~/growjoy/bin/`（首次部署手工执行上文「传输」里的那行 rsync）。脚本每天往 `~/growjoy/backup/daily/<日期>/` 写一份快照，然后删除超过 30 天的旧目录；它只认 `daily/` 下名字是 `YYYY-MM-DD` 的目录，别的文件一概不碰。同一天重复执行会因输出目录已存在而失败退出——timer 只该一天触发一次，重跑说明需要人看。
+
+`~/.config/systemd/user/growjoy-backup.service`：
+
+```ini
+[Unit]
+Description=GrowJoy 每日备份（数据库快照 + 媒体打包）
+
+[Service]
+Type=oneshot
+Environment=GROWJOY_DB=/home/pengchang/growjoy/data/growjoy.db
+Environment=GROWJOY_MEDIA=/home/pengchang/growjoy/data/media
+ExecStart=/home/pengchang/growjoy/bin/growjoy-backup.sh /home/pengchang/growjoy/backup
+```
+
+`~/.config/systemd/user/growjoy-backup.timer`：
+
+```ini
+[Unit]
+Description=GrowJoy 每日备份定时器
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+ssh <host> 'systemctl --user daemon-reload && systemctl --user enable --now growjoy-backup.timer'
+ssh <host> 'systemctl --user list-timers growjoy-backup'                  # 看下次触发时间
+ssh <host> 'systemctl --user start growjoy-backup.service'                # 立即跑一次验证
+ssh <host> 'ls -l $HOME/growjoy/backup/daily/$(date +%F)/'                # 应有 growjoy.db 与 media.tar
+```
+
+- `Persistent=true`：到点没开机，下次开机补跑。`RandomizedDelaySec` 避免和其他定时任务撞在同一秒。
+- 脚本只读 `GROWJOY_DB`/`GROWJOY_MEDIA`（必须绝对路径，写错会直接报错退出，不会静默备份一个空库）；`GROWJOY_ADDR`/`GROWJOY_DIST` 不需要。
+- 保留天数默认 30，可给脚本追加第二个参数（如 `... /home/pengchang/growjoy/backup 14`）。媒体视频多时每天一份全量 `media.tar` 会占空间：`du -sh ~/growjoy/backup` 定期看一眼，按需调小保留天数或改成每周备份。
+- 失败排查：这台主机没有用户级 journal，用 `systemctl --user status growjoy-backup.service` 看上一次运行的输出与退出码。
+
+### 恢复
+
 恢复（备份文件就在同一台主机上，直接在远端替换即可）：
 
 ```bash
@@ -488,7 +538,7 @@ ssh localhost 'set -e; cd $HOME/growjoy; cp backup-2026-10-02/growjoy.db data/gr
 ssh localhost 'systemctl --user start growjoy'
 ```
 
-恢复期间先停服务再替换文件，避免进程继续写入。`rm -f` 那一步是兜底：`systemctl --user stop` 会给 SQLite 收尾，实测停服后 `-wal`/`-shm` 已自行消失；只有在进程被强杀（OOM、`kill -9`）时才可能留下残留文件。残留本身不会污染数据——实测把另一份数据库的 `-wal` 放在替换后的库旁边，服务照常启动、返回的是替换后库的内容、日志无报错（SQLite 会忽略不属于当前库的 WAL）——删掉只是为了不留没用的旧文件。随后的 `/health/ready` 返回 200 即恢复完成。本手册的实例**没有配置任何定时备份**，需要就自己加 cron 或 systemd timer。
+恢复期间先停服务再替换文件，避免进程继续写入。`rm -f` 那一步是兜底：`systemctl --user stop` 会给 SQLite 收尾，实测停服后 `-wal`/`-shm` 已自行消失；只有在进程被强杀（OOM、`kill -9`）时才可能留下残留文件。残留本身不会污染数据——实测把另一份数据库的 `-wal` 放在替换后的库旁边，服务照常启动、返回的是替换后库的内容、日志无报错（SQLite 会忽略不属于当前库的 WAL）——删掉只是为了不留没用的旧文件。随后的 `/health/ready` 返回 200 即恢复完成。定时备份按上文「定时备份」装一次即可，此后每天自动执行并轮转。
 
 媒体清理（孩子或任务删除后可能留下没有附件记录引用的孤儿文件）：
 

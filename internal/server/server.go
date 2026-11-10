@@ -135,7 +135,6 @@ type Redemption struct {
 	CreatedAt     string       `json:"createdAt"`
 }
 type State struct {
-	Version       int          `json:"version"`
 	Timezone      string       `json:"timezone"`
 	Role          string       `json:"role"`
 	ActiveChildID string       `json:"activeChildId"`
@@ -888,6 +887,7 @@ func (s *Server) familyLocation(ctx context.Context, family string) (*time.Locat
 	}
 	return loc, nil
 }
+
 
 type childInput struct {
 	Name   string `json:"name"`

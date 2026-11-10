@@ -37,7 +37,6 @@
 
 ```json
 {
-  "version": 2,
   "timezone": "Asia/Shanghai",
   "role": "child",
   "activeChildId": "child_ab12",
@@ -52,7 +51,7 @@
 }
 ```
 
-`tasks` 里的是**任务实例**而不是模板；后续 `/tasks/{id}` 全部指实例。`version` 恒为 2，客户端忽略。`timezone` 是家庭 IANA 时区，前端用它把 UTC 时间折算成家庭本地日期。`holidays` 与 `makeupWorkdays` 是国办放假表的整张表（见 `internal/server/holidays.go`），日历用它给日期打「休」/「班」角标；周末由客户端按星期自己算，农历由客户端用 `Intl` 中文历法算，服务端不参与。
+`tasks` 里的是**任务实例**而不是模板；后续 `/tasks/{id}` 全部指实例。`timezone` 是家庭 IANA 时区，前端用它把 UTC 时间折算成家庭本地日期。`holidays` 与 `makeupWorkdays` 是国办放假表的整张表（见 `internal/server/holidays.go`），日历用它给日期打「休」/「班」角标；周末由客户端按星期自己算，农历由客户端用 `Intl` 中文历法算，服务端不参与。
 
 ### 手动加减分
 

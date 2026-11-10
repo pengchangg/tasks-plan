@@ -9,7 +9,7 @@ export interface TaskSubmission { id: string; taskId: string; childId: string; n
 export interface Wish { id: string; title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
 export interface PointLedger { id: string; childId: string; amount: number; type: 'earned' | 'spent'; referenceType: 'task' | 'redemption' | 'manual' | 'homework' | 'homework_bonus'; referenceId: string; description: string; createdAt: string }
 export interface Redemption { id: string; wishId: string; wishTitle: string; wishIcon: string; wishColor: string; childId: string; pointsCost: number; completedAt?: string; completedNote?: string; attachments: Attachment[]; createdAt: string }
-export interface AppState { version: number; timezone: string; role: Role; activeChildId: string; children: Child[]; tasks: Task[]; submissions: TaskSubmission[]; wishes: Wish[]; ledger: PointLedger[]; redemptions: Redemption[]; holidays: HolidaySpan[]; makeupWorkdays: string[] }
+export interface AppState { timezone: string; role: Role; activeChildId: string; children: Child[]; tasks: Task[]; submissions: TaskSubmission[]; wishes: Wish[]; ledger: PointLedger[]; redemptions: Redemption[]; holidays: HolidaySpan[]; makeupWorkdays: string[] }
 
 // /state 下发的官方放假区间与调休上班日（日历打标用，周末由客户端按星期算）。
 export interface HolidaySpan { name: string; start: string; end: string }

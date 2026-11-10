@@ -11,7 +11,6 @@ import type { AppState } from "./types";
 // 固定日期的本地 fixture：日期全部写死，才能表达「补录」这类跟今天无关的场景。
 function dayState(): AppState {
   return {
-    version: 1,
     timezone: "Asia/Shanghai",
     holidays: [],
     makeupWorkdays: [],
