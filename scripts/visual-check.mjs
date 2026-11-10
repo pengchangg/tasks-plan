@@ -47,12 +47,14 @@ const scenarios = [
   },
   { name: "growth-375", path: "/child/growth", width: 375, height: 812 },
   { name: "growth-390", path: "/child/growth", width: 390, height: 844 },
+  { name: "ledger-375", path: "/child/ledger", width: 375, height: 812 },
 ];
 
 const childLinks = {
   "/child": null,
   "/child/tasks": "任务",
   "/child/homework": "作业",
+  "/child/ledger": "积分明细",
   "/child/growth": "成长",
 };
 

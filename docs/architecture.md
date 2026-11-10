@@ -34,7 +34,7 @@ flowchart LR
 | `internal/server/ratelimit.go` | 令牌桶、家长密码失败预算、argon2 并发闸门、panic 恢复与错误辅助函数 |
 | `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等；当前最新是 `009_homework_done_child.sql`（编号 8 曾被用过又整体回滚，不要再复用） |
 
-前端只有 `src/`：`App.tsx` 装着外壳、两张路由表与任务/愿望/成长页，`ui.tsx` 是跨模块共用的展示原语（`StarMark`、`useDialog`、`EmptyState`、`ConfirmModal`、`LunarTag`、`ZoomableImage` 等），`features/homework.tsx` 是作业模块、`features/stats.tsx` 是家长统计页，`store.ts` 是唯一状态容器与 API 客户端，`domain.ts` 是成长日历的日期计算，`lunar.ts` 是农历与「休」/「班」角标，`styles.css` 是全部样式。
+前端只有 `src/`：`App.tsx` 装着外壳、两张路由表与任务/愿望/成长页，`ui.tsx` 是跨模块共用的展示原语（`StarMark`、`useDialog`、`EmptyState`、`ConfirmModal`、`LunarTag`、`ZoomableImage` 等），`features/homework.tsx` 是作业模块、`features/stats.tsx` 是家长统计页、`features/ledger.tsx` 是孩子端积分明细（`/child/ledger`，直接渲染 `/state` 里这个孩子的账本，结余由当前余额逐笔回推，没有新端点），`store.ts` 是唯一状态容器与 API 客户端，`domain.ts` 是成长日历的日期计算，`lunar.ts` 是农历与「休」/「班」角标，`styles.css` 是全部样式。
 
 ## 请求链路
 
@@ -113,7 +113,7 @@ requestLog（安全响应头 + 一行访问日志）
 ## 前端结构
 
 - `main.tsx` → `App` → `BrowserRouter` → `Shell`。`Shell` 只调用一次 `useAppStore()`，把整个 store 作为 prop 往下传；没有 Context、Redux 或按页面取数。
-- 路由表：`ChildLayout`（`/child`、`/child/tasks`、`/child/homework`、`/child/wishes`、`/child/growth`）与 `ParentLayout`（`/parent`、`/parent/children`、`/parent/tasks`、`/parent/wishes`、`/parent/homework`、`/parent/stats`），未知路径回落到各自的首页。
+- 路由表：`ChildLayout`（`/child`、`/child/tasks`、`/child/homework`、`/child/wishes`、`/child/ledger`、`/child/growth`）与 `ParentLayout`（`/parent`、`/parent/children`、`/parent/tasks`、`/parent/wishes`、`/parent/homework`、`/parent/stats`），未知路径回落到各自的首页。
 - 家长端解锁是客户端状态（`Shell` 的 `parentGate`）+ 12 小时的服务端家长会话；刷新回到孩子端，`/parent` 深链会在解锁后被恢复。
 - 作业是 `/state` 之外的第二份数据（`store.homework`，含日期与当日列表），三个写操作自己重新加载当天数据并设置成功提示。增长日历完全由 `State` 推导，不读 `/stats`。
 - 两端共用一块屏，所以页面会自己动：`useAppStore` 每 `autoRefreshMs`（60s）静默重拉一次，只在 `document.visibilityState === "visible"` 时跑。它走 `pull(true)` 保留当前角色：家长会话在后台过期时 `request()` 会顺手改开孩子端，一次没人看的重拉不能把家长从当前页面踢掉（正在填的表单会一起没了）。

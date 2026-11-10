@@ -260,7 +260,7 @@ assert.equal(state.redemptions.at(-1).wishId, dinner.id);
 const starRow = page.locator(".star-row").filter({ hasText: "选择一次晚餐" });
 const wishNote = "晚餐点了披萨，全家一起吃光啦";
 await starRow.getByRole("button", { name: "标记完成" }).click();
-await starRow.getByPlaceholder("写一句话记录这一刻吧（可选）").fill(wishNote);
+await starRow.getByPlaceholder("写一句话记录这一刻吧（可选，30 字以内）").fill(wishNote);
 await starRow.locator('input[accept="image/*"]').setInputFiles({
   name: "wish-proof.png",
   mimeType: "image/png",
@@ -451,6 +451,26 @@ assert.equal(
 );
 assert.ok((await page.locator(".calendar-mark.rest").count()) >= 8);
 assert.ok((await dayPanel.locator(".date-lunar").innerText()).includes("农历"));
+// 连续打卡徽章：点亮与未点亮加起来必须是全套，成就卡文案跟着 streakDays 走。
+const streakNow = state.children.find((c) => c.name === "米娅").streakDays;
+assert.equal(await page.locator(".badge-chip").count(), 6);
+assert.equal(
+  (await page.locator(".badge-chip:not(.locked)").count()) +
+    (await page.locator(".badge-chip.locked").count()),
+  6,
+);
+assert.equal(
+  await page.locator(".badge-chip:not(.locked)").count(),
+  [3, 7, 14, 30, 60, 100].filter((days) => streakNow >= days).length,
+);
+const achievementText = await page.locator(".achievement p").innerText();
+if (streakNow < 100) {
+  const nextDays = [3, 7, 14, 30, 60, 100].find((days) => streakNow < days);
+  assert.ok(
+    achievementText.includes(`再坚持 ${nextDays - streakNow} 天`),
+    `成就文案没跟着 streakDays=${streakNow} 走：${achievementText}`,
+  );
+}
 await page.screenshot({
   path: ".artifacts/ui/growth-day.png",
   fullPage: true,
@@ -733,6 +753,172 @@ assert.equal(
 );
 await manualReward.getByRole("button", { name: "关闭积分到账提示" }).click();
 await page.locator(".reward-celebration").waitFor({ state: "detached" });
+
+// ── 积分激励闭环：家长添加一个买不起的愿望 → 孩子端看见进度条与「还差 N」→
+// 积分账本逐笔结余对得上 → 家长一笔加分跨过一次升级线 → 孩子端弹升级提示 →
+// 兑换一次，账本顶行记下这笔支出与新的结余。全部期望值都从 /state 现读现算。
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "愿望管理" }).click();
+await page.getByRole("button", { name: "添加愿望" }).click();
+const wishForm = page.locator(".form-modal");
+await wishForm.getByLabel("愿望名称").fill("周末露营野餐");
+await wishForm.getByLabel("需要积分").fill("5000");
+await wishForm.getByRole("button", { name: "放入愿望小铺" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+await waitForState((s) => s.wishes.some((w) => w.title === "周末露营野餐"));
+await enterChild();
+await page.getByRole("link", { name: "愿望", exact: true }).click();
+state = await getState();
+const miaBefore = state.children.find((c) => c.id === state.activeChildId);
+const activeWishes = state.wishes.filter((w) => w.isActive);
+// 每张上架的愿望卡都带进度条：条数必须和卡数一致，缺一半都不算过。
+assert.equal(
+  await page.locator(".wish-progress").count(),
+  await page.locator(".wish-card").count(),
+);
+assert.equal(
+  await page.locator(".wish-card").count(),
+  activeWishes.length,
+  "愿望卡数量和上架愿望对不上",
+);
+// 5000 分永远买不起：按钮是禁用的「还差 N」，进度条按余额/标价画。
+const far = page.locator(".wish-card").filter({ hasText: "周末露营野餐" });
+const saved = Math.max(0, Math.min(miaBefore.pointsBalance, 5000));
+const percent = Math.round((miaBefore.pointsBalance / 5000) * 100);
+assert.equal(
+  await far.locator("button.small-disabled").innerText(),
+  `还差 ${5000 - miaBefore.pointsBalance}`,
+);
+assert.equal(
+  await far.locator(".wish-progress").getAttribute("aria-label"),
+  `已攒 ${saved}/5000 积分`,
+);
+assert.equal(
+  await far.locator(".wish-progress > span").evaluate((node) => node.style.width),
+  `${Math.max(0, Math.min(100, percent))}%`,
+);
+await page.screenshot({ path: ".artifacts/ui/wish-progress.png", fullPage: true });
+// 积分账本：总数、笔数、逐笔结余都要和 /state 对得上；最新那行的结余就是余额。
+await page.getByRole("link", { name: "今日", exact: true }).click();
+await page.locator(".balance-link").click();
+await page.waitForURL(/\/child\/ledger$/);
+assert.equal(
+  await page.locator(".ledger-total strong").innerText(),
+  String(miaBefore.pointsBalance),
+);
+const miaLedger = state.ledger.filter((item) => item.childId === miaBefore.id);
+assert.equal(
+  await page.locator(".ledger-total small").innerText(),
+  `共 ${miaLedger.length} 笔记录`,
+);
+assert.equal(
+  await page.locator(".activity-list > div").count(),
+  miaLedger.length,
+  "账本行数和这个孩子的台账条数对不上",
+);
+const newestEntry = miaLedger.at(-1);
+const topRow = page.locator(".activity-list > div").first();
+await topRow.locator("strong").waitFor();
+assert.ok(
+  (await topRow.innerText()).includes(newestEntry.description),
+  `账本顶行不是最新一笔（${newestEntry.description}）`,
+);
+assert.equal(
+  await topRow.locator(".ledger-after").innerText(),
+  `结余 ${miaBefore.pointsBalance}`,
+);
+await page.screenshot({ path: ".artifacts/ui/ledger-page.png", fullPage: true });
+// 一笔加分跨过升级线：奖励 (100-当前能量)*5 分，成长能量恰好 +（100-能量），
+// 等级 +1、能量归零（服务端 growth = amount/5，等级由总能量算）。
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "家庭总览" }).click();
+const beforeLevel = await waitForState((s) => s.children.length > 0);
+const levelChild = beforeLevel.children.find(
+  (c) => c.id === beforeLevel.activeChildId,
+);
+const growthNeeded = 100 - levelChild.experience;
+const levelAward = growthNeeded * 5;
+await page.getByRole("button", { name: "奖励积分" }).click();
+const levelModal = page.locator(".form-modal");
+await levelModal.getByLabel("积分数量").fill(String(levelAward));
+await levelModal.getByLabel("原因（可选）").fill("升级奖励");
+await levelModal.getByRole("button", { name: "确认奖励" }).click();
+await page.locator(".form-modal").waitFor({ state: "detached" });
+const leveled = await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === levelChild.id).level ===
+    levelChild.level + 1,
+);
+assert.equal(
+  leveled.children.find((c) => c.id === levelChild.id).experience,
+  0,
+  "跨过升级线后成长能量该归零",
+);
+// 孩子端同时收到到账横幅与升级提示：横幅要点掉，toast 自己走。
+await enterChild();
+const levelReward = page.locator(".reward-celebration");
+await levelReward.getByText("家长奖励", { exact: true }).waitFor();
+assert.equal(
+  await levelReward.locator("strong").innerText(),
+  `+${levelAward} 积分到账！`,
+);
+assert.equal(
+  await page.locator(".level-up strong").innerText(),
+  `升到 Lv.${levelChild.level + 1}`,
+);
+await levelReward.getByRole("button", { name: "关闭积分到账提示" }).click();
+await page.locator(".reward-celebration").waitFor({ state: "detached" });
+await page.locator(".level-up").waitFor({ state: "detached", timeout: 5000 });
+// 兑换最便宜的那个愿望，账本顶行立刻记下这笔支出与结余。
+await page.getByRole("link", { name: "愿望", exact: true }).click();
+const redeemState = await waitForState((s) => {
+  const child = s.children.find((c) => c.id === s.activeChildId);
+  return (
+    child.pointsBalance >=
+    Math.min(
+      ...s.wishes
+        .filter((w) => w.isActive && !s.redemptions.some((r) => r.wishId === w.id))
+        .map((w) => w.pointsCost),
+    )
+  );
+});
+const redeemChild = redeemState.children.find(
+  (c) => c.id === redeemState.activeChildId,
+);
+const targetWish = redeemState.wishes
+  .filter(
+    (w) =>
+      w.isActive &&
+      !redeemState.redemptions.some((r) => r.wishId === w.id) &&
+      w.pointsCost <= redeemChild.pointsBalance,
+  )
+  .sort((a, b) => a.pointsCost - b.pointsCost)[0];
+const redeemCard = page
+  .locator(".wish-card")
+  .filter({ hasText: targetWish.title });
+await redeemCard.getByRole("button", { name: "去兑换" }).click();
+await page.getByRole("button", { name: "确认兑换" }).click();
+const redeemed = await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === s.activeChildId).pointsBalance ===
+    redeemChild.pointsBalance - targetWish.pointsCost,
+);
+await page.getByRole("link", { name: "今日", exact: true }).click();
+await page.locator(".balance-link").click();
+await page.waitForURL(/\/child\/ledger$/);
+const spendRow = page
+  .locator(".activity-list > div")
+  .filter({ hasText: `兑换「${targetWish.title}」` })
+  .first();
+await spendRow.waitFor();
+assert.equal(
+  await spendRow.locator(".negative").innerText(),
+  `-${targetWish.pointsCost}`,
+);
+assert.equal(
+  await spendRow.locator(".ledger-after").innerText(),
+  `结余 ${redeemed.children.find((c) => c.id === redeemed.activeChildId).pointsBalance}`,
+);
 
 // ── 家庭作业：家长录入（学科 + 文字 + 图片）→ 孩子端当天可见、谚语带拼音、灯箱可左右
 // 切换（含首尾循环与滑动）→ 家长改删。家长密码此刻已经是上面改过的 1357。
@@ -1131,6 +1317,7 @@ const batchApi = (path, init) =>
     return [response.status, await response.text()];
   }, [path, init]);
 const jsonBody = (value) => ({
+  method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(value),
 });
@@ -1138,7 +1325,7 @@ await batchPage.goto(`${baseUrl}/child`, { waitUntil: "load" });
 await batchPage.locator(".bottom-nav").waitFor();
 let [batchStatus] = await batchApi(
   "/auth/parent",
-  jsonBody({ password: "2468" }),
+  jsonBody({ password: "1357" }),
 );
 assert.equal(batchStatus, 200, "批量确认段没能进入家长端");
 const batchState = JSON.parse((await batchApi("/state", {}))[1]);
@@ -1184,7 +1371,7 @@ await batchPage.goto(`${baseUrl}/parent`, { waitUntil: "load" });
 // 页面加载会重新开孩子端（家长会话是一次性升级），所以这里要重新输密码。
 const batchPin = batchPage.locator(".pin-modal");
 await batchPin.waitFor();
-await batchPin.getByLabel("家长密码").fill("2468");
+await batchPin.getByLabel("家长密码").fill("1357");
 await batchPin.getByRole("button", { name: "验证并进入" }).click();
 await batchPage.waitForURL(/\/parent$/);
 const pendingBefore = await batchPage.evaluate(async () => {
@@ -1258,6 +1445,10 @@ console.log(
     reviewReason: true,
     autoRefresh: true,
     batchReview: true,
+    wishProgress: true,
+    ledgerPage: true,
+    levelUpToast: true,
+    ledgerSpend: true,
     consoleErrors: errors.length,
   }),
 );

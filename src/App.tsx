@@ -61,6 +61,7 @@ import {
   ParentHomework,
   TodayHomework,
 } from "./features/homework";
+import { ChildLedger } from "./features/ledger";
 import { ParentStats } from "./features/stats";
 import type {
   Attachment,
@@ -132,6 +133,16 @@ const statusLabel = {
   completed: "已完成",
   rejected: "再试一次",
 };
+// 连续打卡徽章：阈值就是「连续天数」本身（streaks 由服务端从今天往回逐日数），
+// 名字/图案是纯展示，不进任何计算。
+const streakBadges = [
+  { days: 3, icon: "🌱", name: "小芽" },
+  { days: 7, icon: "🌿", name: "新叶" },
+  { days: 14, icon: "🌳", name: "小树" },
+  { days: 30, icon: "🌟", name: "星光" },
+  { days: 60, icon: "🔥", name: "小火苗" },
+  { days: 100, icon: "🏆", name: "小冠军" },
+] as const;
 // 分类图标用 lucide 而不是 ✎/⌂/✦ 这类字形：缺字体的系统会把它们画成空方块。
 const taskSymbol = (category: string) =>
   category === "学习成长" ? (
@@ -271,6 +282,33 @@ function Shell() {
     const timer = window.setTimeout(dismissReward, 3600);
     return () => window.clearTimeout(timer);
   }, [reward?.id]);
+  // 升级庆祝：baseline 语义与上面的到账队列一致——第一次服务端状态只记基线，
+  // 家长端不弹（升级保持「未读」，等下一次打开孩子端）。一次 /state 跨多级时
+  // 只显示最终那一级；等级回退（取消作业完成）静默。
+  const levelBaselined = useRef(new Map<string, number>());
+  const [levelUpLevel, setLevelUpLevel] = useState<number | null>(null);
+  useEffect(() => {
+    if (!store.connected) return;
+    if (isParent) {
+      setLevelUpLevel(null);
+      return;
+    }
+    const child = store.activeChild;
+    const baseline = levelBaselined.current.get(child.id);
+    if (baseline === undefined) {
+      levelBaselined.current.set(child.id, child.level);
+      return;
+    }
+    if (child.level <= baseline) return;
+    levelBaselined.current.set(child.id, child.level);
+    setLevelUpLevel(child.level);
+  }, [isParent, store.connected, store.state]);
+  // 3.6 s 自动消失，与「已刷新」提示同一套约定；pointer-events:none，没有关闭按钮。
+  useEffect(() => {
+    if (levelUpLevel === null) return;
+    const timer = window.setTimeout(() => setLevelUpLevel(null), 3600);
+    return () => window.clearTimeout(timer);
+  }, [levelUpLevel]);
   useEffect(() => {
     // The parent end is never restored by the session: a parent path always
     // costs the password, so a device left with a child cannot wander in.
@@ -436,6 +474,9 @@ function Shell() {
           reward={reward}
           onClose={dismissReward}
         />
+      )}
+      {levelUpLevel !== null && (
+        <LevelUpToast level={levelUpLevel} experience={store.activeChild.experience} />
       )}
       {isParent && parentUnlocked ? (
         <ParentLayout store={store} />
@@ -638,6 +679,24 @@ function RewardCelebration({
   );
 }
 
+// 升级提示：独立类名 + pointer-events:none + 3.6 s 自动消失，刻意不复用
+// .reward-celebration——到账横幅是逐条要点关闭的队列，升级是右下角自己走掉的
+// toast，两条样式规则与门禁断言（同屏只有一条 .reward-celebration）互不污染。
+function LevelUpToast({ level, experience }: { level: number; experience: number }) {
+  return (
+    <div className="level-up" role="status" aria-live="polite">
+      <span className="level-up-medal">
+        <Sparkles size={20} />
+      </span>
+      <div>
+        <span>成长等级提升</span>
+        <strong>升到 Lv.{level}</strong>
+        <small>成长能量 {experience}/100</small>
+      </div>
+    </div>
+  );
+}
+
 function ChildLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
     <>
@@ -647,6 +706,7 @@ function ChildLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
           <Route path="/child/tasks" element={<ChildTasks store={store} />} />
           <Route path="/child/homework" element={<ChildHomework store={store} />} />
           <Route path="/child/wishes" element={<ChildWishes store={store} />} />
+          <Route path="/child/ledger" element={<ChildLedger store={store} />} />
           <Route path="/child/growth" element={<Growth store={store} />} />
           <Route path="*" element={<Navigate to="/child" replace />} />
         </Routes>
@@ -773,6 +833,9 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
           <div>
             <span>我的积分</span>
             <strong>{child.pointsBalance}</strong>
+            <Link className="balance-link" to="/child/ledger">
+              积分明细 <ChevronRight size={12} />
+            </Link>
           </div>
           <Link to="/child/wishes">
             去兑换 <ChevronRight size={15} />
@@ -1254,7 +1317,7 @@ function WishMini({ wish, balance }: { wish: Wish; balance: number }) {
       <strong>{wish.title}</strong>
       <small>
         <Coins size={12} /> {wish.pointsCost} ·{" "}
-        {balance >= wish.pointsCost ? "可兑换" : "继续努力"}
+        {balance >= wish.pointsCost ? "可兑换" : `还差 ${wish.pointsCost - balance}`}
       </small>
     </Link>
   );
@@ -1269,6 +1332,13 @@ function WishCard({
   onRedeem: () => void;
 }) {
   const can = balance >= wish.pointsCost;
+  // 差多少要看得见：进度条按余额/标价画比例，points_cost 有 CHECK(points_cost>0)，
+  // 无除零；余额为负时进度与「已攒」都夹到 0，不画倒灌。
+  const saved = Math.max(0, Math.min(balance, wish.pointsCost));
+  const percent = Math.max(
+    0,
+    Math.min(100, Math.round((balance / wish.pointsCost) * 100)),
+  );
   return (
     <article className="wish-card">
       <div className="wish-art" style={{ background: wish.color }}>
@@ -1278,6 +1348,18 @@ function WishCard({
         <div>
           <h3>{wish.title}</h3>
           <p>{wish.description}</p>
+        </div>
+        <div>
+          <div
+            className="wish-progress"
+            role="img"
+            aria-label={`已攒 ${saved}/${wish.pointsCost} 积分`}
+          >
+            <span style={{ width: `${percent}%` }} />
+          </div>
+          <small className="wish-progress-label">
+            {can ? "积分够了，去兑换吧" : `已攒 ${saved}/${wish.pointsCost}`}
+          </small>
         </div>
         <div className="wish-card-foot">
           <span className="cost">
@@ -1475,13 +1557,33 @@ function Growth({ store }: { store: ReturnType<typeof useAppStore> }) {
         <div>
           <h3>连续坚持 {store.activeChild.streakDays} 天</h3>
           <p>
-            {store.activeChild.streakDays > 0
-              ? "再坚持一天，就能解锁新的徽章啦！"
-              : "今天完成一个任务，连续天数就开始累积。"}
+            {(() => {
+              if (store.activeChild.streakDays === 0)
+                return "今天完成一个任务，连续天数就开始累积。";
+              const nextBadge = streakBadges.find(
+                (badge) => store.activeChild.streakDays < badge.days,
+              );
+              if (!nextBadge)
+                return "最高徽章已经点亮，连续天数还在往上涨。";
+              return `再坚持 ${nextBadge.days - store.activeChild.streakDays} 天，解锁${nextBadge.icon}${nextBadge.name}徽章`;
+            })()}
           </p>
         </div>
         <ChevronRight size={18} />
       </section>
+      <div className="badge-row" role="list">
+        {streakBadges.map((badge) => (
+          <span
+            key={badge.days}
+            role="listitem"
+            className={`badge-chip${store.activeChild.streakDays >= badge.days ? "" : " locked"}`}
+            title={badge.name}
+          >
+            {badge.icon}
+            <small>{badge.days}天</small>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
