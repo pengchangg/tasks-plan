@@ -1004,6 +1004,12 @@ await hintButton.click();
 const hintText = await page.locator(".klotski-hint").innerText();
 assert.match(hintText, /下一步：空[12] 向[上下左右]滑/, "提示没有按空格记法给出下一步");
 assert.ok(/最少还需 118 步/.test(hintText), "开局提示应说最少还需 118 步");
+// 提示不只写在文字里，还画在盘上：恰好一块棋子挂 .hint-from（带方向箭头徽标），
+// 恰好一个落点框 .hint-cell 盖住空格——孩子照盘上高亮走即可，不必换算「空几」。
+assert.equal(await page.locator(".klotski-piece.hint-from").count(), 1, "盘面没有高亮该动的棋子");
+assert.equal(await page.locator(".hint-arrow").count(), 1, "该动的棋子上没有方向箭头");
+assert.ok(["up", "down", "left", "right"].includes(await page.locator(".hint-arrow").getAttribute("data-dir") ?? ""), "箭头没有方向");
+assert.equal(await page.locator(".hint-cell").count(), 1, "盘面没有标出滑动落点");
 await page.getByRole("button", { name: "看完整走法" }).click();
 assert.equal(await page.locator(".klotski-steps-list li").count(), 118, "完整走法不是 118 条");
 await page.getByRole("button", { name: "收起走法" }).click();

@@ -146,6 +146,42 @@ export interface Hint {
   steps: string[];
 }
 
+// HintMove 是记法翻回真实棋盘的结果：该动的棋子 + applyMove 要的锚点新位 +
+// 方向（画箭头徽标用）+ 这一步填进的那格（画落点框用）。
+export interface HintMove {
+  char: string;
+  anchor: Cell;
+  dir: [number, number];
+  cell: Cell;
+}
+
+// stepToMove 把某条记法（"空1上"）在**当时的局面**上落成一次真实滑动：空格编号
+// 按行主序反查回格子，来源格 = 空格沿方向反向一格。记号翻译一旦反向或错认棋子，
+// 界面高亮就会指错——vitest 的逐步重放钉住这里与 solveFrom 口径一致。
+export function stepToMove(rows: string[], step: string): HintMove | null {
+  const match = /^空([12])(上|下|左|右)$/.exec(step);
+  if (!match) return null;
+  const dir = stepDirs.find((item) => item.name === match[2])!;
+  const keys = emptyKeys(rows);
+  let cell: Cell | null = null;
+  for (const [key, n] of Object.entries(keys))
+    if (String(n) === match[1]) cell = key.split(",").map(Number) as Cell;
+  if (!cell) return null;
+  const [er, ec] = cell;
+  const [dr, dc] = [dir.dr, dir.dc];
+  const sr = er - dr;
+  const sc = ec - dc;
+  if (sr < 0 || sr > 4 || sc < 0 || sc > 3) return null;
+  const ch = rows[sr]?.[sc];
+  if (!ch || ch === ".") return null;
+  const { pieces } = parseRows(rows);
+  const piece = pieces.find((item) => item.char === ch);
+  if (!piece) return null;
+  const anchor: Cell = [piece.cells[0][0] + dr, piece.cells[0][1] + dc];
+  if (!targetsFor(rows, ch).some(([r, c]) => r === anchor[0] && c === anchor[1])) return null;
+  return { char: ch, anchor, dir: [dr, dc], cell };
+}
+
 const stepDirs = [
   { dr: -1, dc: 0, name: "上" },
   { dr: 1, dc: 0, name: "下" },

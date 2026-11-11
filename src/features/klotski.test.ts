@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyMove, emptyKeys, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, targetsFor } from "./klotski";
+import { applyMove, emptyKeys, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, stepToMove, targetsFor } from "./klotski";
 
 // 与 internal/server/games.go 的 klotskiLevels[1]「横刀立马」逐字一致的开局。
 const hengdao = ["ACCB", "ACCB", "DGGE", "D..E", "pqrs"];
@@ -151,6 +151,29 @@ describe("华容道提示", () => {
     // 开局 118 步，q 已替孩子走过一步：最少还需恰好 117。
     expect(hint!.moves).toBe(117);
     expect(["空1上", "空1右", "空2下", "空2左", "空2右"]).toContain(hint!.steps[0]);
+  });
+
+  it("translates a notation step back to the piece and cell the board highlights", () => {
+    // 开局第一句记法必须翻回一次真实滑动：棋子合法地滑进它点名的那格。
+    const hint = solveFrom(hengdao)!;
+    const move = stepToMove(hengdao, hint.steps[0]);
+    expect(move).not.toBeNull();
+    expect(targetsFor(hengdao, move!.char).some(([r, c]) => r === move!.anchor[0] && c === move!.anchor[1])).toBe(true);
+    expect(applyMove(hengdao, move!.char, move!.anchor)[move!.cell[0]][move!.cell[1]]).toBe(move!.char);
+    // 方向 = 锚点位移，界面箭头徽标就按它转。
+    const piece = parseRows(hengdao).pieces.find((item) => item.char === move!.char)!;
+    expect(move!.anchor[0] - piece.cells[0][0]).toBe(move!.dir[0]);
+    expect(move!.anchor[1] - piece.cells[0][1]).toBe(move!.dir[1]);
+    // 中盘的每个候选记号都各自落回各自合法的那块棋子。
+    const board = ["ACCB", "ACCB", "DGGE", "Dq.E", "p.rs"];
+    for (const step of ["空1上", "空1右", "空2下", "空2左", "空2右"]) {
+      const m = stepToMove(board, step);
+      expect(m, step).not.toBeNull();
+      expect(targetsFor(board, m!.char).some(([r, c]) => r === m!.anchor[0] && c === m!.anchor[1])).toBe(true);
+    }
+    // 畸形记法不猜：编号越界、方向不认识都回 null。
+    expect(stepToMove(hengdao, "空3上")).toBeNull();
+    expect(stepToMove(hengdao, "空1斜")).toBeNull();
   });
 
   it("refuses malformed boards instead of guessing", () => {

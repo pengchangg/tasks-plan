@@ -213,6 +213,13 @@
 .piece-icon{font-size:22px;line-height:1.15}
 .piece-label{font-size:13px;line-height:1.2}
 .piece-icon,.piece-label{pointer-events:none}
+.klotski-piece.hint-from{border-color:#e4bd61;box-shadow:0 0 0 3px #f1d590,inset 0 0 0 1px #e4bd61;z-index:2}
+.hint-arrow{position:absolute;top:-8px;right:-8px;width:20px;height:20px;border-radius:50%;background:#ffd97a;border:1.5px solid #92620e;color:#6b4d05;display:grid;place-items:center;font-size:13px;line-height:1;z-index:3;pointer-events:none;animation:targetPulse 1.1s ease-in-out infinite}
+.hint-arrow span{display:block}
+.hint-arrow[data-dir="up"] span{transform:rotate(-90deg)}
+.hint-arrow[data-dir="down"] span{transform:rotate(90deg)}
+.hint-arrow[data-dir="left"] span{transform:rotate(180deg)}
+.hint-cell{position:relative;z-index:1;border:2px dashed #92620e;border-radius:7px;background:rgba(255,217,122,.35);pointer-events:none}
 .movable-target{position:relative;z-index:2;display:grid;place-items:center;border:0;background:none;padding:0}
 .movable-target::after{content:"";width:34%;aspect-ratio:1;border-radius:50%;background:var(--mint);opacity:.62;animation:targetPulse 1.1s ease-in-out infinite}
 .klotski-toolbar{display:flex;align-items:center;gap:9px;margin:14px auto 0;max-width:340px}

@@ -174,12 +174,14 @@ for (const scenario of scenarios) {
     ) {
       errors.push("出口缺口伸出棋盘");
     }
-    // 提示条弹出来后整页仍不许横向溢出，截图因此带上图标化棋子 + 提示条。
+    // 提示条弹出来后整页仍不许横向溢出，截图因此带上图标化棋子 + 盘面高亮 + 提示条。
     await page.getByRole("button", { name: "提示", exact: true }).click();
     try {
       await page.locator(".klotski-hint").waitFor({ timeout: 3000 });
+      await page.locator(".klotski-piece.hint-from").waitFor({ timeout: 1000 });
+      await page.locator(".hint-cell").waitFor({ timeout: 1000 });
     } catch {
-      errors.push("点提示没有出现提示条");
+      errors.push("点提示没有出现提示条或盘面高亮");
     }
     const wide = await page.evaluate(
       () => document.body.scrollWidth > document.documentElement.clientWidth + 1,

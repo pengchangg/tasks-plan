@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useAppStore } from "../store";
 import { EmptyState, PageHeading, ParentHeader, useDialog } from "../ui";
-import { applyMove, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, targetsFor } from "./klotski";
+import { applyMove, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, stepToMove, targetsFor } from "./klotski";
 import type { Cell, Hint, Piece } from "./klotski";
 import type { KlotskiLevel } from "../types";
 
@@ -27,6 +27,10 @@ const describeStep = (step: string): string => {
   if (!match) return step;
   return `空${match[1]} 向${match[2]}滑`;
 };
+
+// arrowDir 把滑动方向翻成 data-dir，CSS 靠它旋转箭头徽标（字符本身朝右）。
+const arrowDir = (dir: [number, number]): string =>
+  dir[0] === 1 ? "down" : dir[0] === -1 ? "up" : dir[1] === -1 ? "left" : "right";
 
 export function GameTeaser({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
@@ -200,6 +204,11 @@ function KlotskiBoard({
 
   const { pieces } = parseRows(rows);
   const selectedPiece = pieces.find((piece) => piece.char === selected);
+  // 提示不只说空几，还直接画在盘上：该动的棋子挂 .hint-from（金色描边 + 方向箭头
+  // 徽标），它要滑进的那格挂 .hint-cell（虚线落点框）。记法与高亮同源同一次翻译，
+  // 孩子不用把「空1向右滑」在脑子里换算成棋盘坐标。
+  const hintMove =
+    hint !== null && hint.moves > 0 ? (stepToMove(rows, hint.steps[0]) ?? null) : null;
   // 选中棋子后，把它滑一格能新占到的空格画成圆点；每个圆点记着自己属于哪次滑动
   // （anchor = 锚点新位，是 applyMove 真正需要的坐标），点圆点即滑动。
   const dots: { cell: Cell; anchor: Cell }[] = [];
@@ -240,7 +249,7 @@ function KlotskiBoard({
               key={piece.char}
               type="button"
               data-piece={piece.char}
-              className={`klotski-piece piece-${piece.kind}${selected === piece.char ? " selected" : ""}${blocked.has(piece.char) ? " piece-blocked" : ""}`}
+              className={`klotski-piece piece-${piece.kind}${selected === piece.char ? " selected" : ""}${blocked.has(piece.char) ? " piece-blocked" : ""}${hintMove?.char === piece.char ? " hint-from" : ""}`}
               style={{
                 gridColumnStart: c + 1,
                 gridColumnEnd: `span ${colsSpan}`,
@@ -253,6 +262,11 @@ function KlotskiBoard({
                 {pieceIcons[piece.char]}
               </span>
               <span className="piece-label">{pieceLabels[piece.char]}</span>
+              {hintMove?.char === piece.char ? (
+                <span className="hint-arrow" aria-hidden="true" data-dir={arrowDir(hintMove.dir)}>
+                  <span>➜</span>
+                </span>
+              ) : null}
             </button>
           );
         })}
@@ -267,6 +281,14 @@ function KlotskiBoard({
             onClick={() => move(dot.anchor)}
           />
         ))}
+        {hintMove !== null ? (
+          // 落点框画在空格上（非交互：孩子先点棋子再点圆点，滑动只有一条路）。
+          <span
+            aria-hidden="true"
+            className="hint-cell"
+            style={{ gridColumnStart: hintMove.cell[1] + 1, gridRowStart: hintMove.cell[0] + 1 }}
+          />
+        ) : null}
       </div>
       <div className="klotski-toolbar">
         <button className="outline-button" onClick={undo} disabled={history.length === 0}>
