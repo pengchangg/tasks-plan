@@ -904,8 +904,10 @@ func TestReviewCreditsExactlyOnceUsesMinimumGrowthAndRedemptionCannotOverdraw(t 
 	}
 	childCookie := childCookie(t, h, pending.ChildID)
 	w = doJSON(t, h, "POST", "/api/v1/wishes/"+expensive.ID+"/redeem", map[string]any{}, childCookie, "redeem-too-much")
-	if w.Code != 409 {
-		t.Fatalf("overdraw status %d", w.Code)
+	// 409 有三种（wish_unavailable / insufficient_points / conflict），只比状态码
+	// 的话愿望不可用也能冒充余额守卫通过——必须点名 insufficient_points。
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "insufficient_points") {
+		t.Fatalf("overdraw status %d body %s", w.Code, w.Body.String())
 	}
 	state = getStateTest(t, h, cookie)
 	for _, c := range state.Children {
@@ -2121,7 +2123,7 @@ func TestHomeworkDoneIsPerDayScopedAndCascades(t *testing.T) {
 	if awarded, got := toggle(items[0].ID, false); awarded != -homeworkDonePoints || got != -homeworkDonePoints {
 		t.Fatalf("spent points go negative: awarded %d balance %d", awarded, got)
 	}
-	if w := doJSON(t, h, "POST", "/api/v1/wishes/"+getStateTest(t, h, child).Wishes[0].ID+"/redeem", nil, child, "overdraft"); w.Code != 409 {
+	if w := doJSON(t, h, "POST", "/api/v1/wishes/"+getStateTest(t, h, child).Wishes[0].ID+"/redeem", nil, child, "overdraft"); w.Code != 409 || !strings.Contains(w.Body.String(), "insufficient_points") {
 		t.Fatalf("redeem on a negative balance: %d %s", w.Code, w.Body.String())
 	}
 	// 删除作业级联清掉勾选记录。
@@ -2597,5 +2599,273 @@ func TestHomeworkDoneRebuildAttributesLegacyRowsToTheChildThatEarnedThem(t *test
 	}
 	if _, err = s.db.Exec(`INSERT INTO point_ledger VALUES('led-hw-older','family-done','child-older',5,'earned','homework','hw-legacy:2026-10-02:child-older','完成「语文」','2026-10-02T12:00:00Z')`); err != nil {
 		t.Fatalf("second child credit after 009: %v", err)
+	}
+}
+
+// TestConcurrentSameKeySubmissionReplaysInsteadOfDoubleSubmitting races two
+// submissions under ONE Idempotency-Key — the claim-row conflict the existing
+// concurrent test cannot reach, because it uses two different keys and its
+// 409 comes from the instance status guard, not from the claim. The pool holds
+// one connection, so the loser's INSERT blocks until the winner commits and
+// then finds the stored 200: one request moves the task, the other replays.
+func TestConcurrentSameKeySubmissionReplaysInsteadOfDoubleSubmitting(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	child := childCookie(t, h, "")
+	var todoID string
+	for _, v := range getStateTest(t, h, child).Tasks {
+		if v.Status == "todo" {
+			todoID = v.ID
+			break
+		}
+	}
+	if todoID == "" {
+		t.Fatal("demo seed has no todo task")
+	}
+	const key = "same-key-race"
+	first := multipartRequest(t, "POST", "/api/v1/tasks/"+todoID+"/submit", child, key, nil, nil)
+	second := multipartRequest(t, "POST", "/api/v1/tasks/"+todoID+"/submit", child, key, nil, nil)
+	type answer struct {
+		code int
+		body string
+	}
+	answers := make(chan answer, 2)
+	var wg sync.WaitGroup
+	for _, request := range []*http.Request{first, second} {
+		wg.Add(1)
+		go func(request *http.Request) {
+			defer wg.Done()
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, request)
+			answers <- answer{code: w.Code, body: w.Body.String()}
+		}(request)
+	}
+	wg.Wait()
+	close(answers)
+	replays := 0
+	for got := range answers {
+		if got.code != http.StatusOK {
+			t.Fatalf("same-key concurrent submit: %d %s", got.code, got.body)
+		}
+		if strings.Contains(got.body, `"replayed":true`) {
+			replays++
+		}
+	}
+	if replays != 1 {
+		t.Fatalf("same-key concurrent submits replayed=%d, want exactly one fresh 200 and one replay", replays)
+	}
+	var submissions int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_submissions WHERE task_instance_id=?`, todoID).Scan(&submissions); err != nil {
+		t.Fatal(err)
+	}
+	if submissions != 1 {
+		t.Fatalf("same-key concurrent submits wrote %d submissions, want 1", submissions)
+	}
+	var stored int
+	if err := s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE operation='submit' AND key=?`, key).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != http.StatusOK {
+		t.Fatalf("stored claim status=%d, want 200", stored)
+	}
+}
+
+// TestInFlightIdempotencySentinelNeverReplaysAndVanishesWithARolledBackWinner
+// guards the half of the claim a real race cannot schedule deterministically:
+// a live claim stores the idempotencyPending sentinel, which must answer 409
+// and must NEVER be replayed as if it were a finished status, and a winner
+// that rolled its transaction back leaves no stale row so the key stays usable.
+func TestInFlightIdempotencySentinelNeverReplaysAndVanishesWithARolledBackWinner(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	child := childCookie(t, h, "")
+	var todoID string
+	for _, v := range getStateTest(t, h, child).Tasks {
+		if v.Status == "todo" {
+			todoID = v.ID
+			break
+		}
+	}
+	if todoID == "" {
+		t.Fatal("demo seed has no todo task")
+	}
+	var family, actor string
+	if err := s.db.QueryRow(`SELECT family_id,actor_id FROM sessions WHERE token_hash=?`, tokenHash(child.Value)).Scan(&family, &actor); err != nil {
+		t.Fatal(err)
+	}
+	const key = "sentinel-in-flight"
+	if _, err := s.db.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,?,?,-1,'',?)`, family, actor, "submit", key, nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	claimant := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, multipartRequest(t, "POST", "/api/v1/tasks/"+todoID+"/submit", child, key, nil, nil))
+		return w
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		w := claimant()
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "still in flight") {
+			t.Fatalf("live sentinel: %d %s", w.Code, w.Body.String())
+		}
+	}
+	var status int
+	if err := s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE key=?`, key).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != idempotencyPending {
+		t.Fatalf("rejected request overwrote the sentinel: %d", status)
+	}
+	var submissions int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_submissions WHERE task_instance_id=?`, todoID).Scan(&submissions); err != nil {
+		t.Fatal(err)
+	}
+	if submissions != 0 {
+		t.Fatalf("a request that lost the claim still submitted %d times", submissions)
+	}
+	// The winner failed and its transaction (the claim included) rolled back:
+	// no row survives, so the retry must be a fresh claim, not a replay.
+	if _, err := s.db.Exec(`DELETE FROM idempotency_keys WHERE key=?`, key); err != nil {
+		t.Fatal(err)
+	}
+	if w := claimant(); w.Code != http.StatusOK {
+		t.Fatalf("retry after rolled-back winner: %d %s", w.Code, w.Body.String())
+	}
+	if err := s.db.QueryRow(`SELECT status_code FROM idempotency_keys WHERE key=?`, key).Scan(&status); err != nil || status != http.StatusOK {
+		t.Fatalf("committed claim status=%d err=%v, want 200", status, err)
+	}
+	if w := claimant(); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"replayed":true`) {
+		t.Fatalf("retry after committed winner: %d %s", w.Code, w.Body.String())
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM task_submissions WHERE task_instance_id=?`, todoID).Scan(&submissions); err != nil {
+		t.Fatal(err)
+	}
+	if submissions != 1 {
+		t.Fatalf("submissions=%d, want the retry to replay rather than submit again", submissions)
+	}
+}
+
+// TestForeignSessionsAreRefusedByEveryWriteRouteOfTheServedFamily is the
+// write-side twin of the isolation reads: a foreign parent and a foreign child
+// session touch EVERY write route against served-family ids. Before this test
+// only five routes had ever been probed from outside the family, so one
+// missing `AND family_id = ?` anywhere else shipped green.
+func TestForeignSessionsAreRefusedByEveryWriteRouteOfTheServedFamily(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	before := getStateTest(t, h, parent)
+	if len(before.Children) != 1 || len(before.Tasks) == 0 || len(before.Wishes) == 0 {
+		t.Fatalf("demo seed shape changed: %d children, %d tasks, %d wishes", len(before.Children), len(before.Tasks), len(before.Wishes))
+	}
+	childID, taskID, wishID := before.Children[0].ID, before.Tasks[0].ID, before.Wishes[0].ID
+	foreign := otherFamily(t, s, "OTHER", "Asia/Shanghai")
+	// deleteChild answers last_child before it ever looks at the id, so the
+	// foreign family needs two children for the DELETE to reach its scoped
+	// statement — otherwise this sweep would prove nothing about that route.
+	for _, cid := range []string{"child-foreign", "child-foreign-2"} {
+		if _, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,created_at) VALUES(?,?,?,?,?,?)`, cid, foreign, "外人", "👽", "#fff", nowText(s.now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One served-family redemption row, so the completion route is probed
+	// against a real owned id: nothing else in the seed has a redemption yet.
+	var served string
+	if err := s.db.QueryRow(`SELECT id FROM families ORDER BY created_at,id LIMIT 1`).Scan(&served); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO redemptions(id,family_id,wish_id,wish_title,child_id,points_cost,created_at) VALUES('red-foreign-probe',?,?,?, ?,1,?)`, served, wishID, "探测", childID, nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	foreignParent := sessionFor(t, s, foreign, "parent", "par-foreign", "")
+	foreignChild := sessionFor(t, s, foreign, "child", "child-foreign", "child-foreign")
+	probe := func(method, path, key string, body any, cookie *http.Cookie, want int, wantCode string) {
+		w := doJSON(t, h, method, path, body, cookie, key)
+		if w.Code != want || !strings.Contains(w.Body.String(), wantCode) {
+			t.Fatalf("%s %s: %d %s, want %d %q", method, path, w.Code, w.Body.String(), want, wantCode)
+		}
+	}
+	probe("PUT", "/api/v1/children/"+childID, "", map[string]string{"name": "改名", "avatar": "🥷", "color": "#000"}, foreignParent, http.StatusNotFound, "not_found")
+	probe("DELETE", "/api/v1/children/"+childID, "", nil, foreignParent, http.StatusNotFound, "not_found")
+	probe("POST", "/api/v1/children/"+childID+"/points", "award-foreign", map[string]any{"amount": 5, "note": "偷分"}, foreignParent, http.StatusNotFound, "not_found")
+	probe("POST", "/api/v1/tasks/", "", map[string]any{"childId": childID, "title": "偷建任务", "points": 5, "repeatRule": "daily"}, foreignParent, http.StatusNotFound, "not_found")
+	probe("PUT", "/api/v1/tasks/"+taskID, "", map[string]any{"childId": childID, "title": "偷改任务", "points": 5, "repeatRule": "daily"}, foreignParent, http.StatusNotFound, "not_found")
+	probe("DELETE", "/api/v1/tasks/"+taskID, "", nil, foreignParent, http.StatusNotFound, "not_found")
+	probe("PUT", "/api/v1/wishes/"+wishID, "", map[string]any{"title": "偷改愿望", "pointsCost": 1}, foreignParent, http.StatusNotFound, "not_found")
+	probe("DELETE", "/api/v1/wishes/"+wishID, "", nil, foreignParent, http.StatusNotFound, "not_found")
+	probe("PATCH", "/api/v1/session/child", "", map[string]string{"childId": childID}, foreignChild, http.StatusNotFound, "not_found")
+	probe("POST", "/api/v1/auth/parent/password", "", map[string]string{"currentPassword": "2468", "newPassword": "1357"}, foreignParent, http.StatusUnauthorized, "invalid_credentials")
+	// Child-only and id-keyed routes, still addressed by served-family ids:
+	probe("POST", "/api/v1/tasks/"+taskID+"/review", "review-foreign", map[string]any{"approved": true}, foreignParent, http.StatusConflict, "invalid_state")
+	probe("POST", "/api/v1/wishes/"+wishID+"/redeem", "redeem-foreign", map[string]any{}, foreignChild, http.StatusConflict, "wish_unavailable")
+	// submit and the redemption completion are multipart:
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, multipartRequest(t, "POST", "/api/v1/tasks/"+taskID+"/submit", foreignChild, "submit-foreign", nil, nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("foreign submit: %d %s", w.Code, w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, multipartRequest(t, "PATCH", "/api/v1/redemptions/red-foreign-probe", foreignChild, "", map[string]string{"completed": "false"}, nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("foreign redemption completion: %d %s", w.Code, w.Body.String())
+	}
+	var completedAt sql.NullString
+	if err := s.db.QueryRow(`SELECT completed_at FROM redemptions WHERE id='red-foreign-probe'`).Scan(&completedAt); err != nil || completedAt.Valid {
+		t.Fatalf("foreign completion touched the served redemption: %v %v", completedAt, err)
+	}
+	// Nothing moved on the served side, and the family still owns its password.
+	after := getStateTest(t, h, parent)
+	if len(after.Children) != 1 || after.Children[0].ID != childID || after.Children[0].PointsBalance != before.Children[0].PointsBalance {
+		t.Fatalf("foreign writes changed the served children: %+v vs %+v", after.Children, before.Children)
+	}
+	if len(after.Tasks) != len(before.Tasks) || len(after.Ledger) != len(before.Ledger) || len(after.Redemptions) != len(before.Redemptions)+1 {
+		// +1: the probe redemption this test itself inserted for the served family.
+		t.Fatalf("foreign writes added rows: %d/%d tasks %d/%d ledger %d/%d redemptions", len(after.Tasks), len(before.Tasks), len(after.Ledger), len(before.Ledger), len(after.Redemptions), len(before.Redemptions))
+	}
+	for _, v := range after.Wishes {
+		if v.ID == wishID && (!v.IsActive || v.Title != before.Wishes[0].Title) {
+			t.Fatalf("foreign wish edit landed on the served wish: %+v", v)
+		}
+	}
+	for _, v := range after.Tasks {
+		if v.ID == taskID && (v.Status != before.Tasks[0].Status || v.Title != before.Tasks[0].Title) {
+			t.Fatalf("foreign task edit landed on the served instance: %+v", v)
+		}
+	}
+	if w = doJSON(t, h, "POST", "/api/v1/auth/parent", map[string]string{"password": "2468"}, nil, ""); w.Code != http.StatusOK {
+		t.Fatalf("served parent password no longer works: %d", w.Code)
+	}
+	if _, err := s.db.Exec(`DELETE FROM redemptions WHERE id='red-foreign-probe'`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestVerifySecretRefusesOutOfBoundsCostParameters guards the OOM defence the
+// parameter-range comment names: cost parameters arrive from a database row,
+// so one corrupted hash must never reach argon2 with them. Every input here
+// parses and base64-decodes cleanly — only the guard stands between it and a
+// multi-gigabyte allocation on every login attempt.
+func TestVerifySecretRefusesOutOfBoundsCostParameters(t *testing.T) {
+	salt := "AAECAwQFBgcICQoLDA0ODw"                     // 16 bytes, RawStdEncoding
+	sum := "AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk" // 32 bytes, decodable
+	encoded := func(params string) string { return "$argon2id$v=19$" + params + "$" + salt + "$" + sum }
+	for _, params := range []string{
+		"m=4294967295,t=1,p=1",        // the uint32 ceiling the comment fears
+		"m=999999999,t=1,p=1",         // inside uint32, far above the 256 MiB bound
+		"m=8191,t=1,p=1",              // one below the 8 MiB floor
+		"m=8192,t=11,p=1",             // one above the ten-iteration bound
+		"m=8192,t=0,p=1",              // zero iterations
+		"m=8192,t=1,p=0",              // zero threads
+		"m=8192,t=1,p=17",             // one above the thread bound
+		"m=8192,t=1,p=99999999999999", // threads beyond uint8: rejected however the scan resolves it
+	} {
+		if verifySecret(encoded(params), "2468") {
+			t.Fatalf("out-of-bounds parameters accepted: %s", params)
+		}
+	}
+	// Inside the bounds the shape is accepted and the digest decides: a cheap
+	// 8 MiB hash with the wrong sum must still verify false, proving the guard
+	// above is what rejected the rows, not a parse failure.
+	if verifySecret("$argon2id$v=19$m=8192,t=1,p=4$"+salt+"$"+sum, "2468") {
+		t.Fatal("a valid-shape hash with the wrong digest was accepted")
 	}
 }
