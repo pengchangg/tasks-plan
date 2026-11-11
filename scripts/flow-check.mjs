@@ -19,6 +19,9 @@ let expectSwitch401 = false;
 // 未通关的关卡、不存在的关卡），4xx 同样会被记成 console error；只有探针窗口内、
 // 且 URL 确实是这条完成路由时才放行，别处冒出来的 4xx 照样让门禁失败。
 let expectKlotskiProbe = false;
+// 题类那一幕同样用 page.evaluate 直接打非法上报（没带幂等键、分数超量表、猜错
+// 的第三个游戏），窗口内只放行这条上报路由的 4xx。
+let expectQuizProbe = false;
 function expected401(url) {
   if (expectAuth401 && url.endsWith("/api/v1/auth/parent")) return true;
   if (expectAuth401 && url.endsWith("/api/v1/auth/parent/password")) return true;
@@ -35,6 +38,11 @@ function collectErrors(target) {
     if (
       expectKlotskiProbe &&
       /\/api\/v1\/games\/klotski\/[^/]+\/complete$/.test(message.location()?.url ?? "")
+    )
+      return;
+    if (
+      expectQuizProbe &&
+      /\/api\/v1\/games\/quizzes\/[^/]+\/score$/.test(message.location()?.url ?? "")
     )
       return;
     errors.push(message.text());
@@ -979,7 +987,7 @@ assert.ok((await gameTeaser.innerText()).includes("已通关 0/5"), "开局首�
 await gameTeaser.click();
 await page.waitForURL(/\/child\/games$/);
 await page.locator(".game-card").first().waitFor();
-assert.equal(await page.locator(".game-card").count(), 5);
+assert.equal(await page.locator(".game-card").count(), 7, "5 关华容道 + 口算 + 找规律共 7 张卡");
 assert.equal(await page.locator(".game-card.locked").count(), 4, "开局只该解锁第 1 关");
 await page.locator(".game-card").first().click();
 await page.waitForURL(/\/child\/games\/klotski\?level=1$/);
@@ -1061,7 +1069,7 @@ async function playKlotski(moves) {
 }
 async function closeKlotskiBanner() {
   const banner = page.locator(".reward-celebration");
-  await banner.getByText("通关华容道", { exact: true }).waitFor({ timeout: 5000 });
+  await banner.getByText("游戏奖励", { exact: true }).waitFor({ timeout: 5000 });
   assert.equal(await banner.locator("strong").innerText(), "+30 积分到账！");
   await banner.getByRole("button", { name: "关闭积分到账提示" }).click();
   await banner.waitFor({ state: "detached" });
@@ -1146,18 +1154,249 @@ assert.equal(klotskiProgress.levels[2].unlocked, true);
 assert.equal(klotskiProgress.levels[2].completed, false);
 assert.equal(klotskiProgress.levels[3].unlocked, false);
 await page.screenshot({ path: ".artifacts/ui/games-progress.png", fullPage: true });
-// 家长端只读进度：五关都在，状态和孩子端一致。
+// ── 口算闯关 + 找规律：?seed= 固定出题，harness 在页面里重算正确答案点下去；
+// 加分只有「破当天最好成绩补差价」一条路，所以三局一组：首局记分、平局零分、
+// 更高分只补差额。找规律再故意错一题，验证 10 分制和失误扣的是题分。
+const quizBalance = gameBalance + 60;
+const clickChoice = (value) =>
+  page.locator(".quiz-choice").filter({ hasText: new RegExp(`^\\s*${value}\\s*$`) }).click();
+const calcAnswer = () =>
+  page.evaluate(() => {
+    const m = document
+      .querySelector(".quiz-problem")
+      .textContent.match(/(\d+)\s*([+\-×÷])\s*(\d+)/);
+    const a = Number(m[1]);
+    const b = Number(m[3]);
+    return String(
+      m[2] === "+" ? a + b : m[2] === "-" ? a - b : m[2] === "×" ? a * b : a / b,
+    );
+  });
+async function closeQuizBanner(amount) {
+  const banner = page.locator(".reward-celebration");
+  await banner.getByText("游戏奖励", { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await banner.locator("strong").innerText(), `+${amount} 积分到账！`);
+  await banner.getByRole("button", { name: "关闭积分到账提示" }).click();
+  await banner.waitFor({ state: "detached" });
+}
+async function answerCalcRound(correct) {
+  for (let i = 0; i < correct; i++) {
+    await clickChoice(await calcAnswer());
+    await page.waitForTimeout(500);
+  }
+  const reported = page.waitForResponse((response) =>
+    response.url().endsWith("/api/v1/games/quizzes/timed_calc/score"),
+  );
+  await page.getByRole("button", { name: "交卷" }).click();
+  assert.equal((await reported).status(), 200, "口算成绩没有被服务端接受");
+}
+await page.getByRole("link", { name: "进入游戏" }).click();
+await page.waitForURL(/\/child\/games$/);
+await page.getByRole("button", { name: /^口算闯关/ }).click();
+await page.waitForURL(/\/child\/games\/calc$/);
+await page.goto(baseUrl + "/child/games/calc?seed=777");
+await page.getByRole("button", { name: "第1档 · 20 以内加减" }).click();
+await page.locator(".quiz-problem").waitFor();
+// 第 1 局：答对 3 题就交卷，当天第一次记分 → +3 与横幅。
+const calcReport1 = page.waitForResponse((response) =>
+  response.url().endsWith("/api/v1/games/quizzes/timed_calc/score"),
+);
+await answerCalcRound(3);
+await calcReport1;
+await page.locator(".quiz-result").waitFor();
+assert.equal(await page.locator(".quiz-result strong").innerText(), "3");
+assert.ok(
+  (await page.locator(".quiz-record").innerText()).includes("破纪录"),
+  "首局记分却没说破纪录",
+);
+await closeQuizBanner(3);
+await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === s.activeChildId).pointsBalance === quizBalance + 3,
+);
+// 第 2 局同种子同 3 题：平纪录的再打一分不补，也不许弹横幅。
+await page.getByRole("button", { name: "再来一局" }).click();
+await page.locator(".quiz-problem").waitFor();
+await answerCalcRound(3);
+await page.locator(".quiz-result").waitFor();
+assert.ok(
+  !(await page.locator(".quiz-record").innerText()).includes("破纪录"),
+  "平纪录的一局说了破纪录",
+);
+assert.ok(
+  (await page.locator(".quiz-record").innerText()).includes("今天最好 3 题"),
+  "没破纪录的结算没把今天的最好成绩报给孩子",
+);
+await page.waitForTimeout(1200);
+assert.equal(
+  await page.locator(".reward-celebration").count(),
+  0,
+  "没破纪录的一局弹了到账横幅",
+);
+// 第 3 局答到 5：只补 3→5 的差价 +2，台账记下新的最好成绩。
+await page.getByRole("button", { name: "再来一局" }).click();
+await page.locator(".quiz-problem").waitFor();
+await answerCalcRound(5);
+await page.locator(".quiz-result").waitFor();
+assert.equal(await page.locator(".quiz-result strong").innerText(), "5");
+await closeQuizBanner(2);
+// 找规律：错一题只扣那一题的 10 分 → 90 分补 9。
+await page.getByRole("link", { name: "返回关卡列表" }).click();
+await page.waitForURL(/\/child\/games$/);
+await page.getByRole("button", { name: /^找规律/ }).click();
+await page.waitForURL(/\/child\/games\/pattern$/);
+await page.goto(baseUrl + "/child/games/pattern?seed=4242");
+await page.getByRole("button", { name: "开始找规律" }).click();
+await page.locator(".pattern-seq").waitFor();
+const patternAnswer = () =>
+  page.evaluate(() => {
+    const tiles = [...document.querySelectorAll(".pattern-seq .pattern-tile")].map((t) =>
+      t.textContent.trim(),
+    );
+    const seq = tiles.slice(0, -1);
+    if (seq.some((s) => !/^\d+$/.test(s))) {
+      const cycle = seq[0] === seq[2] && seq[1] === seq[3] ? 2 : 3;
+      if (!(seq[0] === seq[cycle] && seq[1] === seq[cycle + 1]))
+        throw new Error("no cycle in " + seq.join(","));
+      return seq[5 % cycle];
+    }
+    const nums = seq.map(Number);
+    if (nums.every((v, i) => i === 0 || v === nums[i - 1] * 2)) return String(nums[4] * 2);
+    const diffs = nums.slice(1).map((v, i) => v - nums[i]);
+    if (diffs.every((d) => d === diffs[0])) return String(nums[4] + diffs[0]);
+    if (diffs.slice(1).every((d, i) => d - diffs[i] === 1))
+      return String(nums[4] + diffs[3] + 1);
+    throw new Error("unknown pattern " + nums.join(","));
+  });
+async function answerPatternRound({ firstWrong }) {
+  for (let q = 0; q < 10; q++) {
+    const answer = await patternAnswer();
+    const choices = (
+      await page.locator(".pattern-choices .quiz-choice").allInnerTexts()
+    ).map((t) => t.trim());
+    assert.ok(choices.includes(answer), "这一题的正确答案不在选项里：" + answer);
+    if (q === 0 && firstWrong) {
+      const wrong = choices.find((t) => t !== answer);
+      await page
+        .locator(".pattern-choices .quiz-choice")
+        .filter({ hasText: new RegExp(`^\\s*${wrong}\\s*$`) })
+        .click();
+      assert.equal(
+        await page.locator(".quiz-choice.wrong").count(),
+        1,
+        "点错后没有画出错误反馈",
+      );
+    } else {
+      await page
+        .locator(".pattern-choices .quiz-choice")
+        .filter({ hasText: new RegExp(`^\\s*${answer}\\s*$`) })
+        .click();
+    }
+    await page.waitForTimeout(500);
+  }
+  await page.locator(".quiz-result").waitFor();
+}
+const patternReport1 = page.waitForResponse((response) =>
+  response.url().endsWith("/api/v1/games/quizzes/pattern_quiz/score"),
+);
+await answerPatternRound({ firstWrong: true });
+assert.equal((await patternReport1).status(), 200, "找规律成绩没有被服务端接受");
+assert.ok(
+  (await page.locator(".quiz-result").innerText()).includes("90"),
+  "错一题没有按 10 分制扣成 90",
+);
+await closeQuizBanner(9);
+// 全对 → 100 分只补 90→100 的差价（10 分制折 1 积分）；再全对一次 → 一分不补。
+await page.getByRole("button", { name: "再来一局" }).click();
+await page.locator(".pattern-seq").waitFor();
+await answerPatternRound({ firstWrong: false });
+await closeQuizBanner(1);
+await page.getByRole("button", { name: "再来一局" }).click();
+await page.locator(".pattern-seq").waitFor();
+await answerPatternRound({ firstWrong: false });
+assert.ok(
+  (await page.locator(".quiz-record").innerText()).includes("今天最好 100 分"),
+  "平纪录的找规律一局没有把最好成绩报出来",
+);
+await page.waitForTimeout(1200);
+assert.equal(
+  await page.locator(".reward-celebration").count(),
+  0,
+  "平纪录的找规律一局弹了到账横幅",
+);
+// 台账四笔：口算 +3/+2、找规律 +9/+1（百分制折 10:1），描述都带当时的最好成绩。
+const quizState = await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === s.activeChildId).pointsBalance ===
+    quizBalance + 15,
+);
+for (const [desc, amount] of [
+  ["口算闯关：最好成绩 3", 3],
+  ["口算闯关：最好成绩 5", 2],
+  ["找规律：最好成绩 90", 9],
+  ["找规律：最好成绩 100", 1],
+])
+  assert.ok(
+    quizState.ledger.some(
+      (item) =>
+        item.childId === quizState.activeChildId &&
+        item.referenceType === "game" &&
+        item.description === desc &&
+        item.amount === amount,
+    ),
+    `台账里少了「${desc}」这一笔`,
+  );
+// 非法上报探针：没带幂等键、分数超量表、不存在的游戏。
+expectQuizProbe = true;
+const quizProbes = await page.evaluate(async () => {
+  const post = async (game, body, key) =>
+    (
+      await fetch(`/api/v1/games/quizzes/${game}/score`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json", ...(key ? { "Idempotency-Key": key } : {}) },
+        body: JSON.stringify(body),
+      })
+    ).status;
+  return [
+    await post("timed_calc", { score: 3, level: 1, seconds: 60 }),
+    await post("timed_calc", { score: 99, level: 1, seconds: 60 }, "probe-calc"),
+    await post("snake_sort", { score: 1, level: 1, seconds: 60 }, "probe-game"),
+  ];
+});
+expectQuizProbe = false;
+assert.deepEqual(quizProbes, [400, 400, 404], "三个非法上报的分支码不对");
+// 关卡列表把今天的最好成绩写在卡上。
+await page.getByRole("link", { name: "返回关卡列表" }).click();
+await page.waitForURL(/\/child\/games$/);
+await page.locator(".game-card").first().waitFor();
+assert.ok(
+  (await page.getByRole("button", { name: /^口算闯关/ }).innerText()).includes("今天最好 5 题"),
+  "口算卡片没记下今天的最好成绩",
+);
+assert.ok(
+  (await page.getByRole("button", { name: /^找规律/ }).innerText()).includes("今天最好 100 分"),
+  "找规律卡片没记下今天的最好成绩",
+);
+// 家长端只读进度：五关 + 两个题类游戏都在，状态和孩子端一致。
 await enterParent(false, "1357");
 await page.getByRole("link", { name: "游戏进度" }).click();
 await page.waitForURL(/\/parent\/games$/);
 await page.locator(".game-admin-row").first().waitFor();
-assert.equal(await page.locator(".game-admin-row").count(), 5);
+assert.equal(await page.locator(".game-admin-row").count(), 7, "五关华容道 + 两个题类游戏共 7 行");
 const firstAdminRow = page.locator(".game-admin-row").first();
 assert.ok((await firstAdminRow.innerText()).includes("已通关"));
 assert.ok((await firstAdminRow.innerText()).includes("最少 118 步"));
 assert.ok(
   (await page.locator(".game-admin-row").nth(4).innerText()).includes("未解锁"),
   "第 5 关在未解锁列表里显示错了",
+);
+assert.ok(
+  (await page.locator(".game-admin-row").nth(5).innerText()).includes("今天最好 5 · 历史最好 5"),
+  "家长端口算进度不对",
+);
+assert.ok(
+  (await page.locator(".game-admin-row").nth(6).innerText()).includes("今天最好 100 · 历史最好 100"),
+  "家长端找规律进度不对",
 );
 await page.screenshot({ path: ".artifacts/ui/games-admin.png", fullPage: true });
 await enterChild();

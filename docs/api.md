@@ -148,6 +148,17 @@
 
 完成接口的错误各回各的：`level` 不是 1…5 → `404 not_found`；`moves` 越界 → `400 invalid_request`；前一关没通关 → `409 invalid_state`。`moves` 的下限是**该关布局的最短解**（进程内 BFS 只算一次，第 4 关最少 79 步），上限 10000——写死一个数会把最省力的关也拦掉。进度按 `(family_id, child_id, level)` 一行存进 `klotski_progress`（迁移 `010_klotski.sql`），首次加分靠 `PRIMARY KEY` + `INSERT OR IGNORE` 保证每关只记一次。两个接口都要会话选中孩子，否则 `400 invalid_request`。
 
+## 游戏（口算闯关 / 找规律）
+
+二年级的两个题类游戏，客户端出题、服务端只收成绩（信任级别同华容道的 `moves`）：**口算闯关**（`timed_calc`，60 秒速算，`score` = 答对题数，上限 60）、**找规律**（`pattern_quiz`，10 题序列填空的百分制，`score` = 10 × 答对题数，必须是 10 的倍数）。
+
+| 接口 | 角色 | 说明 |
+|---|---|---|
+| `GET /api/v1/games/quizzes` | 任意 | `200 {games, history}`：两个游戏按固定顺序各一行 `{game, name, todayBest, allTimeBest, todayPlays, level}`，外加该孩子最近 20 局 `{id, game, score, details, createdAt}` |
+| `POST /api/v1/games/quizzes/{game}/score` | 任意 | 口算 `{"score":12,"level":2,"seconds":60}`、找规律 `{"score":90,"level":3,"mistakes":1}` → `200 {awarded}`；逐局写 `game_history`，**只有超过当天最好成绩才补差价**（`awarded` = 新最好 − 旧最好，按量表折算：口算 1 题 1 分、找规律 10 分折 1 积分），平局或更差记 `awarded=0` |
+
+上报必须带 `Idempotency-Key`（差价不像华容道重放那样天然幂等，同一局重发不能补两遍），同键重放返回存下的状态码 + `{"replayed": true}`。错误分支：`game` 不在两个之内 → `404 not_found`；缺键 → `400 idempotency_required`；`score`/`level` 越量表、找规律缺 `mistakes` 或越界（0…20）、口算 `seconds` 不是 60 → `400 invalid_request`；没选中孩子 → `400 invalid_request`。成绩按 `(家庭, 孩子, 游戏, 当天)` 一行存进 `game_scores`（迁移 `011_quizzes.sql`），台账 `reference_id` 带日期/孩子/分数（`timed_calc:2026-11-11:child_x:5`），所以同一天同一分的第二笔永远撞不进 `point_ledger`。
+
 ## 健康检查
 
 | 接口 | 说明 |
@@ -171,7 +182,7 @@
 
 ## 幂等键
 
-`submit`、`review`、`redeem`、`children/{id}/points` 必须带 `Idempotency-Key` 请求头，否则 `400 idempotency_required`。
+`submit`、`review`、`redeem`、`children/{id}/points`、`games/quizzes/{game}/score` 必须带 `Idempotency-Key` 请求头，否则 `400 idempotency_required`。
 
 - 作用域是 `(家庭, 演员, 操作, 键)`；同一个键重复提交返回第一次的状态码和 `{"replayed": true}`，**不会重复副作用**。
 - 并发的同键请求只有一个执行；输家回滚后读到已记录的结果（或 `409 conflict`）。

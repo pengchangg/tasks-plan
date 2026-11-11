@@ -68,6 +68,7 @@ import {
   KlotskiGame,
   ParentGames,
 } from "./features/games";
+import { CalcSprint, PatternQuiz } from "./features/quiz";
 import { ChildLedger } from "./features/ledger";
 import { ParentStats } from "./features/stats";
 import type {
@@ -133,7 +134,7 @@ const rewardTitles: Record<string, string> = {
   manual: "家长奖励",
   homework: "作业完成",
   homework_bonus: "当天作业全部完成",
-  game: "通关华容道",
+  game: "游戏奖励",
 };
 const statusLabel = {
   todo: "待完成",
@@ -718,6 +719,8 @@ function ChildLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
           <Route path="/child/growth" element={<Growth store={store} />} />
           <Route path="/child/games" element={<ChildGames store={store} />} />
           <Route path="/child/games/klotski" element={<KlotskiGame store={store} />} />
+          <Route path="/child/games/calc" element={<CalcSprint store={store} />} />
+          <Route path="/child/games/pattern" element={<PatternQuiz store={store} />} />
           <Route path="*" element={<Navigate to="/child" replace />} />
         </Routes>
       </main>

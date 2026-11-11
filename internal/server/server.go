@@ -418,6 +418,8 @@ func (s *Server) Handler() http.Handler {
 			a.Route("/games", func(g chi.Router) {
 				g.Get("/klotski", s.getKlotski)
 				g.Post("/klotski/{level}/complete", s.completeKlotski)
+				g.Get("/quizzes", s.getQuizzes)
+				g.Post("/quizzes/{game}/score", s.submitQuizScore)
 			})
 			a.Patch("/redemptions/{id}", s.completeRedemption)
 			a.Get("/media/{id}", s.media)

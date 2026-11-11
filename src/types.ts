@@ -46,3 +46,13 @@ export interface HomeworkDraft { date: string; endDate: string; subject: string;
 // 步数。完成上报只有内联 {moves}，无写类型。
 export interface KlotskiLevel { level: number; name: string; rows: string[]; minMoves: number; unlocked: boolean; completed: boolean; bestMoves: number }
 export interface KlotskiPayload { levels: KlotskiLevel[]; completed: number }
+
+// GET /api/v1/games/quizzes 的载荷：每款题类游戏的当天最好/历史最好/今天局数/
+// 最近一局的档位，外加这个孩子最近 20 局成绩（details 是上报时原样存下的 JSON，
+// 前端按游戏解字段）。上报走 POST /games/quizzes/<game>/score，需要幂等键。
+export interface QuizGameView { game: string; name: string; todayBest: number; allTimeBest: number; todayPlays: number; level: number }
+export interface QuizHistoryEntry { id: string; game: string; score: number; details: unknown; createdAt: string }
+export interface QuizzesPayload { games: QuizGameView[]; history: QuizHistoryEntry[] }
+export type QuizScoreReport =
+  | { game: "timed_calc"; score: number; level: number; seconds: number }
+  | { game: "pattern_quiz"; score: number; level: number; mistakes: number };

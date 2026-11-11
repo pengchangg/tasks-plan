@@ -9,6 +9,8 @@ import type {
   HomeworkDay,
   HomeworkDraft,
   KlotskiPayload,
+  QuizScoreReport,
+  QuizzesPayload,
   StatsPayload,
   TaskSubmission,
   Wish,
@@ -163,6 +165,8 @@ export function useAppStore() {
   });
   // 华容道进度是第三块 /state 之外的数据：布局由服务端下发，进度按当前孩子读。
   const [klotski, setKlotski] = useState<KlotskiPayload>({ levels: [], completed: 0 });
+  // 题类游戏（口算闯关/找规律）的进度同华容道：按孩子读、只在连接与切孩子时拉。
+  const [quizzes, setQuizzes] = useState<QuizzesPayload>({ games: [], history: [] });
 
   // keepRole 给静默轮询用：家长会话在后台过期时 request() 会顺手改开孩子端，
   // 一次没人看的重拉不能因此把家长从当前页面踢走（正在填的表单会一起没了）。
@@ -214,6 +218,22 @@ export function useAppStore() {
     }
   }, []);
 
+  // 题类进度与华容道同一时机、同一理由：按孩子读，一次连接一次拉。
+  const quizzesAttempt = useRef(0);
+
+  const loadQuizzes = useCallback(async () => {
+    const attempt = ++quizzesAttempt.current;
+    try {
+      const response = await request("/games/quizzes");
+      const payload = (await response.json()) as QuizzesPayload;
+      if (attempt === quizzesAttempt.current) setQuizzes(payload);
+      return true;
+    } catch (error) {
+      setMessage(describe(error, "加载游戏失败"));
+      return false;
+    }
+  }, []);
+
   // connect opens the child end, the app's default view. It runs on every page
   // load: the parent end is a per-visit elevation, so a reload always lands
   // back here and asks for the password again.
@@ -221,7 +241,7 @@ export function useAppStore() {
     try {
       await request("/auth/child", { method: "POST" });
       await refresh();
-      await loadKlotski();
+      await Promise.all([loadKlotski(), loadQuizzes()]);
       setMessage("");
       setConnected(true);
     } catch (error) {
@@ -230,7 +250,7 @@ export function useAppStore() {
     } finally {
       setReady(true);
     }
-  }, [refresh, loadKlotski]);
+  }, [refresh, loadKlotski, loadQuizzes]);
 
   useEffect(() => {
     void connect();
@@ -382,8 +402,8 @@ export function useAppStore() {
     setActiveChild: (childId: string) =>
       void run(async () => {
         await request("/session/child", json("PATCH", { childId }));
-        // 华容道进度按孩子存档，切档案必须跟着重拉。
-        await loadKlotski();
+        // 华容道与题类进度都按孩子存档，切档案必须跟着重拉。
+        await Promise.all([loadKlotski(), loadQuizzes()]);
       }),
     saveChild: (draft: ChildDraft, id?: string): Promise<boolean> =>
       run(async () => {
@@ -588,6 +608,19 @@ export function useAppStore() {
         await loadKlotski();
         return awarded;
       }),
+    // 题类成绩上报（两类游戏共用一条路径）：服务端按天记最好分、只有破纪录才补
+    // 差价积分，返回 awarded 让结算页显示「破纪录 +N」胶囊；到账走 /state 刷新。
+    submitQuizScore: (report: QuizScoreReport): Promise<number | undefined> =>
+      run(async () => {
+        const { game, ...body } = report;
+        const response = await request(
+          `/games/quizzes/${game}/score`,
+          json("POST", body, true),
+        );
+        const { awarded = 0 } = (await response.json()) as { awarded?: number };
+        await loadQuizzes();
+        return awarded;
+      }),
   };
   return {
     state,
@@ -604,6 +637,7 @@ export function useAppStore() {
     today,
     homework,
     klotski,
+    quizzes,
     dismissMessage: () => setNotice(null),
   };
 }

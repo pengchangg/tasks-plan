@@ -57,7 +57,7 @@ export function ChildGames({ store }: { store: ReturnType<typeof useAppStore> })
     );
   return (
     <div className="content-wrap">
-      <PageHeading title="小游戏" description="通关一关记一次 30 积分，每关只奖励第一次。" />
+      <PageHeading title="小游戏" description="华容道每关只奖励第一次通关；口算和找规律只有打破今天的最好成绩才补积分。" />
       <div className="game-grid">
         {store.klotski.levels.map((level) => (
           <button
@@ -81,9 +81,40 @@ export function ChildGames({ store }: { store: ReturnType<typeof useAppStore> })
             </span>
           </button>
         ))}
+        {quizCards(store).map((card) => (
+          <button
+            key={card.to}
+            className="game-card"
+            onClick={() => navigate(card.to)}
+          >
+            <span className="game-card-icon" aria-hidden="true">{card.icon}</span>
+            <strong>{card.title}</strong>
+            <span>{card.note}</span>
+          </button>
+        ))}
       </div>
     </div>
   );
+}
+
+// 题类游戏的两张卡常驻可玩（没有解锁门槛），副标题直接报今天的最好成绩。
+function quizCards(store: ReturnType<typeof useAppStore>) {
+  const calc = store.quizzes.games.find((game) => game.game === "timed_calc");
+  const pattern = store.quizzes.games.find((game) => game.game === "pattern_quiz");
+  return [
+    {
+      to: "/child/games/calc",
+      icon: "🧮",
+      title: "口算闯关",
+      note: calc && calc.todayBest > 0 ? `今天最好 ${calc.todayBest} 题` : "60 秒速算",
+    },
+    {
+      to: "/child/games/pattern",
+      icon: "🔍",
+      title: "找规律",
+      note: pattern && pattern.todayBest > 0 ? `今天最好 ${pattern.todayBest} 分` : "图形与数列填空",
+    },
+  ];
 }
 
 export function KlotskiGame({ store }: { store: ReturnType<typeof useAppStore> }) {
@@ -396,7 +427,7 @@ export function ParentGames({ store }: { store: ReturnType<typeof useAppStore> }
   return (
     <div className="parent-content">
       <ParentHeader title="游戏进度" />
-      <p className="game-note">华容道每第一次通关一关自动记 30 积分，随账本一起到账；下面是 {store.activeChild.name} 的进度。</p>
+      <p className="game-note">华容道每第一次通关一关自动记 30 积分；口算闯关答对 1 题记 1 分、找规律答对 1 题记 10 分，都只有超过今天的最好成绩才补差价——下面是 {store.activeChild.name} 的进度。</p>
       {store.klotski.levels.length === 0 ? (
         <EmptyState icon="🧩" title="还没有进度" text="孩子通关第一关后，这里就会出现记录。" compact />
       ) : (
@@ -410,6 +441,19 @@ export function ParentGames({ store }: { store: ReturnType<typeof useAppStore> }
                 {level.completed ? "已通关" : level.unlocked ? "可挑战" : "未解锁"}
               </span>
               <span className="game-best">{level.completed ? `最少 ${level.bestMoves} 步` : "—"}</span>
+            </div>
+          ))}
+          {store.quizzes.games.map((game) => (
+            <div className="game-admin-row" key={game.game}>
+              <strong>{game.name}</strong>
+              <span className={game.todayPlays > 0 ? "game-state done" : "game-state"}>
+                {game.todayPlays > 0 ? `今天玩了 ${game.todayPlays} 局` : "今天没玩"}
+              </span>
+              <span className="game-best">
+                {game.allTimeBest > 0
+                  ? `今天最好 ${game.todayBest} · 历史最好 ${game.allTimeBest}`
+                  : "—"}
+              </span>
             </div>
           ))}
         </div>

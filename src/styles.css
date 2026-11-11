@@ -240,4 +240,26 @@
 .game-state{font-size:12px;font-weight:800;padding:2px 9px;border-radius:999px;background:#efede7;color:var(--muted)}
 .game-state.done{background:#ddf0ea;color:var(--mint-ink)}
 .game-best{min-width:96px;text-align:right;font-size:13px;color:var(--muted)}
+.quiz-screen{max-width:440px}
+.quiz-level-prompt{margin:16px 0 8px;font-size:13.5px;font-weight:700;color:var(--muted)}
+.quiz-levels{display:grid;gap:9px}
+.quiz-best{margin:14px 0 0;text-align:center;font-size:12.5px;color:var(--muted)}
+.quiz-meta{display:flex;align-items:center;gap:12px;margin:14px 0;font-size:14px;font-weight:800}
+.quiz-meta .outline-button{margin-left:auto}
+.quiz-timer{padding:2px 10px;border-radius:999px;background:#fdf6dd;border:1px solid #e6cf8f;color:#7a5c14}
+.quiz-problem{margin:26px 0;text-align:center;font-size:34px;font-weight:800;font-variant-numeric:tabular-nums}
+.quiz-choices{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.quiz-choice{padding:16px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper);font:inherit;font-size:21px;font-weight:800;font-variant-numeric:tabular-nums}
+.quiz-choice:hover,.quiz-choice:focus-visible{border-color:var(--mint)}
+.quiz-choice.correct{border-color:var(--mint);background:#ddf0ea;color:var(--mint-ink)}
+.quiz-choice.wrong{border-color:var(--coral);background:#fdeae4;color:var(--coral-ink)}
+.pattern-seq{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:22px 0;padding:14px 10px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+.pattern-tile{min-width:40px;padding:7px 9px;border-radius:7px;background:#f8f6f1;border:1px solid var(--line);font-size:20px;font-weight:800;text-align:center;font-variant-numeric:tabular-nums}
+.pattern-tile.pattern-ask{border-style:dashed;border-color:#92620e;background:#fdf6dd;color:#7a5c14}
+.pattern-choices .quiz-choice{font-size:20px}
+.quiz-result{margin:20px 0 6px;text-align:center;font-size:18px}
+.quiz-record{margin:0 0 18px;text-align:center;font-size:13.5px;font-weight:700;color:var(--mint-ink)}
+.quiz-award{display:inline-block;padding:1px 9px;border-radius:999px;background:var(--mint);color:#fff;font-size:13px;font-weight:800;line-height:19px;margin-left:4px;animation:awardPop .3s ease-out}
+.quiz-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+.quiz-actions .wide-primary{display:grid;place-items:center}
 @media(max-width:430px){.game-grid{grid-template-columns:1fr 1fr}}

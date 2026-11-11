@@ -87,16 +87,16 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 
 ### Go（`go test ./...`）
 
-- 只有三个测试文件：`internal/server/server_test.go`（白盒，真实 SQLite 文件 + `httptest`）、`internal/server/games_test.go`（华容道：五关布局的 BFS 可解性校验与进度/计分/门槛行为）与 `cmd/growjoy/main_test.go`（CLI 命令）。
+- 服务端测试分四个文件：`internal/server/server_test.go`（白盒，真实 SQLite 文件 + `httptest`）、`internal/server/games_test.go`（华容道：五关布局的 BFS 可解性校验与进度/计分/门槛行为）、`internal/server/quizzes_test.go`（题类游戏：当天最好成绩补差价只记一次、每孩子独立、幂等重放不双付）与 `cmd/growjoy/main_test.go`（CLI 命令）。
 - 复用现有辅助函数：`testServer`、`doJSON`、`parentCookie`、`childCookie`、`sessionFor`、`getStateTest`、`multipartRequest`、`homeworkRequest` 等。
 - 约定：无子测试、无表驱动、无 `t.Parallel`；失败信息带 HTTP 状态与响应体。
 - 时间敏感的数据要**先**替换 `s.now` 再写入种子（`testServer` 已经按墙上时钟灌过 DEMO 种子，之后再改 `s.now` 会让第二个家庭的时间戳比 DEMO 还早，`resolvedFamily` 就会换人）。
-- 迁移只加新文件 `NNN_name.sql`（版本号 ≥ 2，且下一个必须 ≥ 011——008 写过又整体回滚，跑过它的库会留下一行 `schema_migrations=8`，再发一个 8 会被静默跳过；009 与 010 已占用），**不要改 `001_init.sql`**：已应用过的 `ALTER TABLE ADD COLUMN` 重跑会失败，而新库会在 001 之后把 002…NNN 一个个跑一遍。重启测试按 `.sql` 文件数自动计数，无需跟着改。
+- 迁移只加新文件 `NNN_name.sql`（版本号 ≥ 2，且下一个必须 ≥ 012——008 写过又整体回滚，跑过它的库会留下一行 `schema_migrations=8`，再发一个 8 会被静默跳过；009、010 与 011 已占用），**不要改 `001_init.sql`**：已应用过的 `ALTER TABLE ADD COLUMN` 重跑会失败，而新库会在 001 之后把 002…NNN 一个个跑一遍。重启测试按 `.sql` 文件数自动计数，无需跟着改。
 - `testServer` 不是万能的：重启测试与 `no_family` 测试会自己构造 `Config`；需要第二个家庭时用 `otherFamily`。
 
 ### 前端（`npm test`）
 
-`vitest run` 跑 `src/domain.test.ts`（成长日历的日期分桶）、`src/proverbs.test.ts`（每日谚语：拼音逐字对齐、英文意译、按日期轮换）与 `src/lunar.test.ts`（农历/节日换算与「休」/「班」角标）。没有 DOM 测试、没有覆盖率门槛。
+`vitest run` 跑 `src/domain.test.ts`（成长日历的日期分桶）、`src/proverbs.test.ts`（每日谚语：拼音逐字对齐、英文意译、按日期轮换）、`src/lunar.test.ts`（农历/节日换算与「休」/「班」角标）与 `src/features/quizzes.test.ts`（口算/找规律出题器：种子随机可复现、正确答案在四选项里、干扰项不撞答案、找规律一局的阶梯与序列自洽）。没有 DOM 测试、没有覆盖率门槛。
 
 ### 端到端（`check:flow` / `check:ui`）
 
