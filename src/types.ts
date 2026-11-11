@@ -42,6 +42,7 @@ export interface HomeworkDay { date: string; items: Homework[]; holiday?: Holida
 export interface HomeworkDraft { date: string; endDate: string; subject: string; description: string; files: File[]; removeMedia: string[] }
 
 // GET /api/v1/games/klotski 的载荷：五关布局（rows 是 5 行 × 4 字符，服务端是布局的
-// 唯一持有者）+ 这个孩子的解锁/通关状态。完成上报只有内联 {moves}，无写类型。
-export interface KlotskiLevel { level: number; name: string; rows: string[]; unlocked: boolean; completed: boolean; bestMoves: number }
+// 唯一持有者）+ 这个孩子的解锁/通关状态。minMoves 是完成接口同一个 BFS 的该关最少
+// 步数。完成上报只有内联 {moves}，无写类型。
+export interface KlotskiLevel { level: number; name: string; rows: string[]; minMoves: number; unlocked: boolean; completed: boolean; bestMoves: number }
 export interface KlotskiPayload { levels: KlotskiLevel[]; completed: number }

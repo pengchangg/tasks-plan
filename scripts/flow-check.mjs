@@ -993,6 +993,32 @@ await page.locator('[data-piece="q"]').click();
 assert.equal(await page.locator(".klotski-piece.selected").count(), 1);
 await page.locator('[data-piece="q"]').click();
 assert.equal(await page.locator(".klotski-piece.selected").count(), 0);
+// 提示贴住当前局面：开局点一下，客户端 BFS 现算出第一步与剩余最少步数；
+// 「第 X 步 / 最少 N 步」的 N 来自服务端下发的同一份 BFS 下限。
+assert.ok(
+  (await page.locator(".klotski-steps").innerText()).includes("最少 118 步"),
+  "步数角标没带下发的最少步数",
+);
+const hintButton = page.getByRole("button", { name: "提示", exact: true });
+await hintButton.click();
+const hintText = await page.locator(".klotski-hint").innerText();
+assert.match(hintText, /下一步：空[12] 向[上下左右]滑/, "提示没有按空格记法给出下一步");
+assert.ok(/最少还需 118 步/.test(hintText), "开局提示应说最少还需 118 步");
+await page.getByRole("button", { name: "看完整走法" }).click();
+assert.equal(await page.locator(".klotski-steps-list li").count(), 118, "完整走法不是 118 条");
+await page.getByRole("button", { name: "收起走法" }).click();
+assert.equal(await page.locator(".klotski-steps-list").count(), 0, "走法列表没有收起");
+// 走一步就作废：手动走脚本的第一步，提示条必须跟着消失，随后脚本走完剩下的 117 步。
+await page.locator('[data-piece="q"]').click();
+await page.locator('.movable-target[data-anchor="3,1"]').first().click();
+await page.locator(".klotski-hint").waitFor({ state: "detached" });
+await hintButton.click();
+assert.match(
+  await page.locator(".klotski-hint").innerText(),
+  /最少还需 117 步/,
+  "走一步后提示没有重算剩余步数",
+);
+klotskiLevel1.shift();
 // 真通关之前先撞三堵墙：步数低于第 1 关最短解 118 → 400；第 2 关还没解锁就报通关
 // → 409；不存在的关卡 → 404。探针窗口内放行这三个 URL 的 console 噪声。
 expectKlotskiProbe = true;

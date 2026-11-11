@@ -48,10 +48,13 @@ var klotskiFloors = sync.OnceValue(func() map[int]int {
 })
 
 // klotskiLevelView 是一关在接口里的样子：布局 + 这个孩子的解锁/通关状态。
+// MinMoves 是完成接口同一个 BFS 算出的该关最少步数，界面用它标「最少 N 步」，
+// 与提示系统的客户端 BFS 结果同源可核对。
 type klotskiLevelView struct {
 	Level     int       `json:"level"`
 	Name      string    `json:"name"`
 	Rows      [5]string `json:"rows"`
+	MinMoves  int       `json:"minMoves"`
 	Unlocked  bool      `json:"unlocked"`
 	Completed bool      `json:"completed"`
 	BestMoves int       `json:"bestMoves"`
@@ -92,6 +95,7 @@ func (s *Server) getKlotski(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
+	floors := klotskiFloors()
 	out := klotskiPayload{Levels: make([]klotskiLevelView, 0, klotskiMaxLevel)}
 	for level := 1; level <= klotskiMaxLevel; level++ {
 		levelRow := klotskiLevels[level]
@@ -99,6 +103,7 @@ func (s *Server) getKlotski(w http.ResponseWriter, r *http.Request) {
 			Level:    level,
 			Name:     levelRow.Name,
 			Rows:     levelRow.Rows,
+			MinMoves: floors[level],
 			Unlocked: level == 1 || best[level-1] > 0,
 		}
 		if moves, ok := best[level]; ok {

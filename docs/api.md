@@ -143,7 +143,7 @@
 
 | 接口 | 角色 | 说明 |
 |---|---|---|
-| `GET /api/v1/games/klotski` | 任意 | `200 {levels, completed}`：全部关卡按序，每关 `{level, name, rows, unlocked, completed, bestMoves}`；`completed` 是已通关数 |
+| `GET /api/v1/games/klotski` | 任意 | `200 {levels, completed}`：全部关卡按序，每关 `{level, name, rows, minMoves, unlocked, completed, bestMoves}`；`minMoves` 是该关最少步数（= 完成接口的 BFS 下限，未通关也下发），界面标「最少 N 步」并用它核对提示；`completed` 是已通关数 |
 | `POST /api/v1/games/klotski/{level}/complete` | 任意 | `{"moves":118}` → `200 {id:"klotski:1", awarded}`；首次通关 `awarded=30` 并记一条 `reward` 台账，重放为 `0`（更少步数会刷新 `bestMoves`） |
 
 完成接口的错误各回各的：`level` 不是 1…5 → `404 not_found`；`moves` 越界 → `400 invalid_request`；前一关没通关 → `409 invalid_state`。`moves` 的下限是**该关布局的最短解**（进程内 BFS 只算一次，第 4 关最少 79 步），上限 10000——写死一个数会把最省力的关也拦掉。进度按 `(family_id, child_id, level)` 一行存进 `klotski_progress`（迁移 `010_klotski.sql`），首次加分靠 `PRIMARY KEY` + `INSERT OR IGNORE` 保证每关只记一次。两个接口都要会话选中孩子，否则 `400 invalid_request`。

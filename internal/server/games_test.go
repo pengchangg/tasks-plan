@@ -31,6 +31,7 @@ func TestKlotskiProgressIsPerChildRewardsOnceAndGatesTheNextLevel(t *testing.T) 
 		Level     int      `json:"level"`
 		Name      string   `json:"name"`
 		Rows      []string `json:"rows"`
+		MinMoves  int      `json:"minMoves"`
 		Unlocked  bool     `json:"unlocked"`
 		Completed bool     `json:"completed"`
 		BestMoves int      `json:"bestMoves"`
@@ -60,6 +61,11 @@ func TestKlotskiProgressIsPerChildRewardsOnceAndGatesTheNextLevel(t *testing.T) 
 		}
 		if lv.Unlocked != (i == 0) || lv.Completed || lv.BestMoves != 0 {
 			t.Fatalf("level %d gate: %+v", i+1, lv)
+		}
+		// minMoves 下发的是完成接口同一个 BFS 的下限，未通关也带——界面用它标
+		// 「最少 N 步」，并与客户端提示 BFS 的结果核对。
+		if lv.MinMoves != klotskiFloors()[i+1] || lv.MinMoves <= 0 {
+			t.Fatalf("level %d min moves: %d want %d", i+1, lv.MinMoves, klotskiFloors()[i+1])
 		}
 	}
 

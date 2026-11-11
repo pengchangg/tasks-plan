@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyMove, isSolved, parseRows, pieceLabels, targetsFor } from "./klotski";
+import { applyMove, emptyKeys, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, targetsFor } from "./klotski";
 
 // 与 internal/server/games.go 的 klotskiLevels[1]「横刀立马」逐字一致的开局。
 const hengdao = ["ACCB", "ACCB", "DGGE", "D..E", "pqrs"];
@@ -71,5 +71,90 @@ describe("klotski sliding", () => {
     expect(pieceLabels.C).toBe("曹");
     expect(pieceLabels.G).toBe("羽");
     expect(pieceLabels.s).toBe("卒");
+  });
+
+  it("gives every piece a distinct emoji icon", () => {
+    expect(pieceIcons.C).toBe("👑");
+    expect(pieceIcons.G).toBe("🎭");
+    // 四个卒面孔互不相同：孩子端一眼分得清。
+    expect(new Set(["p", "q", "r", "s"].map((ch) => pieceIcons[ch])).size).toBe(4);
+  });
+});
+
+describe("华容道提示", () => {
+  it("numbers the two empty cells row-major and re-numbers after a slide", () => {
+    // 开局空格 (3,1)(3,2)：行主序 → 1、2。
+    expect(emptyKeys(hengdao)).toEqual({ "3,1": 1, "3,2": 2 });
+    // q 滑进 (3,1) 后空格换到 (3,2)(4,1)，编号跟着重排。
+    expect(emptyKeys(applyMove(hengdao, "q", [3, 1]))).toEqual({ "3,2": 1, "4,1": 2 });
+  });
+
+  it("solves 横刀立马 in the server floor of 118 steps with replayable steps", () => {
+    const hint = solveFrom(hengdao);
+    expect(hint).not.toBeNull();
+    // 118 = 服务端 klotskiFloors()[1]，口径必须一致（完成接口按同一个数收下步数）。
+    expect(hint!.moves).toBe(118);
+    expect(hint!.steps).toHaveLength(118);
+    expect(hint!.steps.every((step) => /^空[12](上|下|左|右)$/.test(step))).toBe(true);
+    // 逐步重放：按当时局面的空格编号把记法翻回真实滑动，每步都必须是合法走法，
+    // 且棋子确实落进记法点名的那个空格、确实朝记法说的方向挪了——记号翻译一旦
+    // 反了方向或错认了棋子，这里当场失败。
+    let cur = hengdao;
+    const dirOf: Record<string, [number, number]> = { 上: [-1, 0], 下: [1, 0], 左: [0, -1], 右: [0, 1] };
+    for (const step of hint!.steps) {
+      const [, key, name] = /^空([12])([上下左右])$/.exec(step)!;
+      const [dr, dc] = dirOf[name];
+      const [er, ec] = Object.entries(emptyKeys(cur))
+        .find(([, n]) => String(n) === key)!
+        [0]
+        .split(",")
+        .map(Number);
+      // 记法说的是「挨着空N的那块棋子朝它滑一格」：来源格 = 空格反向一格。
+      const source = `${er - dr},${ec - dc}`;
+      const piece = parseRows(cur).pieces.find((item) =>
+        item.cells.some(([r, c]) => `${r},${c}` === source),
+      )!;
+      expect(piece).toBeTruthy();
+      // applyMove 的 to 是锚点新位（老锚点 + 方向），不是被填进的空格。
+      const to: [number, number] = [piece.cells[0][0] + dr, piece.cells[0][1] + dc];
+      expect(targetsFor(cur, piece.char).some(([r, c]) => r === to[0] && c === to[1])).toBe(true);
+      const moved = applyMove(cur, piece.char, to);
+      expect(moved[er][ec]).toBe(piece.char);
+      cur = moved;
+    }
+    expect(isSolved(cur)).toBe(true);
+  });
+
+  it("reports a won position as zero steps", () => {
+    // 曹操已在出口 (3,1)(3,2)(4,1)(4,2)：不再需要任何一步。
+    const solvedBoard = ["ADEB", "ADEB", "GGpq", "rCCs", ".CC."];
+    expect(isSolved(solvedBoard)).toBe(true);
+    expect(solveFrom(solvedBoard)).toEqual({ moves: 0, steps: [] });
+  });
+
+  it("names the first step with the hand-checked notation of a legal slide", () => {
+    // q 已占 (3,1)，空格 (3,2)=空1、(4,1)=空2；此刻全盘只有三块能动、共五条合法
+    // 滑动，第一步必是其一：r 上滑进空1 / r 左滑进空2、q 右滑进空1 / q 下滑进空2、
+    // p 右滑进空2。手推的记号若与引擎相反（方向或空格错位），集合当场对不上。
+    const board = ["ACCB", "ACCB", "DGGE", "Dq.E", "p.rs"];
+    expect(targetsFor(board, "r")).toEqual([
+      [3, 2],
+      [4, 1],
+    ]);
+    expect(targetsFor(board, "q")).toEqual([
+      [4, 1],
+      [3, 2],
+    ]);
+    expect(targetsFor(board, "p")).toEqual([[4, 1]]);
+    const hint = solveFrom(board);
+    expect(hint).not.toBeNull();
+    // 开局 118 步，q 已替孩子走过一步：最少还需恰好 117。
+    expect(hint!.moves).toBe(117);
+    expect(["空1上", "空1右", "空2下", "空2左", "空2右"]).toContain(hint!.steps[0]);
+  });
+
+  it("refuses malformed boards instead of guessing", () => {
+    expect(solveFrom([])).toBeNull();
+    expect(solveFrom(["....", "....", "....", "....", "...."])).toBeNull();
   });
 });

@@ -26,6 +26,21 @@ export const pieceLabels: Record<string, string> = {
   s: "卒",
 };
 
+// pieceIcons 是棋子字符到 emoji 面孔的映射（与 pieceLabels 同层的纯 UI 装饰）：
+// 每个棋子面孔互不相同，四个卒靠孩子端棋盘上的汉字面仍可辨（都是「卒」）。
+export const pieceIcons: Record<string, string> = {
+  C: "👑",
+  A: "🗡",
+  B: "🔥",
+  D: "🐎",
+  E: "🏹",
+  G: "🎭",
+  p: "🚩",
+  q: "🛡",
+  r: "🎯",
+  s: "🏮",
+};
+
 const verticalChars: Record<string, boolean> = { A: true, B: true, D: true, E: true };
 
 // parseRows 把 rows 聚成棋子与空格。同一字母的每一格都属于同一子，服务端布局保证
@@ -109,4 +124,114 @@ export function applyMove(rows: string[], char: string, to: Cell): string[] {
 // isSolved 只看曹操是否落到底行正中：(3,1)(3,2)(4,1)(4,2) 全是 C。
 export function isSolved(rows: string[]): boolean {
   return rows[3]?.[1] === "C" && rows[3]?.[2] === "C" && rows[4]?.[1] === "C" && rows[4]?.[2] === "C";
+}
+
+// emptyKeys 按行主序给两个空格编号 1、2（key = "r,c"）：提示文案用编号称呼空格，
+// 每次滑动之后都要用当时的局面重新编号——记法和孩子在棋盘上看到的编号永远一致。
+export function emptyKeys(rows: string[]): Record<string, 1 | 2> {
+  const keys: Record<string, 1 | 2> = {};
+  let n: 1 | 2 = 1;
+  for (let r = 0; r < rows.length; r++) {
+    for (let c = 0; c < rows[r].length; c++) {
+      if (rows[r][c] !== ".") continue;
+      keys[`${r},${c}`] = n;
+      n = n === 1 ? 2 : 1;
+    }
+  }
+  return keys;
+}
+
+export interface Hint {
+  moves: number;
+  steps: string[];
+}
+
+const stepDirs = [
+  { dr: -1, dc: 0, name: "上" },
+  { dr: 1, dc: 0, name: "下" },
+  { dr: 0, dc: -1, name: "左" },
+  { dr: 0, dc: 1, name: "右" },
+] as const;
+
+// 同形组与去重键：竖将四个、卒四个形状相同，键里按落点排序归一（理由同服务端
+// klotskiShortest——滑动合法性只看形状，可解性与最短步数都等价，状态空间从千万级
+// 回到约 6.5 万）。路径存在真实局面的前驱表里，回构出来的每一步都是真棋子真滑动。
+function encodeRows(rows: string[]): string | null {
+  const { pieces } = parseRows(rows);
+  const anchor: Record<string, number> = {};
+  for (const piece of pieces) anchor[piece.char] = piece.cells[0][0] * 4 + piece.cells[0][1];
+  for (const ch of "CABDEGpqrs") if (anchor[ch] === undefined) return null;
+  const verticals = ["A", "B", "D", "E"].map((ch) => anchor[ch]).sort((a, b) => a - b);
+  const soldiers = ["p", "q", "r", "s"].map((ch) => anchor[ch]).sort((a, b) => a - b);
+  return [anchor["C"], ...verticals, anchor["G"], ...soldiers].join(",");
+}
+
+// solveFrom 对当前真实局面做广度优先搜索：最少还需几步 + 每步的记法
+// （"空1上" = 挨着空1的那块棋子向它滑一格，与界面点圆点的走法一一对应）。
+// 转移按空格生成（两个空格 × 四方向吸附），合法性镜像 targetsFor 的判定。
+// 已解局面回 { moves: 0, steps: [] }；缺子的畸形盘面与无解回 null（内置关永不触发）。
+export function solveFrom(rows: string[]): Hint | null {
+  if (rows.length !== 5 || rows.some((row) => row.length !== 4)) return null;
+  if (isSolved(rows)) return { moves: 0, steps: [] };
+  const startKey = encodeRows(rows);
+  if (startKey === null) return null;
+  const start = rows.join("");
+  const seen = new Set<string>([startKey]);
+  const prev = new Map<string, { from: string; step: string }>();
+  let frontier = [start];
+  let dist = 0;
+  while (frontier.length > 0) {
+    dist += 1;
+    const next: string[] = [];
+    for (const board of frontier) {
+      const cur = board.match(/.{4}/g) ?? [];
+      const keys = emptyKeys(cur);
+      const { pieces } = parseRows(cur);
+      const empties: Cell[] = [];
+      for (let r = 0; r < 5; r++) for (let c = 0; c < 4; c++) if (cur[r][c] === ".") empties.push([r, c]);
+      for (const [er, ec] of empties) {
+        for (const dir of stepDirs) {
+          // 滑进这个空格的那格（棋子的来源格）= 空格沿滑动方向的反向一格。
+          const sr = er - dir.dr;
+          const sc = ec - dir.dc;
+          if (sr < 0 || sr > 4 || sc < 0 || sc > 3) continue;
+          const ch = cur[sr][sc];
+          if (ch === ".") continue;
+          const piece = pieces.find((item) => item.char === ch);
+          if (!piece) return null;
+          const mine = new Set(piece.cells.map(([r, c]) => `${r},${c}`));
+          let ok = true;
+          for (const [r, c] of piece.cells) {
+            const nr = r + dir.dr;
+            const nc = c + dir.dc;
+            if (nr < 0 || nr > 4 || nc < 0 || nc > 3 || (!mine.has(`${nr},${nc}`) && cur[nr][nc] !== ".")) {
+              ok = false;
+              break;
+            }
+          }
+          if (!ok) continue;
+          const moved = applyMove(cur, ch, [piece.cells[0][0] + dir.dr, piece.cells[0][1] + dir.dc]);
+          const nb = moved.join("");
+          const key = encodeRows(moved);
+          if (key === null || seen.has(key)) continue;
+          seen.add(key);
+          prev.set(nb, { from: board, step: `空${keys[`${er},${ec}`]}${dir.name}` });
+          if (isSolved(moved)) {
+            const steps: string[] = [];
+            let node = nb;
+            for (;;) {
+              const edge = prev.get(node);
+              if (!edge) break;
+              steps.unshift(edge.step);
+              node = edge.from;
+            }
+            return { moves: dist, steps };
+          }
+          next.push(nb);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return null;
 }

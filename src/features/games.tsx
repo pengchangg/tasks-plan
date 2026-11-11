@@ -3,8 +3,8 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useAppStore } from "../store";
 import { EmptyState, PageHeading, ParentHeader, useDialog } from "../ui";
-import { applyMove, isSolved, parseRows, pieceLabels, targetsFor } from "./klotski";
-import type { Cell, Piece } from "./klotski";
+import { applyMove, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, targetsFor } from "./klotski";
+import type { Cell, Hint, Piece } from "./klotski";
 import type { KlotskiLevel } from "../types";
 
 // 华容道 feature：孩子端关卡列表与棋盘、首页入口卡、家长端只读进度。布局与进度都
@@ -19,6 +19,14 @@ const spanOf = (piece: Piece): [number, number] =>
       : piece.kind === "guan"
         ? [1, 2]
         : [1, 1];
+
+// describeStep 把引擎的记法（"空1上" = 挨着空1的棋子向它滑一格）翻成给孩子读的话
+// （"空1 向上滑"）。空格编号跟着当时的局面走，所以列表里每步的编号各说各的时刻。
+const describeStep = (step: string): string => {
+  const match = /^空([12])([上下左右])$/.exec(step);
+  if (!match) return step;
+  return `空${match[1]} 向${match[2]}滑`;
+};
 
 export function GameTeaser({ store }: { store: ReturnType<typeof useAppStore> }) {
   return (
@@ -117,6 +125,10 @@ function KlotskiBoard({
   const awardTimer = useRef(0);
   const [won, setWon] = useState(false);
   const [record, setRecord] = useState<number | null>(null);
+  // 提示是对「当前真实局面」跑一遍 solveFrom 的结果：任何滑动/撤销/重置都会让它
+  // 过时，所以那三处一起清掉；列表展开态跟着提示一起没了。
+  const [hint, setHint] = useState<Hint | null>(null);
+  const [showSteps, setShowSteps] = useState(false);
   useEffect(() => () => window.clearTimeout(awardTimer.current), []);
 
   const solved = isSolved(rows);
@@ -154,6 +166,8 @@ function KlotskiBoard({
     setRecord(null);
     setAward(null);
     setSelected(null);
+    setHint(null);
+    setShowSteps(false);
     setRows(next);
     setSteps(0);
     setHistory([]);
@@ -166,6 +180,8 @@ function KlotskiBoard({
     setRows(applyMove(rows, selected, to));
     setSteps((prev) => prev + 1);
     setSelected(null);
+    setHint(null);
+    setShowSteps(false);
   };
   const undo = () => {
     if (history.length === 0) return;
@@ -173,6 +189,13 @@ function KlotskiBoard({
     setHistory((prev) => prev.slice(0, -1));
     setSteps((prev) => prev - 1);
     setSelected(null);
+    setHint(null);
+    setShowSteps(false);
+  };
+  // 提示永远贴着孩子当下的棋盘：现算，不缓存，走一步就作废。
+  const askHint = () => {
+    setHint(solveFrom(rows));
+    setShowSteps(false);
   };
 
   const { pieces } = parseRows(rows);
@@ -226,7 +249,10 @@ function KlotskiBoard({
               }}
               onClick={() => setSelected(selected === piece.char ? null : piece.char)}
             >
-              {pieceLabels[piece.char]}
+              <span className="piece-icon" aria-hidden="true">
+                {pieceIcons[piece.char]}
+              </span>
+              <span className="piece-label">{pieceLabels[piece.char]}</span>
             </button>
           );
         })}
@@ -249,13 +275,40 @@ function KlotskiBoard({
         <button className="outline-button" onClick={replay}>
           重置
         </button>
-        <span className="klotski-steps">第 {steps} 步</span>
+        <button className="outline-button" onClick={askHint} disabled={level.completed}>
+          提示
+        </button>
+        <span className="klotski-steps">
+          第 {steps} 步 / 最少 {level.minMoves} 步
+        </span>
         {award !== null && (
           <span className="klotski-award" aria-hidden="true">
             +{award}
           </span>
         )}
       </div>
+      {hint !== null &&
+        (hint.moves === 0 ? (
+          <p className="klotski-hint" role="status">
+            曹操已经堵住出口，<mark>再向下滑一格</mark>就通关。
+          </p>
+        ) : (
+          <>
+            <p className="klotski-hint" role="status">
+              下一步：<mark>{describeStep(hint.steps[0])}</mark>（最少还需 {hint.moves} 步）
+            </p>
+            <button className="klotski-hint-more" onClick={() => setShowSteps((prev) => !prev)}>
+              {showSteps ? "收起走法" : "看完整走法"}
+            </button>
+            {showSteps && (
+              <ol className="klotski-steps-list">
+                {hint.steps.map((step, index) => (
+                  <li key={index}>{describeStep(step)}</li>
+                ))}
+              </ol>
+            )}
+          </>
+        ))}
       {record !== null && !won && (
         <p className="klotski-record">刷新纪录：{record} 步（每关只有第一次通关记积分）</p>
       )}

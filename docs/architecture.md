@@ -30,7 +30,7 @@ flowchart LR
 | `internal/server/stats.go` | `GET /stats` 全部实现：`statsWindow`、`scheduledTaskCount`、按窗口读取提交与台账 |
 | `internal/server/admin.go` | 非 HTTP 操作：`CreateFamily`、`SeedDemo`、`EnsureDemo` |
 | `internal/server/homework.go` | 作业资源：读某一天（`date..end_date` 闭区间，一天就能读到整段假期作业）、家长端 multipart 写入、固定学科表、图片归一化（EXIF 方向 → 最长边 2560 → JPEG q85） |
-| `internal/server/games.go` | 华容道资源：内置 5 关布局（按序解锁）、`GET /games/klotski` 进度读取、`POST /games/klotski/{level}/complete` 通关计分（`moves` 下限 = 该关最短解，进程内 BFS 只算一次），首次通关记 30 分 |
+| `internal/server/games.go` | 华容道资源：内置 5 关布局（按序解锁）、`GET /games/klotski` 进度读取（每关连同 `minMoves` = 该关最短解一起下发，界面标「最少 N 步」并核对客户端提示）、`POST /games/klotski/{level}/complete` 通关计分（`moves` 下限 = 该关最短解，进程内 BFS 只算一次），首次通关记 30 分 |
 | `internal/server/holidays.go` | 内置国办放假表（2025–2027 假期区间 + 调休上班日）：`restBlock` 把连续放假块合并、`holidayWindow` 给出某天所属的整段假期（含假期前一天）供作业表单预填 |
 | `internal/server/ratelimit.go` | 令牌桶、家长密码失败预算、argon2 并发闸门、panic 恢复与错误辅助函数 |
 | `internal/server/migrations/*.sql` | `//go:embed` 的迁移；`001_init.sql` 是 schema 唯一来源，每次启动重跑且必须幂等；当前最新是 `010_klotski.sql`（`klotski_progress` 按孩子每关一行；编号 8 曾被用过又整体回滚，不要再复用） |
