@@ -205,6 +205,10 @@ function KlotskiBoard({
       </p>
       <PageHeading title={`第${level.level}关 · ${level.name}`} description="点一块棋子，再点亮起的空位就能滑动。曹操走进底部出口就通关。" />
       <div className="klotski-board">
+        {/* 出口在底行正中：曹操 2×2 走进虚线落区、从底边缺口出去就通关。落区画在
+            棋子底层（曹操一到就被盖住，「堵住出口」看得见），缺口压在棋盘底边上。 */}
+        <div className="klotski-exit">出口</div>
+        <div className="klotski-exit-notch" aria-hidden="true" />
         {pieces.map((piece) => {
           const [rowsSpan, colsSpan] = spanOf(piece);
           const [r, c] = piece.cells[0];

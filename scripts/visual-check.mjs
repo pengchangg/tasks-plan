@@ -157,6 +157,30 @@ for (const scenario of scenarios) {
     await form.waitFor({ state: "detached" });
   }
 
+  // 华容道棋盘是手势界面，出口标记必须看得见、不能伸出棋盘；进关后整页也不能横向溢出。
+  if (scenario.name === "games-390") {
+    await page.locator(".game-card").first().click();
+    await page.waitForURL(/\/child\/games\/klotski\?level=1$/);
+    await page.locator(".klotski-piece").first().waitFor();
+    if ((await page.locator(".klotski-exit").innerText()) !== "出口") {
+      errors.push("出口落区没写字");
+    }
+    const boardBox = await page.locator(".klotski-board").boundingBox();
+    const notch = await page.locator(".klotski-exit-notch").boundingBox();
+    if (
+      !notch ||
+      notch.x < boardBox.x - 1 ||
+      notch.x + notch.width > boardBox.x + boardBox.width + 1
+    ) {
+      errors.push("出口缺口伸出棋盘");
+    }
+    const wide = await page.evaluate(
+      () => document.body.scrollWidth > document.documentElement.clientWidth + 1,
+    );
+    if (wide) errors.push("棋盘页横向溢出");
+    await page.screenshot({ path: `${outputDir}/klotski-board-390.png`, fullPage: true });
+  }
+
   const overflow = layout.bodyWidth > layout.viewportWidth + 1;
   const invalid =
     errors.length > 0 ||

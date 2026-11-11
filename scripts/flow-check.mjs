@@ -985,6 +985,9 @@ await page.locator(".game-card").first().click();
 await page.waitForURL(/\/child\/games\/klotski\?level=1$/);
 await page.locator(".klotski-piece").first().waitFor();
 assert.equal(await page.locator(".klotski-piece").count(), 10);
+// 出口必须有常驻标记：底行正中的虚线落区（带「出口」二字）+ 底边缺口。
+assert.equal(await page.locator(".klotski-exit").innerText(), "出口", "棋盘上没有出口落区");
+assert.equal(await page.locator(".klotski-exit-notch").count(), 1, "棋盘底边没有出口缺口");
 // 选中态各验一次：点棋子挂上 .selected，再点一下收起。
 await page.locator('[data-piece="q"]').click();
 assert.equal(await page.locator(".klotski-piece.selected").count(), 1);

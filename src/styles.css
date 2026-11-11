@@ -203,6 +203,8 @@
 .klotski-back{margin:0 0 14px}
 .klotski-back a{display:inline-flex;align-items:center;gap:3px;color:var(--mint-ink);font-weight:700;text-decoration:none}
 .klotski-board{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));grid-template-rows:repeat(5,minmax(0,1fr));aspect-ratio:4/5;gap:5px;background:#cfc7b6;border:1px solid #b9b09c;border-radius:10px;padding:6px;max-width:340px;margin:0 auto;touch-action:manipulation}
+.klotski-exit{position:absolute;top:calc(21px + (100% - 32px)*.6);left:calc(11px + (100% - 27px)/4);width:calc((100% - 27px)/2 + 5px);height:calc((100% - 32px)*.4 + 5px);border:2px dashed #8a7c60;border-radius:7px;display:grid;place-items:start center;padding-top:3px;font-size:11px;font-weight:800;letter-spacing:2px;text-indent:2px;color:#8a7c60;z-index:0;pointer-events:none}
+.klotski-exit-notch{position:absolute;top:calc(100% - 7px);left:calc(11px + (100% - 27px)/4);width:calc((100% - 27px)/2 + 5px);height:8px;border:1px solid #b9b09c;border-top:0;border-radius:0 0 6px 6px;background:#f8f6f1;z-index:3;pointer-events:none}
 .klotski-piece{position:relative;display:grid;place-items:center;border:1px solid #b98a4c;background:linear-gradient(#f8e8d2,#eed4ae);border-radius:7px;font-family:var(--display);font-size:22px;font-weight:700;color:#7a4c1e;padding:0;line-height:1}
 .klotski-piece.selected{outline:3px solid var(--mint);outline-offset:-3px}
 .klotski-piece.piece-caocao{background:linear-gradient(#fbd9c8,#f3b79a);border-color:#d97e5a;color:#a13d1c;font-size:26px}
