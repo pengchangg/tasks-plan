@@ -48,6 +48,8 @@ const scenarios = [
   { name: "growth-375", path: "/child/growth", width: 375, height: 812 },
   { name: "growth-390", path: "/child/growth", width: 390, height: 844 },
   { name: "ledger-375", path: "/child/ledger", width: 375, height: 812 },
+  { name: "games-390", path: "/child/games", width: 390, height: 844 },
+  { name: "games-parent-mobile", path: "/parent/games", width: 390, height: 844 },
 ];
 
 const childLinks = {
@@ -56,6 +58,7 @@ const childLinks = {
   "/child/homework": "作业",
   "/child/ledger": "积分明细",
   "/child/growth": "成长",
+  "/child/games": "进入游戏",
 };
 
 const parentLinks = {
@@ -65,6 +68,7 @@ const parentLinks = {
   "/parent/wishes": "愿望管理",
   "/parent/homework": "作业管理",
   "/parent/stats": "成长统计",
+  "/parent/games": "游戏进度",
 };
 
 await mkdir(outputDir, { recursive: true });

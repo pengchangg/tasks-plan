@@ -8,6 +8,7 @@ import type {
   Child,
   HomeworkDay,
   HomeworkDraft,
+  KlotskiPayload,
   StatsPayload,
   TaskSubmission,
   Wish,
@@ -160,6 +161,8 @@ export function useAppStore() {
     date: "",
     items: [],
   });
+  // 华容道进度是第三块 /state 之外的数据：布局由服务端下发，进度按当前孩子读。
+  const [klotski, setKlotski] = useState<KlotskiPayload>({ levels: [], completed: 0 });
 
   // keepRole 给静默轮询用：家长会话在后台过期时 request() 会顺手改开孩子端，
   // 一次没人看的重拉不能因此把家长从当前页面踢走（正在填的表单会一起没了）。
@@ -194,6 +197,23 @@ export function useAppStore() {
     }
   }, []);
 
+  // 华容道没有「看哪一天」的参数：连接成功拉一次、切孩子重拉一次就够，60 秒轮询
+  // 不重拉（进度只在通关那一刻变，理由同作业不进轮询）。序号让后发的请求赢。
+  const klotskiAttempt = useRef(0);
+
+  const loadKlotski = useCallback(async () => {
+    const attempt = ++klotskiAttempt.current;
+    try {
+      const response = await request("/games/klotski");
+      const payload = (await response.json()) as KlotskiPayload;
+      if (attempt === klotskiAttempt.current) setKlotski(payload);
+      return true;
+    } catch (error) {
+      setMessage(describe(error, "加载游戏失败"));
+      return false;
+    }
+  }, []);
+
   // connect opens the child end, the app's default view. It runs on every page
   // load: the parent end is a per-visit elevation, so a reload always lands
   // back here and asks for the password again.
@@ -201,6 +221,7 @@ export function useAppStore() {
     try {
       await request("/auth/child", { method: "POST" });
       await refresh();
+      await loadKlotski();
       setMessage("");
       setConnected(true);
     } catch (error) {
@@ -209,7 +230,7 @@ export function useAppStore() {
     } finally {
       setReady(true);
     }
-  }, [refresh]);
+  }, [refresh, loadKlotski]);
 
   useEffect(() => {
     void connect();
@@ -359,7 +380,11 @@ export function useAppStore() {
     enterChild: () =>
       void run(() => request("/auth/child", { method: "POST" })),
     setActiveChild: (childId: string) =>
-      void run(() => request("/session/child", json("PATCH", { childId }))),
+      void run(async () => {
+        await request("/session/child", json("PATCH", { childId }));
+        // 华容道进度按孩子存档，切档案必须跟着重拉。
+        await loadKlotski();
+      }),
     saveChild: (draft: ChildDraft, id?: string): Promise<boolean> =>
       run(async () => {
         await request(
@@ -551,6 +576,18 @@ export function useAppStore() {
         }
       });
     },
+    // 华容道通关上报：服务端首通记 30 分（重放只刷纪录），返回 awarded 让游戏页
+    // 显示 +N 胶囊；到账本身走 /state 刷新，由奖励横幅队列负责庆祝。
+    completeKlotskiLevel: (level: number, moves: number): Promise<number | undefined> =>
+      run(async () => {
+        const response = await request(
+          `/games/klotski/${level}/complete`,
+          json("POST", { moves }),
+        );
+        const { awarded = 0 } = (await response.json()) as { awarded?: number };
+        await loadKlotski();
+        return awarded;
+      }),
   };
   return {
     state,
@@ -566,6 +603,7 @@ export function useAppStore() {
     stats,
     today,
     homework,
+    klotski,
     dismissMessage: () => setNotice(null),
   };
 }

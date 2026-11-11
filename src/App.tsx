@@ -16,6 +16,7 @@ import {
   ClipboardCheck,
   Coins,
   Gift,
+  Gamepad2,
   Home,
   Image as ImageIcon,
   KeyRound,
@@ -61,6 +62,12 @@ import {
   ParentHomework,
   TodayHomework,
 } from "./features/homework";
+import {
+  ChildGames,
+  GameTeaser,
+  KlotskiGame,
+  ParentGames,
+} from "./features/games";
 import { ChildLedger } from "./features/ledger";
 import { ParentStats } from "./features/stats";
 import type {
@@ -126,6 +133,7 @@ const rewardTitles: Record<string, string> = {
   manual: "家长奖励",
   homework: "作业完成",
   homework_bonus: "当天作业全部完成",
+  game: "通关华容道",
 };
 const statusLabel = {
   todo: "待完成",
@@ -708,6 +716,8 @@ function ChildLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
           <Route path="/child/wishes" element={<ChildWishes store={store} />} />
           <Route path="/child/ledger" element={<ChildLedger store={store} />} />
           <Route path="/child/growth" element={<Growth store={store} />} />
+          <Route path="/child/games" element={<ChildGames store={store} />} />
+          <Route path="/child/games/klotski" element={<KlotskiGame store={store} />} />
           <Route path="*" element={<Navigate to="/child" replace />} />
         </Routes>
       </main>
@@ -850,6 +860,7 @@ function ChildHome({ store }: { store: ReturnType<typeof useAppStore> }) {
           <span>今日完成</span>
         </div>
       </section>
+      <GameTeaser store={store} />
       <SectionTitle title="愿望小铺" action="全部愿望" to="/child/wishes" />
       <div className="wish-strip">
         {/* 家长下架的愿望不该再出现在孩子的首页橱窗里（/child/wishes 也过滤了）。 */}
@@ -1755,6 +1766,12 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
             short="作业"
           />
           <SideLink
+            to="/parent/games"
+            icon={<Gamepad2 size={18} />}
+            label="游戏进度"
+            short="游戏"
+          />
+          <SideLink
             to="/parent/stats"
             icon={<BarChart3 size={18} />}
             label="成长统计"
@@ -1796,6 +1813,7 @@ function ParentLayout({ store }: { store: ReturnType<typeof useAppStore> }) {
             element={<ParentHomework store={store} />}
           />
           <Route path="/parent/stats" element={<ParentStats store={store} />} />
+          <Route path="/parent/games" element={<ParentGames store={store} />} />
           <Route path="*" element={<Navigate to="/parent" replace />} />
         </Routes>
       </main>

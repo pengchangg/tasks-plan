@@ -15,6 +15,10 @@ const errors = [];
 // fails the run.
 let expectAuth401 = false;
 let expectSwitch401 = false;
+// 华容道那一幕会用 page.evaluate 直接打三个非法完成请求（低于最短解的步数、跳过
+// 未通关的关卡、不存在的关卡），4xx 同样会被记成 console error；只有探针窗口内、
+// 且 URL 确实是这条完成路由时才放行，别处冒出来的 4xx 照样让门禁失败。
+let expectKlotskiProbe = false;
 function expected401(url) {
   if (expectAuth401 && url.endsWith("/api/v1/auth/parent")) return true;
   if (expectAuth401 && url.endsWith("/api/v1/auth/parent/password")) return true;
@@ -26,6 +30,11 @@ function collectErrors(target) {
     if (
       message.text().includes("401 (Unauthorized)") &&
       expected401(message.location()?.url ?? "")
+    )
+      return;
+    if (
+      expectKlotskiProbe &&
+      /\/api\/v1\/games\/klotski\/[^/]+\/complete$/.test(message.location()?.url ?? "")
     )
       return;
     errors.push(message.text());
@@ -920,6 +929,204 @@ assert.equal(
   `结余 ${redeemed.children.find((c) => c.id === redeemed.activeChildId).pointsBalance}`,
 );
 
+// ── 华容道：五关按序解锁，第 1 关必须用真实 UI 一格一格滑到出口（下面 118 步是
+// BFS 从同一布局算出的最短解，UI 里「点棋子 + 点亮起的空位」恰好一格一步），
+// 首通才 +30；低于最短解的上报、跳关、不存在的关卡都被服务端当场拦下。
+const klotskiLevel1 = [
+  ["q", 3, 1], ["p", 4, 1], ["D", 3, 0], ["G", 2, 0], ["E", 2, 2], ["s", 3, 3],
+  ["r", 4, 3], ["E", 3, 2], ["G", 2, 1], ["G", 2, 2], ["q", 2, 1], ["p", 3, 1],
+  ["q", 2, 0], ["p", 2, 1], ["E", 3, 1], ["r", 4, 2], ["s", 4, 3], ["G", 3, 2],
+  ["p", 2, 2], ["p", 2, 3], ["q", 2, 1], ["D", 2, 0], ["q", 2, 2], ["E", 2, 1],
+  ["r", 4, 1], ["r", 4, 0], ["s", 4, 2], ["s", 4, 1], ["G", 4, 2], ["p", 3, 3],
+  ["q", 2, 3], ["E", 2, 2], ["D", 2, 1], ["A", 1, 0], ["A", 2, 0], ["C", 0, 0],
+  ["B", 0, 2], ["q", 1, 3], ["p", 2, 3], ["q", 0, 3], ["p", 1, 3], ["E", 2, 3],
+  ["B", 1, 2], ["B", 2, 2], ["C", 0, 1], ["A", 1, 0], ["A", 0, 0], ["D", 2, 0],
+  ["s", 3, 1], ["r", 4, 1], ["s", 2, 1], ["r", 3, 1], ["G", 4, 1], ["E", 3, 3],
+  ["G", 4, 0], ["B", 3, 2], ["s", 2, 2], ["s", 2, 3], ["C", 1, 1], ["q", 0, 2],
+  ["p", 0, 3], ["q", 0, 1], ["p", 0, 2], ["s", 1, 3], ["E", 2, 3], ["s", 0, 3],
+  ["E", 1, 3], ["B", 3, 3], ["r", 3, 2], ["r", 4, 2], ["C", 2, 1], ["p", 1, 2],
+  ["q", 0, 2], ["A", 0, 1], ["D", 1, 0], ["D", 0, 0], ["C", 2, 0], ["p", 2, 2],
+  ["p", 3, 2], ["q", 1, 2], ["s", 0, 2], ["E", 0, 3], ["B", 2, 3], ["r", 4, 3],
+  ["p", 4, 2], ["C", 2, 1], ["D", 1, 0], ["D", 2, 0], ["A", 0, 0], ["q", 1, 1],
+  ["s", 0, 1], ["E", 0, 2], ["B", 1, 3], ["B", 0, 3], ["C", 2, 2], ["D", 2, 1],
+  ["A", 1, 0], ["s", 0, 0], ["q", 0, 1], ["D", 1, 1], ["G", 3, 0], ["p", 4, 1],
+  ["p", 4, 0], ["r", 4, 2], ["r", 4, 1], ["C", 3, 2], ["B", 1, 3], ["E", 1, 2],
+  ["q", 0, 2], ["q", 0, 3], ["s", 0, 1], ["A", 0, 0], ["s", 0, 2], ["D", 0, 1],
+  ["G", 2, 0], ["p", 3, 0], ["r", 4, 0], ["C", 3, 1],
+];
+const klotskiLevel2 = [
+  ["E", 3, 2], ["r", 2, 2], ["B", 1, 3], ["s", 4, 3], ["B", 2, 3], ["C", 0, 2],
+  ["A", 0, 1], ["p", 1, 0], ["p", 0, 0], ["q", 2, 0], ["q", 1, 0], ["D", 2, 0],
+  ["A", 1, 1], ["A", 2, 1], ["C", 0, 1], ["B", 1, 3], ["B", 0, 3], ["s", 3, 3],
+  ["s", 2, 3], ["E", 3, 3], ["G", 4, 1], ["D", 3, 0], ["r", 3, 2], ["s", 2, 2],
+  ["E", 2, 3], ["G", 4, 2], ["A", 3, 1], ["s", 2, 1], ["s", 2, 0], ["C", 1, 1],
+  ["p", 0, 1], ["p", 0, 2], ["q", 0, 0], ["q", 0, 1], ["s", 1, 0], ["D", 2, 0],
+  ["s", 0, 0], ["D", 1, 0], ["A", 3, 0], ["r", 3, 1], ["r", 4, 1], ["C", 2, 1],
+  ["p", 1, 2], ["p", 1, 1], ["B", 0, 2], ["E", 1, 3], ["E", 0, 3], ["C", 2, 2],
+  ["p", 2, 1], ["p", 3, 1], ["q", 1, 1], ["s", 0, 1], ["D", 0, 0], ["A", 2, 0],
+  ["r", 4, 0], ["p", 4, 1], ["C", 2, 1], ["E", 1, 3], ["E", 2, 3], ["B", 0, 3],
+  ["q", 1, 2], ["s", 0, 2], ["D", 0, 1], ["A", 1, 0], ["A", 0, 0], ["C", 2, 0],
+  ["E", 2, 2], ["B", 1, 3], ["s", 0, 3], ["q", 0, 2], ["E", 1, 2], ["G", 3, 2],
+  ["p", 4, 2], ["p", 4, 3], ["r", 4, 1], ["r", 4, 2], ["C", 3, 0], ["A", 1, 0],
+  ["D", 1, 1], ["q", 0, 1], ["q", 0, 0], ["s", 0, 2], ["B", 0, 3], ["s", 0, 1],
+  ["E", 0, 2], ["G", 2, 2], ["p", 3, 3], ["r", 4, 3], ["C", 3, 1],
+];
+const gameBalance = redeemed.children.find((c) => c.id === redeemed.activeChildId).pointsBalance;
+await page.getByRole("link", { name: "今日", exact: true }).click();
+const gameTeaser = page.locator(".game-teaser");
+await gameTeaser.waitFor();
+assert.ok((await gameTeaser.innerText()).includes("已通关 0/5"), "开局首页应显示已通关 0/5");
+await gameTeaser.click();
+await page.waitForURL(/\/child\/games$/);
+await page.locator(".game-card").first().waitFor();
+assert.equal(await page.locator(".game-card").count(), 5);
+assert.equal(await page.locator(".game-card.locked").count(), 4, "开局只该解锁第 1 关");
+await page.locator(".game-card").first().click();
+await page.waitForURL(/\/child\/games\/klotski\?level=1$/);
+await page.locator(".klotski-piece").first().waitFor();
+assert.equal(await page.locator(".klotski-piece").count(), 10);
+// 选中态各验一次：点棋子挂上 .selected，再点一下收起。
+await page.locator('[data-piece="q"]').click();
+assert.equal(await page.locator(".klotski-piece.selected").count(), 1);
+await page.locator('[data-piece="q"]').click();
+assert.equal(await page.locator(".klotski-piece.selected").count(), 0);
+// 真通关之前先撞三堵墙：步数低于第 1 关最短解 118 → 400；第 2 关还没解锁就报通关
+// → 409；不存在的关卡 → 404。探针窗口内放行这三个 URL 的 console 噪声。
+expectKlotskiProbe = true;
+const klotskiProbes = await page.evaluate(async () => {
+  const post = async (level, moves) => {
+    const response = await fetch(`/api/v1/games/klotski/${level}/complete`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ moves }),
+    });
+    return response.status;
+  };
+  return [await post(1, 50), await post(2, 120), await post(6, 120)];
+});
+expectKlotskiProbe = false;
+assert.deepEqual(klotskiProbes, [400, 409, 404], "非法通关上报没有各回各的 400/409/404");
+const probeState = await getState();
+assert.equal(
+  probeState.children.find((c) => c.id === probeState.activeChildId).pointsBalance,
+  gameBalance,
+  "探针在没通关之前不该动余额",
+);
+// 按棋盘走一遍最短解：每步 = 点棋子、再点亮起的空位（data-anchor 是落点锚坐标）。
+// 宽棋子一次滑出新占两格时会有两个同 anchor 的圆点——它们就是同一次滑动，点哪个都一样。
+async function playKlotski(moves) {
+  for (const [piece, anchorRow, anchorCol] of moves) {
+    await page.locator(`[data-piece="${piece}"]`).click();
+    await page
+      .locator(`.movable-target[data-anchor="${anchorRow},${anchorCol}"]`)
+      .first()
+      .click();
+  }
+}
+async function closeKlotskiBanner() {
+  const banner = page.locator(".reward-celebration");
+  await banner.getByText("通关华容道", { exact: true }).waitFor({ timeout: 5000 });
+  assert.equal(await banner.locator("strong").innerText(), "+30 积分到账！");
+  await banner.getByRole("button", { name: "关闭积分到账提示" }).click();
+  await banner.waitFor({ state: "detached" });
+}
+const completeLevel1 = page.waitForResponse((response) =>
+  response.url().endsWith("/api/v1/games/klotski/1/complete"),
+);
+await playKlotski(klotskiLevel1);
+assert.equal((await completeLevel1).status(), 200, "第 1 关最短解没有被服务端接受");
+const winModal = page.getByRole("dialog", { name: "通关成功" });
+await winModal.waitFor();
+// +30 胶囊只画服务端回的值，和弹窗同一次渲染挂出来。
+assert.equal(await page.locator(".klotski-award").innerText(), "+30");
+await closeKlotskiBanner();
+const gameFirst = await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === s.activeChildId).pointsBalance === gameBalance + 30,
+);
+assert.ok(
+  gameFirst.ledger.some(
+    (item) =>
+      item.childId === gameFirst.activeChildId &&
+      item.referenceType === "game" &&
+      item.amount === 30 &&
+      item.description === "通关华容道：横刀立马",
+  ),
+  "首通没有按 game 台账记到账",
+);
+await winModal.getByRole("button", { name: "再玩一次" }).click();
+await page.getByRole("link", { name: "返回关卡列表" }).click();
+await page.waitForURL(/\/child\/games$/);
+await page.locator(".game-card").first().waitFor();
+assert.equal(await page.locator(".game-card.locked").count(), 3, "通关第 1 关应解锁第 2 关");
+assert.ok(
+  (await page.locator(".game-card").first().innerText()).includes("已通关 · 最少 118 步"),
+  "第 1 关卡片没记下最少步数",
+);
+// 第 2 关同样真打（89 步最短解），顺带验证弹窗的下一段旅程也走得通。
+await page.locator(".game-card").nth(1).click();
+await page.waitForURL(/\/child\/games\/klotski\?level=2$/);
+await page.locator(".klotski-piece").first().waitFor();
+const completeLevel2 = page.waitForResponse((response) =>
+  response.url().endsWith("/api/v1/games/klotski/2/complete"),
+);
+await playKlotski(klotskiLevel2);
+assert.equal((await completeLevel2).status(), 200);
+const winModal2 = page.getByRole("dialog", { name: "通关成功" });
+await winModal2.waitFor();
+await closeKlotskiBanner();
+await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === s.activeChildId).pointsBalance === gameBalance + 60,
+);
+await winModal2.getByRole("button", { name: "再玩一次" }).click();
+await page.getByRole("link", { name: "返回关卡列表" }).click();
+await page.waitForURL(/\/child\/games$/);
+await page.locator(".game-card").first().waitFor();
+assert.equal(await page.locator(".game-card.locked").count(), 2, "通关第 2 关应解锁第 3 关");
+await page.getByRole("link", { name: "今日", exact: true }).click();
+assert.ok((await gameTeaser.innerText()).includes("已通关 2/5"));
+// 重放只在更好时刷纪录：120 > 89 是合法但更差的一报，不再发分也不动纪录。
+expectKlotskiProbe = true;
+const worseReplay = await page.evaluate(async () => {
+  const response = await fetch("/api/v1/games/klotski/2/complete", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ moves: 120 }),
+  });
+  return [response.status, (await response.json()).awarded];
+});
+expectKlotskiProbe = false;
+assert.deepEqual(worseReplay, [200, 0], "更差的重放不该再发分");
+const klotskiProgress = await page.evaluate(async () =>
+  (await fetch("/api/v1/games/klotski", { credentials: "same-origin" })).json(),
+);
+assert.equal(klotskiProgress.completed, 2);
+assert.equal(klotskiProgress.levels[0].bestMoves, 118);
+assert.equal(klotskiProgress.levels[1].bestMoves, 89, "更差的重放把纪录改坏了");
+assert.equal(klotskiProgress.levels[1].completed, true);
+assert.equal(klotskiProgress.levels[2].unlocked, true);
+assert.equal(klotskiProgress.levels[2].completed, false);
+assert.equal(klotskiProgress.levels[3].unlocked, false);
+await page.screenshot({ path: ".artifacts/ui/games-progress.png", fullPage: true });
+// 家长端只读进度：五关都在，状态和孩子端一致。
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "游戏进度" }).click();
+await page.waitForURL(/\/parent\/games$/);
+await page.locator(".game-admin-row").first().waitFor();
+assert.equal(await page.locator(".game-admin-row").count(), 5);
+const firstAdminRow = page.locator(".game-admin-row").first();
+assert.ok((await firstAdminRow.innerText()).includes("已通关"));
+assert.ok((await firstAdminRow.innerText()).includes("最少 118 步"));
+assert.ok(
+  (await page.locator(".game-admin-row").nth(4).innerText()).includes("未解锁"),
+  "第 5 关在未解锁列表里显示错了",
+);
+await page.screenshot({ path: ".artifacts/ui/games-admin.png", fullPage: true });
+await enterChild();
+
 // ── 家庭作业：家长录入（学科 + 文字 + 图片）→ 孩子端当天可见、谚语带拼音、灯箱可左右
 // 切换（含首尾循环与滑动）→ 家长改删。家长密码此刻已经是上面改过的 1357。
 await enterParent(false, "1357");
@@ -1449,6 +1656,10 @@ console.log(
     ledgerPage: true,
     levelUpToast: true,
     ledgerSpend: true,
+    klotskiUnlock: true,
+    klotskiSolve: true,
+    klotskiGuard: true,
+    klotskiParentProgress: true,
     consoleErrors: errors.length,
   }),
 );

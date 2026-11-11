@@ -415,6 +415,10 @@ func (s *Server) Handler() http.Handler {
 				hw.Delete("/{id}/media/{mediaID}", s.parentOnly(s.deleteHomeworkMedia))
 				hw.Post("/{id}/done", s.setHomeworkDone)
 			})
+			a.Route("/games", func(g chi.Router) {
+				g.Get("/klotski", s.getKlotski)
+				g.Post("/klotski/{level}/complete", s.completeKlotski)
+			})
 			a.Patch("/redemptions/{id}", s.completeRedemption)
 			a.Get("/media/{id}", s.media)
 			a.Get("/stats", s.stats)

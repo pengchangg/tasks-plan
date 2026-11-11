@@ -137,6 +137,17 @@
 
 两个参数都是家庭本地日期、闭区间。只传一个、`from > to`、日期不合法或跨度超过 92 天都返回 `400 invalid_request`。省略时是最近 7 天。统计窗口在 SQL 里就收窄（确认记录的 `reviewed_at`、台账的 `created_at` 都限定在窗口内），请求代价跟窗口大小相关，不随家庭历史增长。
 
+## 游戏（华容道）
+
+5 关内置经典布局（横刀立马、指挥若定、兵分三路、重重封锁、兵贵神速），按序解锁：第 1 关常开，其余要前一关已通关。布局只存服务端一份，前端从读取接口拿 `rows`，不复制布局数据。
+
+| 接口 | 角色 | 说明 |
+|---|---|---|
+| `GET /api/v1/games/klotski` | 任意 | `200 {levels, completed}`：全部关卡按序，每关 `{level, name, rows, unlocked, completed, bestMoves}`；`completed` 是已通关数 |
+| `POST /api/v1/games/klotski/{level}/complete` | 任意 | `{"moves":118}` → `200 {id:"klotski:1", awarded}`；首次通关 `awarded=30` 并记一条 `reward` 台账，重放为 `0`（更少步数会刷新 `bestMoves`） |
+
+完成接口的错误各回各的：`level` 不是 1…5 → `404 not_found`；`moves` 越界 → `400 invalid_request`；前一关没通关 → `409 invalid_state`。`moves` 的下限是**该关布局的最短解**（进程内 BFS 只算一次，第 4 关最少 79 步），上限 10000——写死一个数会把最省力的关也拦掉。进度按 `(family_id, child_id, level)` 一行存进 `klotski_progress`（迁移 `010_klotski.sql`），首次加分靠 `PRIMARY KEY` + `INSERT OR IGNORE` 保证每关只记一次。两个接口都要会话选中孩子，否则 `400 invalid_request`。
+
 ## 健康检查
 
 | 接口 | 说明 |

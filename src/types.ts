@@ -7,7 +7,7 @@ export interface Task { id: string; childId: string; title: string; description:
 export interface Attachment { id?: string; name: string; type: 'image' | 'video'; url?: string; file?: File }
 export interface TaskSubmission { id: string; taskId: string; childId: string; note: string; attachments: Attachment[]; submittedAt: string; reviewedAt?: string; reviewNote?: string }
 export interface Wish { id: string; title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
-export interface PointLedger { id: string; childId: string; amount: number; type: 'earned' | 'spent'; referenceType: 'task' | 'redemption' | 'manual' | 'homework' | 'homework_bonus'; referenceId: string; description: string; createdAt: string }
+export interface PointLedger { id: string; childId: string; amount: number; type: 'earned' | 'spent'; referenceType: 'task' | 'redemption' | 'manual' | 'homework' | 'homework_bonus' | 'game'; referenceId: string; description: string; createdAt: string }
 export interface Redemption { id: string; wishId: string; wishTitle: string; wishIcon: string; wishColor: string; childId: string; pointsCost: number; completedAt?: string; completedNote?: string; attachments: Attachment[]; createdAt: string }
 export interface AppState { timezone: string; role: Role; activeChildId: string; children: Child[]; tasks: Task[]; submissions: TaskSubmission[]; wishes: Wish[]; ledger: PointLedger[]; redemptions: Redemption[]; holidays: HolidaySpan[]; makeupWorkdays: string[] }
 
@@ -40,3 +40,8 @@ export interface HomeworkDay { date: string; items: Homework[]; holiday?: Holida
 // files 以重复的 files 字段提交，removeMedia 以重复的 remove_media 字段提交；
 // endDate 以 end_date 提交，缺省（空串）时服务端按单日处理。
 export interface HomeworkDraft { date: string; endDate: string; subject: string; description: string; files: File[]; removeMedia: string[] }
+
+// GET /api/v1/games/klotski 的载荷：五关布局（rows 是 5 行 × 4 字符，服务端是布局的
+// 唯一持有者）+ 这个孩子的解锁/通关状态。完成上报只有内联 {moves}，无写类型。
+export interface KlotskiLevel { level: number; name: string; rows: string[]; unlocked: boolean; completed: boolean; bestMoves: number }
+export interface KlotskiPayload { levels: KlotskiLevel[]; completed: number }

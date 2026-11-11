@@ -35,10 +35,10 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 | `npm run dev` | Vite 开发服务器（`:5173`），`/api` 代理到 `:8080` |
 | `npm run dev:server` | `go run ./cmd/growjoy serve --demo` |
 | `npm run build` | `tsc -b && vite build` → `dist/`（类型检查不产出 JS） |
-| `npm test` | `vitest run`：`src/domain.test.ts` + `src/proverbs.test.ts` + `src/lunar.test.ts` |
+| `npm test` | `vitest run`：`src/domain.test.ts` + `src/proverbs.test.ts` + `src/lunar.test.ts` + `src/features/klotski.test.ts` |
 | `npm run test:go` | `go test ./...`（不带 `-race`，与 `make test-go` 不同） |
 | `npm run check:flow` | 行为 E2E：构建后启动真实服务，走完整孩子/家长流程 |
-| `npm run check:ui` | 视觉门：14 个视口/路由场景的截图与溢出检查 |
+| `npm run check:ui` | 视觉门：16 个视口/路由场景的截图与溢出检查 |
 | `npm run preview` | 静态预览 `dist/`，没有 `/api` 代理，不能用于 E2E |
 
 ### make
@@ -87,11 +87,11 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 
 ### Go（`go test ./...`）
 
-- 只有两个测试文件：`internal/server/server_test.go`（白盒，真实 SQLite 文件 + `httptest`）与 `cmd/growjoy/main_test.go`（CLI 命令）。
+- 只有三个测试文件：`internal/server/server_test.go`（白盒，真实 SQLite 文件 + `httptest`）、`internal/server/games_test.go`（华容道：五关布局的 BFS 可解性校验与进度/计分/门槛行为）与 `cmd/growjoy/main_test.go`（CLI 命令）。
 - 复用现有辅助函数：`testServer`、`doJSON`、`parentCookie`、`childCookie`、`sessionFor`、`getStateTest`、`multipartRequest`、`homeworkRequest` 等。
 - 约定：无子测试、无表驱动、无 `t.Parallel`；失败信息带 HTTP 状态与响应体。
 - 时间敏感的数据要**先**替换 `s.now` 再写入种子（`testServer` 已经按墙上时钟灌过 DEMO 种子，之后再改 `s.now` 会让第二个家庭的时间戳比 DEMO 还早，`resolvedFamily` 就会换人）。
-- 迁移只加新文件 `NNN_name.sql`（版本号 ≥ 2，且下一个必须 ≥ 009——008 写过又整体回滚，跑过它的库会留下一行 `schema_migrations=8`，再发一个 8 会被静默跳过），**不要改 `001_init.sql`**：已应用过的 `ALTER TABLE ADD COLUMN` 重跑会失败，而新库会在 001 之后把 002…NNN 一个个跑一遍。重启测试按 `.sql` 文件数自动计数，无需跟着改。
+- 迁移只加新文件 `NNN_name.sql`（版本号 ≥ 2，且下一个必须 ≥ 011——008 写过又整体回滚，跑过它的库会留下一行 `schema_migrations=8`，再发一个 8 会被静默跳过；009 与 010 已占用），**不要改 `001_init.sql`**：已应用过的 `ALTER TABLE ADD COLUMN` 重跑会失败，而新库会在 001 之后把 002…NNN 一个个跑一遍。重启测试按 `.sql` 文件数自动计数，无需跟着改。
 - `testServer` 不是万能的：重启测试与 `no_family` 测试会自己构造 `Config`；需要第二个家庭时用 `otherFamily`。
 
 ### 前端（`npm test`）
