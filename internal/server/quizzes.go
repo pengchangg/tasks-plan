@@ -1,9 +1,7 @@
 package server
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 
@@ -14,8 +12,9 @@ import (
 // （pattern_quiz，10 题序列填空，score = 答对题数 × 10 的百分制）。题目全在前端
 // 生成（src/features/quizzes.ts），服务端只收成绩——信任级别同华容道上报的步数与
 // 作业勾选，只做区间校验。成绩两条去路：game_history 逐局留底（家长端回看），
-// game_scores 存每孩子每游戏当天的最好成绩——加分只补当天最好成绩的涨幅（一天多
-// 局不重复入账），每答对一题记 1 积分（找规律的百分制按 10 折算，即答对一题 1 分）。
+// game_scores 存每孩子每游戏当天的最好成绩——每一局都按本局得分全额入账，不要求
+// 破纪录（每答对一题 1 积分；找规律的百分制按 10 折算）。同一局重发由
+// Idempotency-Key 挡住，台账 reference_id 挂 history id，所以每局是一笔独立账。
 const (
 	quizCalc        = "timed_calc"
 	quizPattern     = "pattern_quiz"
@@ -27,16 +26,17 @@ const (
 )
 
 // quizSpec 是每个游戏的固定参数：名字、分的换算（百分制的找规律要除以 10 才是
-// 积分数）、成绩上限。新增游戏 = 这里加一行 + 迁移里扩 CHECK 集合。
+// 积分数）、成绩上限、台账里成绩的单位。新增游戏 = 这里加一行 + 迁移里扩 CHECK 集合。
 type quizSpec struct {
-	Name string
-	Unit int // score → 积分的除数
-	Max  int
+	Name  string
+	Unit  int    // score → 积分的除数
+	Max   int
+	Scale string // 台账描述里成绩的单位
 }
 
 var quizGames = map[string]quizSpec{
-	quizCalc:    {Name: "口算闯关", Unit: 1, Max: quizCalcMax},
-	quizPattern: {Name: "找规律", Unit: 10, Max: quizPatternMax},
+	quizCalc:    {Name: "口算闯关", Unit: 1, Max: quizCalcMax, Scale: "题"},
+	quizPattern: {Name: "找规律", Unit: 10, Max: quizPatternMax, Scale: "分"},
 }
 
 // quizGameView 是一个游戏在当前孩子眼里的进度：今天最好 + 历史最好 + 局数。
@@ -135,10 +135,10 @@ func (s *Server) getQuizzes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// submitQuizScore 收一局成绩：game_history 必写，当天最好成绩涨了才补差价入账
-// （reference_id 带日期/孩子/分数，同日同分天然撞不上第二次）。加分路径与
-// completeKlotski 逐字同构；但这里必须带 Idempotency-Key——同一局的重发不该
-// 把同一份差价补两遍（华容道的重放只会刷纪录、从不加钱，才免了这把锁）。
+// submitQuizScore 收一局成绩：game_history 必写，本局得分全额入账（reference_id
+// 挂 history id，一局一笔，重发靠 Idempotency-Key 挡）。加分路径与 completeKlotski
+// 逐字同构；但这里必须带 Idempotency-Key——同一局的重发不该把同一份积分补两遍
+// （华容道的重放只会刷纪录、从不加钱，才免了这把锁）。
 func (s *Server) submitQuizScore(w http.ResponseWriter, r *http.Request) {
 	x := sess(r)
 	game := chi.URLParam(r, "game")
@@ -207,35 +207,25 @@ func (s *Server) submitQuizScore(w http.ResponseWriter, r *http.Request) {
 		replayOrConflict(w, replay)
 		return
 	}
-	// 当天旧最好先读出来，差价 = 新最好 − 旧最好。当天行不存在就是 0 分起算。
-	var oldBest int
-	err = tx.QueryRow(`SELECT best_score FROM game_scores WHERE family_id=? AND child_id=? AND game=? AND date=?`, x.FamilyID, x.SelectedChildID, game, today).Scan(&oldBest)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.internalError(w, r, err)
-		return
-	}
-	err = nil
-	newBest := max(oldBest, in.Score)
-	awarded := (newBest - oldBest) / spec.Unit
-	res, err := tx.Exec(`INSERT INTO game_scores(family_id,child_id,game,date,best_score,level,plays,detail,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(family_id,child_id,game,date) DO UPDATE SET best_score=max(best_score,excluded.best_score),level=excluded.level,plays=plays+1,detail=excluded.detail,updated_at=excluded.updated_at`, x.FamilyID, x.SelectedChildID, game, today, in.Score, in.Level, 1, string(details), now)
+	// 本局得分全额入账，不看当天纪录（纪录只用来展示与存档）。
+	awarded := in.Score / spec.Unit
+	hid := id("hist")
+	_, err = tx.Exec(`INSERT INTO game_scores(family_id,child_id,game,date,best_score,level,plays,detail,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(family_id,child_id,game,date) DO UPDATE SET best_score=max(best_score,excluded.best_score),level=excluded.level,plays=plays+1,detail=excluded.detail,updated_at=excluded.updated_at`, x.FamilyID, x.SelectedChildID, game, today, in.Score, in.Level, 1, string(details), now)
 	if err == nil {
-		if _, err = res.RowsAffected(); err == nil {
-			hid := id("hist")
-			_, err = tx.Exec(`INSERT INTO game_history(id,family_id,child_id,game,score,details,created_at) VALUES(?,?,?,?,?,?,?)`, hid, x.FamilyID, x.SelectedChildID, game, in.Score, string(details), now)
-			if err == nil && awarded > 0 {
-				// 差价入账：成长值与等级重算公式同 completeKlotski / awardPoints。
-				growth := max(awarded/5, 1)
-				refID := game + ":" + today + ":" + x.SelectedChildID + ":" + strconv.Itoa(newBest)
-				_, err = tx.Exec(`UPDATE children SET points_balance=points_balance+?,experience=experience+?,level=1+CAST((experience+?)/100 AS INTEGER) WHERE id=? AND family_id=?`, awarded, growth, growth, x.SelectedChildID, x.FamilyID)
-				if err == nil {
-					// 普通 INSERT：唯一键冲突只可能来自脏数据（分数行没了而台账还在），
-					// 宁可回滚丢一次领奖，也不能记出两笔。
-					_, err = tx.Exec(`INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,'earned','game',?,?,?)`, id("led"), x.FamilyID, x.SelectedChildID, awarded, refID, spec.Name+"：最好成绩 "+strconv.Itoa(newBest), now)
-				}
-			}
+		_, err = tx.Exec(`INSERT INTO game_history(id,family_id,child_id,game,score,details,created_at) VALUES(?,?,?,?,?,?,?)`, hid, x.FamilyID, x.SelectedChildID, game, in.Score, string(details), now)
+		if err == nil && awarded > 0 {
+			// 成长值与等级重算公式同 completeKlotski / awardPoints。
+			growth := max(awarded/5, 1)
+			refID := game + ":round:" + hid
+			_, err = tx.Exec(`UPDATE children SET points_balance=points_balance+?,experience=experience+?,level=1+CAST((experience+?)/100 AS INTEGER) WHERE id=? AND family_id=?`, awarded, growth, growth, x.SelectedChildID, x.FamilyID)
 			if err == nil {
-				_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'quiz_score',?,200,'{}',?) ON CONFLICT(family_id,actor_id,operation,key) DO UPDATE SET status_code=excluded.status_code,response_body=excluded.response_body`, x.FamilyID, x.ActorID, key, now)
+				// 普通 INSERT：唯一键冲突只可能来自脏数据（同一局被记了两遍），
+				// 宁可回滚丢一次领奖，也不能记出两笔。
+				_, err = tx.Exec(`INSERT INTO point_ledger(id,family_id,child_id,amount,entry_type,reference_type,reference_id,description,created_at) VALUES(?,?,?,?,'earned','game',?,?,?)`, id("led"), x.FamilyID, x.SelectedChildID, awarded, refID, spec.Name+"："+strconv.Itoa(in.Score)+" "+spec.Scale, now)
 			}
+		}
+		if err == nil {
+			_, err = tx.Exec(`INSERT INTO idempotency_keys(family_id,actor_id,operation,key,status_code,response_body,created_at) VALUES(?,?,'quiz_score',?,200,'{}',?) ON CONFLICT(family_id,actor_id,operation,key) DO UPDATE SET status_code=excluded.status_code,response_body=excluded.response_body`, x.FamilyID, x.ActorID, key, now)
 		}
 	}
 	if err != nil {

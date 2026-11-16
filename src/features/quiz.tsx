@@ -15,7 +15,7 @@ import type { CalcProblem, PatternItem } from "./quizzes";
 // 序列填空，百分制）。题目由 src/features/quizzes.ts 的纯生成器按种子现发，
 // 服务端只收成绩——信任级别同华容道上报的步数。?seed= 只为验证门固定出题。
 
-// 一局结束后的结算：上报回来的 awarded 决定「破纪录 +N」胶囊，失败可原样重试。
+// 一局结束后的结算：上报回来的 awarded 决定「获得 +N」胶囊，失败可原样重试。
 interface Settlement {
   score: number;
   awarded: number;
@@ -122,7 +122,7 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
   if (phase === "intro")
     return (
       <div className="content-wrap quiz-screen">
-        <PageHeading title="口算闯关" description="60 秒内答对越多越好，答对一题记 1 分；只有超过今天的最好成绩才补积分。" />
+        <PageHeading title="口算闯关" description="60 秒内答对越多越好，答对一题记 1 分，每局都计入积分。" />
         <p className="quiz-level-prompt">选题档开始：</p>
         <div className="quiz-levels">
           {["第1档 · 20 以内加减", "第2档 · 100 以内加减", "第3档 · 表内乘除"].map((label, index) => (
@@ -190,12 +190,10 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
         </button>
       ) : result && result.awarded > 0 ? (
         <p className="quiz-record">
-          破纪录 <span className="quiz-award">+{result.awarded}</span>
+          本局获得 <span className="quiz-award">+{result.awarded}</span>
         </p>
       ) : (
-        <p className="quiz-record">
-          今天最好 {view?.todayBest ?? 0} 题，再试一次超过它
-        </p>
+        <p className="quiz-record">这一局还没答对题，下次加油</p>
       )}
       <div className="quiz-actions">
         <button className="secondary-button" onClick={() => start(tier)}>
@@ -336,12 +334,10 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
         </button>
       ) : result && result.awarded > 0 ? (
         <p className="quiz-record">
-          破纪录 <span className="quiz-award">+{result.awarded}</span>
+          本局获得 <span className="quiz-award">+{result.awarded}</span>
         </p>
       ) : (
-        <p className="quiz-record">
-          今天最好 {view?.todayBest ?? 0} 分，再试一次超过它
-        </p>
+        <p className="quiz-record">这一局还没答对题，下次加油</p>
       )}
       <div className="quiz-actions">
         <button className="secondary-button" onClick={start}>

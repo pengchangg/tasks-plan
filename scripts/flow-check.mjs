@@ -1155,8 +1155,8 @@ assert.equal(klotskiProgress.levels[2].completed, false);
 assert.equal(klotskiProgress.levels[3].unlocked, false);
 await page.screenshot({ path: ".artifacts/ui/games-progress.png", fullPage: true });
 // ── 口算闯关 + 找规律：?seed= 固定出题，harness 在页面里重算正确答案点下去；
-// 加分只有「破当天最好成绩补差价」一条路，所以三局一组：首局记分、平局零分、
-// 更高分只补差额。找规律再故意错一题，验证 10 分制和失误扣的是题分。
+// 每一局都按本局得分全额入账（不看纪录），所以三局一组：3 题 +3、平纪录再来 3 题
+// 再 +3、5 题 +5。找规律再故意错一题，验证 10 分制和失误扣的是题分。
 const quizBalance = gameBalance + 60;
 const clickChoice = (value) =>
   page.locator(".quiz-choice").filter({ hasText: new RegExp(`^\\s*${value}\\s*$`) }).click();
@@ -1196,7 +1196,7 @@ await page.waitForURL(/\/child\/games\/calc$/);
 await page.goto(baseUrl + "/child/games/calc?seed=777");
 await page.getByRole("button", { name: "第1档 · 20 以内加减" }).click();
 await page.locator(".quiz-problem").waitFor();
-// 第 1 局：答对 3 题就交卷，当天第一次记分 → +3 与横幅。
+// 第 1 局：答对 3 题就交卷 → +3 与横幅。
 const calcReport1 = page.waitForResponse((response) =>
   response.url().endsWith("/api/v1/games/quizzes/timed_calc/score"),
 );
@@ -1205,40 +1205,35 @@ await calcReport1;
 await page.locator(".quiz-result").waitFor();
 assert.equal(await page.locator(".quiz-result strong").innerText(), "3");
 assert.ok(
-  (await page.locator(".quiz-record").innerText()).includes("破纪录"),
-  "首局记分却没说破纪录",
+  (await page.locator(".quiz-record").innerText()).includes("+3"),
+  "首局记分没在结算里报出本局获得的积分",
 );
 await closeQuizBanner(3);
 await waitForState(
   (s) =>
     s.children.find((c) => c.id === s.activeChildId).pointsBalance === quizBalance + 3,
 );
-// 第 2 局同种子同 3 题：平纪录的再打一分不补，也不许弹横幅。
+// 第 2 局同种子同 3 题：不破纪录也照样记 +3，横幅照弹。
 await page.getByRole("button", { name: "再来一局" }).click();
 await page.locator(".quiz-problem").waitFor();
 await answerCalcRound(3);
 await page.locator(".quiz-result").waitFor();
 assert.ok(
-  !(await page.locator(".quiz-record").innerText()).includes("破纪录"),
-  "平纪录的一局说了破纪录",
+  (await page.locator(".quiz-record").innerText()).includes("+3"),
+  "平纪录的一局没有按本局得分记积分",
 );
-assert.ok(
-  (await page.locator(".quiz-record").innerText()).includes("今天最好 3 题"),
-  "没破纪录的结算没把今天的最好成绩报给孩子",
+await closeQuizBanner(3);
+await waitForState(
+  (s) =>
+    s.children.find((c) => c.id === s.activeChildId).pointsBalance === quizBalance + 6,
 );
-await page.waitForTimeout(1200);
-assert.equal(
-  await page.locator(".reward-celebration").count(),
-  0,
-  "没破纪录的一局弹了到账横幅",
-);
-// 第 3 局答到 5：只补 3→5 的差价 +2，台账记下新的最好成绩。
+// 第 3 局答到 5：还是本局全额 +5（不是差价），最好成绩跟着变成 5。
 await page.getByRole("button", { name: "再来一局" }).click();
 await page.locator(".quiz-problem").waitFor();
 await answerCalcRound(5);
 await page.locator(".quiz-result").waitFor();
 assert.equal(await page.locator(".quiz-result strong").innerText(), "5");
-await closeQuizBanner(2);
+await closeQuizBanner(5);
 // 找规律：错一题只扣那一题的 10 分 → 90 分补 9。
 await page.getByRole("link", { name: "返回关卡列表" }).click();
 await page.waitForURL(/\/child\/games$/);
@@ -1305,35 +1300,32 @@ assert.ok(
   "错一题没有按 10 分制扣成 90",
 );
 await closeQuizBanner(9);
-// 全对 → 100 分只补 90→100 的差价（10 分制折 1 积分）；再全对一次 → 一分不补。
+// 全对 → 100 分记 10 积分（10 分制折 1）；再全对一次 → 还是 10。
 await page.getByRole("button", { name: "再来一局" }).click();
 await page.locator(".pattern-seq").waitFor();
 await answerPatternRound({ firstWrong: false });
-await closeQuizBanner(1);
+await closeQuizBanner(10);
 await page.getByRole("button", { name: "再来一局" }).click();
 await page.locator(".pattern-seq").waitFor();
 await answerPatternRound({ firstWrong: false });
 assert.ok(
-  (await page.locator(".quiz-record").innerText()).includes("今天最好 100 分"),
-  "平纪录的找规律一局没有把最好成绩报出来",
+  (await page.locator(".quiz-record").innerText()).includes("+10"),
+  "平纪录的找规律一局没有按本局得分记积分",
 );
-await page.waitForTimeout(1200);
-assert.equal(
-  await page.locator(".reward-celebration").count(),
-  0,
-  "平纪录的找规律一局弹了到账横幅",
-);
-// 台账四笔：口算 +3/+2、找规律 +9/+1（百分制折 10:1），描述都带当时的最好成绩。
+await closeQuizBanner(10);
+// 台账六笔：口算 +3/+3/+5、找规律 +9/+10/+10（百分制折 10:1），描述带本局成绩。
 const quizState = await waitForState(
   (s) =>
     s.children.find((c) => c.id === s.activeChildId).pointsBalance ===
-    quizBalance + 15,
+    quizBalance + 40,
 );
 for (const [desc, amount] of [
-  ["口算闯关：最好成绩 3", 3],
-  ["口算闯关：最好成绩 5", 2],
-  ["找规律：最好成绩 90", 9],
-  ["找规律：最好成绩 100", 1],
+  ["口算闯关：3 题", 3],
+  ["口算闯关：3 题", 3],
+  ["口算闯关：5 题", 5],
+  ["找规律：90 分", 9],
+  ["找规律：100 分", 10],
+  ["找规律：100 分", 10],
 ])
   assert.ok(
     quizState.ledger.some(

@@ -57,7 +57,7 @@ export function ChildGames({ store }: { store: ReturnType<typeof useAppStore> })
     );
   return (
     <div className="content-wrap">
-      <PageHeading title="小游戏" description="华容道每关只奖励第一次通关；口算和找规律只有打破今天的最好成绩才补积分。" />
+      <PageHeading title="小游戏" description="华容道每关只奖励第一次通关；口算和找规律每局按本局答对数给积分，不用破纪录。" />
       <h3 className="game-group-title">华容道</h3>
       <div className="game-grid">
         {store.klotski.levels.map((level) => (
@@ -431,7 +431,7 @@ export function ParentGames({ store }: { store: ReturnType<typeof useAppStore> }
   return (
     <div className="parent-content">
       <ParentHeader title="游戏进度" />
-      <p className="game-note">华容道每第一次通关一关自动记 30 积分；口算闯关答对 1 题记 1 分、找规律答对 1 题记 10 分，都只有超过今天的最好成绩才补差价——下面是 {store.activeChild.name} 的进度。</p>
+      <p className="game-note">华容道每第一次通关一关自动记 30 积分；口算闯关答对 1 题记 1 分、找规律答对 1 题记 10 分，每局都按本局得分入账——下面是 {store.activeChild.name} 的进度。</p>
       {store.klotski.levels.length === 0 ? (
         <EmptyState icon="🧩" title="还没有进度" text="孩子通关第一关后，这里就会出现记录。" compact />
       ) : (

@@ -87,7 +87,7 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 
 ### Go（`go test ./...`）
 
-- 服务端测试分四个文件：`internal/server/server_test.go`（白盒，真实 SQLite 文件 + `httptest`）、`internal/server/games_test.go`（华容道：五关布局的 BFS 可解性校验与进度/计分/门槛行为）、`internal/server/quizzes_test.go`（题类游戏：当天最好成绩补差价只记一次、每孩子独立、幂等重放不双付）与 `cmd/growjoy/main_test.go`（CLI 命令）。
+- 服务端测试分四个文件：`internal/server/server_test.go`（白盒，真实 SQLite 文件 + `httptest`）、`internal/server/games_test.go`（华容道：五关布局的 BFS 可解性校验与进度/计分/门槛行为）、`internal/server/quizzes_test.go`（题类游戏：每局按本局得分全额入账、每孩子独立、幂等重放不双付）与 `cmd/growjoy/main_test.go`（CLI 命令）。
 - 复用现有辅助函数：`testServer`、`doJSON`、`parentCookie`、`childCookie`、`sessionFor`、`getStateTest`、`multipartRequest`、`homeworkRequest` 等。
 - 约定：无子测试、无表驱动、无 `t.Parallel`；失败信息带 HTTP 状态与响应体。
 - 时间敏感的数据要**先**替换 `s.now` 再写入种子（`testServer` 已经按墙上时钟灌过 DEMO 种子，之后再改 `s.now` 会让第二个家庭的时间戳比 DEMO 还早，`resolvedFamily` 就会换人）。

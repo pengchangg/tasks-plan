@@ -155,9 +155,9 @@
 | 接口 | 角色 | 说明 |
 |---|---|---|
 | `GET /api/v1/games/quizzes` | 任意 | `200 {games, history}`：两个游戏按固定顺序各一行 `{game, name, todayBest, allTimeBest, todayPlays, level}`，外加该孩子最近 20 局 `{id, game, score, details, createdAt}` |
-| `POST /api/v1/games/quizzes/{game}/score` | 任意 | 口算 `{"score":12,"level":2,"seconds":60}`、找规律 `{"score":90,"level":3,"mistakes":1}` → `200 {awarded}`；逐局写 `game_history`，**只有超过当天最好成绩才补差价**（`awarded` = 新最好 − 旧最好，按量表折算：口算 1 题 1 分、找规律 10 分折 1 积分），平局或更差记 `awarded=0` |
+| `POST /api/v1/games/quizzes/{game}/score` | 任意 | 口算 `{"score":12,"level":2,"seconds":60}`、找规律 `{"score":90,"level":3,"mistakes":1}` → `200 {awarded}`；逐局写 `game_history`，**每一局都按本局得分全额入账**（不要求破纪录；按量表折算：口算 1 题 1 分、找规律 10 分折 1 积分），`game_scores` 只用来展示当天最好成绩 |
 
-上报必须带 `Idempotency-Key`（差价不像华容道重放那样天然幂等，同一局重发不能补两遍），同键重放返回存下的状态码 + `{"replayed": true}`。错误分支：`game` 不在两个之内 → `404 not_found`；缺键 → `400 idempotency_required`；`score`/`level` 越量表、找规律缺 `mistakes` 或越界（0…20）、口算 `seconds` 不是 60 → `400 invalid_request`；没选中孩子 → `400 invalid_request`。成绩按 `(家庭, 孩子, 游戏, 当天)` 一行存进 `game_scores`（迁移 `011_quizzes.sql`），台账 `reference_id` 带日期/孩子/分数（`timed_calc:2026-11-11:child_x:5`），所以同一天同一分的第二笔永远撞不进 `point_ledger`。
+上报必须带 `Idempotency-Key`（同一局重发不能补两遍），同键重放返回存下的状态码 + `{"replayed": true}`。错误分支：`game` 不在两个之内 → `404 not_found`；缺键 → `400 idempotency_required`；`score`/`level` 越量表、找规律缺 `mistakes` 或越界（0…20）、口算 `seconds` 不是 60 → `400 invalid_request`；没选中孩子 → `400 invalid_request`。成绩按 `(家庭, 孩子, 游戏, 当天)` 一行存进 `game_scores`（迁移 `011_quizzes.sql`，当天最好成绩，只供展示），台账 `reference_id` 挂本局 `game_history` 的 id（`timed_calc:round:hist_…`），所以一局一笔，同一键重发撞不进 `point_ledger`。
 
 ## 健康检查
 

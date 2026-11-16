@@ -608,8 +608,8 @@ export function useAppStore() {
         await loadKlotski();
         return awarded;
       }),
-    // 题类成绩上报（两类游戏共用一条路径）：服务端按天记最好分、只有破纪录才补
-    // 差价积分，返回 awarded 让结算页显示「破纪录 +N」胶囊；到账走 /state 刷新。
+    // 题类成绩上报（两类游戏共用一条路径）：服务端每局按本局得分入账（当天最好分
+    // 只用于展示），返回 awarded 让结算页显示「本局获得 +N」胶囊；到账走 /state 刷新。
     submitQuizScore: (report: QuizScoreReport): Promise<number | undefined> =>
       run(async () => {
         const { game, ...body } = report;

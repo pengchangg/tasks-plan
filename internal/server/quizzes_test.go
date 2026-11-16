@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-// TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay drives the
-// whole quiz surface: the read payload shape, every 400 branch of the score
-// range, the daily-best delta credit with its ledger row, a lower round that
-// awards nothing while still counting as a play, a replayed key that must not
-// move anything, the per-child wall, and the parent end reading the same rows.
-func TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay(t *testing.T) {
+// TestQuizScoresCreditEveryRoundOncePerChildAndNeverDoublePay drives the whole
+// quiz surface: the read payload shape, every 400 branch of the score range, the
+// per-round credit with its ledger row, a lower round that still pays its own
+// score, a replayed key that must not move anything, the per-child wall, and the
+// parent end reading the same rows.
+func TestQuizScoresCreditEveryRoundOncePerChildAndNeverDoublePay(t *testing.T) {
 	s := testServer(t)
 	h := s.Handler()
 	cookie := childCookie(t, h, "")
@@ -98,7 +98,7 @@ func TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay(t *testing
 		return out.Awarded
 	}
 
-	// 口算 12 题：一分一题，首局全额。
+	// 口算 12 题：一分一题，本局全额。
 	if awarded := score(quizCalc, "k-calc-12", map[string]any{"score": 12, "level": 1, "seconds": 60}); awarded != 12 {
 		t.Fatalf("calc first round: %d", awarded)
 	}
@@ -106,16 +106,16 @@ func TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay(t *testing
 	if games[0].TodayBest != 12 || games[0].TodayPlays != 1 || len(history) != 1 {
 		t.Fatalf("after calc 12: %+v %d", games[0], len(history))
 	}
-	// 更低的一局：记局数、进历史，但零加分（当天最好没动）。
-	if awarded := score(quizCalc, "k-calc-8", map[string]any{"score": 8, "level": 1, "seconds": 60}); awarded != 0 {
+	// 更低的一局：照样按本局 8 分入账，只是不动今天的最好成绩。
+	if awarded := score(quizCalc, "k-calc-8", map[string]any{"score": 8, "level": 1, "seconds": 60}); awarded != 8 {
 		t.Fatalf("calc lower round: %d", awarded)
 	}
 	games, history = getPayload()
 	if games[0].TodayBest != 12 || games[0].TodayPlays != 2 || len(history) != 2 {
 		t.Fatalf("after calc 8: %+v %d", games[0], len(history))
 	}
-	// 破纪录只补差价：15 − 12 = 3。
-	if awarded := score(quizCalc, "k-calc-15", map[string]any{"score": 15, "level": 2, "seconds": 60}); awarded != 3 {
+	// 更高的一局：全额 15 分，不是差价。
+	if awarded := score(quizCalc, "k-calc-15", map[string]any{"score": 15, "level": 2, "seconds": 60}); awarded != 15 {
 		t.Fatalf("calc better round: %d", awarded)
 	}
 	games, _ = getPayload()
@@ -139,11 +139,11 @@ func TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay(t *testing
 		t.Fatalf("replay moved rows: %+v %d", games[0], len(history))
 	}
 
-	// 找规律按百分制收分：70 分记 7 积分，100 分补差价 3。
+	// 找规律按百分制收分：70 分记 7 积分，100 分记 10。
 	if awarded := score(quizPattern, "k-pat-70", map[string]any{"score": 70, "level": 2, "mistakes": 2}); awarded != 7 {
 		t.Fatalf("pattern first round: %d", awarded)
 	}
-	if awarded := score(quizPattern, "k-pat-100", map[string]any{"score": 100, "level": 3, "mistakes": 0}); awarded != 3 {
+	if awarded := score(quizPattern, "k-pat-100", map[string]any{"score": 100, "level": 3, "mistakes": 0}); awarded != 10 {
 		t.Fatalf("pattern best round: %d", awarded)
 	}
 	games, history = getPayload()
@@ -156,11 +156,11 @@ func TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay(t *testing
 	}
 
 	after := getStateTest(t, h, cookie)
-	if after.Children[0].PointsBalance != balanceBefore+15+10 {
+	if after.Children[0].PointsBalance != balanceBefore+35+17 {
 		t.Fatalf("balance: %d -> %d", balanceBefore, after.Children[0].PointsBalance)
 	}
-	// 成长值 = 各笔加分的 max(加分/5,1) 之和：2+1+1+1。
-	if after.Children[0].Experience != experienceBefore+5 {
+	// 成长值 = 各笔记账的 max(积分/5,1) 之和：2+1+3+1+2。
+	if after.Children[0].Experience != experienceBefore+9 {
 		t.Fatalf("experience: %v -> %v", experienceBefore, after.Children[0].Experience)
 	}
 	family, _, err := s.resolvedFamily(context.Background())
@@ -171,13 +171,13 @@ func TestQuizScoresCreditDailyBestDeltasOncePerChildAndNeverDoublePay(t *testing
 	if err = s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(amount),0) FROM point_ledger WHERE family_id=? AND reference_type='game' AND reference_id LIKE 'timed_calc:%'`, family).Scan(&ledgerRows, &ledgerSum); err != nil {
 		t.Fatal(err)
 	}
-	if ledgerRows != 2 || ledgerSum != 15 {
+	if ledgerRows != 3 || ledgerSum != 35 {
 		t.Fatalf("calc ledger: %d %d", ledgerRows, ledgerSum)
 	}
 	if err = s.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(amount),0) FROM point_ledger WHERE family_id=? AND reference_type='game' AND reference_id LIKE 'pattern_quiz:%'`, family).Scan(&ledgerRows, &ledgerSum); err != nil {
 		t.Fatal(err)
 	}
-	if ledgerRows != 2 || ledgerSum != 10 {
+	if ledgerRows != 2 || ledgerSum != 17 {
 		t.Fatalf("pattern ledger: %d %d", ledgerRows, ledgerSum)
 	}
 
