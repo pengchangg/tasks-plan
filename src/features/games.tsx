@@ -37,8 +37,8 @@ export function GameTeaser({ store }: { store: ReturnType<typeof useAppStore> })
     <Link className="game-teaser" to="/child/games" aria-label="进入游戏">
       <span className="game-teaser-icon" aria-hidden="true">🧩</span>
       <div>
-        <strong>华容道</strong>
-        <span>已通关 {store.klotski.completed}/5</span>
+        <strong>小游戏</strong>
+        <span>已通关 {store.klotski.completed}/5 · 口算闯关 · 找规律</span>
       </div>
       <ChevronRight size={15} />
     </Link>
@@ -58,6 +58,7 @@ export function ChildGames({ store }: { store: ReturnType<typeof useAppStore> })
   return (
     <div className="content-wrap">
       <PageHeading title="小游戏" description="华容道每关只奖励第一次通关；口算和找规律只有打破今天的最好成绩才补积分。" />
+      <h3 className="game-group-title">华容道</h3>
       <div className="game-grid">
         {store.klotski.levels.map((level) => (
           <button
@@ -81,6 +82,9 @@ export function ChildGames({ store }: { store: ReturnType<typeof useAppStore> })
             </span>
           </button>
         ))}
+      </div>
+      <h3 className="game-group-title">答题闯关</h3>
+      <div className="game-grid">
         {quizCards(store).map((card) => (
           <button
             key={card.to}
