@@ -12,8 +12,7 @@
 
 产物是 debug 签名，手机允许未知来源直接侧载；要发 release 得配自己的 keystore。
 
-不进 Gitea Actions：`runs-on: deploy` 的 runner 连不上 `github.com`（`actions/checkout`
-的 `git clone` 直接 TLS EOF），任何带 `uses:` 的 workflow 都跑不起来，所以出包留在本地。
+只在本地出包：仓库没有 CI，而且本机连不上 `github.com`（`git clone` 直接 TLS EOF），`actions/checkout` 这类 action 根本跑不起来。
 
 ### 工具链
 

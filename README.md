@@ -1,7 +1,5 @@
 # GrowJoy 小小成长家
 
-[![部署状态](https://gitea.homelab.com/pengchang/task-plan/actions/workflows/deploy.yml/badge.svg?branch=main)](https://gitea.homelab.com/pengchang/task-plan/actions)
-
 面向家庭的成长任务与积分奖励 H5。家长发布任务、作业和愿望，孩子完成任务换取积分，积分再兑换愿望。一个 Go 二进制同源提供 JSON API、会话认证、受保护的上传文件和预构建的 React 前端，全部状态就是**一份 SQLite 文件 + 一个媒体目录**。
 
 ## 快速开始
@@ -68,7 +66,7 @@ dist/                        Vite 产物，由 Go 服务；构建后才有
 ```bash
 make precommit    # 快速门：go vet + go test -race + vitest + 构建（提交前钩子同此）
 make check        # 完整门：单元测试 + 两个 Playwright 门
-make deploy       # 构建 + 交叉编译 + rsync + 重启远端服务 + 健康校验
+make deploy       # 质量门 + 交叉编译 + rsync + 重启远端服务 + 健康校验
 ```
 
-推送到 `main` 后由 Gitea Actions 自动跑 `make precommit` 再执行 `make deploy`；两个 Playwright 门不进入 CI，按需手动跑。首次部署与反向代理配置见 [DEPLOY.md](DEPLOY.md)。
+没有 CI：推送不会部署。`make deploy` 会先跑 `make precommit`（检查不过就退出、不上传），再交叉编译、传输、重启并校验版本与首页入口；两个 Playwright 门不进部署流程，按需 `make check`。首次部署与反向代理配置见 [DEPLOY.md](DEPLOY.md)。

@@ -5,14 +5,14 @@ SHELL := /bin/bash
 DEV_LOG := data/dev-server.log
 DEV_BIN := data/growjoy-dev
 
-# 部署（make deploy）的目标：本机就是目标机（192.168.0.208），所以经 localhost 自 ssh，
-# 本机公钥需在 ~/.ssh/authorized_keys 里；DEPLOY_URL 必须指向 GROWJOY_ADDR 实际监听的地址。
-DEPLOY_HOST ?= localhost
+# 部署（make deploy）的目标机是 192.168.0.208（rockyLinux，用户 pengchang），构建机经 ssh 推送；
+# 构建机的公钥需在目标机 ~/.ssh/authorized_keys 里；DEPLOY_URL 必须指向 GROWJOY_ADDR 实际监听的地址。
+DEPLOY_HOST ?= 192.168.0.208
 DEPLOY_DIR ?= /home/pengchang/growjoy
 DEPLOY_URL ?= http://192.168.0.208:9080
 DEPLOY_UNIT ?= growjoy
 DEPLOY_STAGE ?= /tmp/growjoy-deploy
-# 交互式部署允许 ssh 自己问密码/口令；CI 里通过环境变量覆盖成 BatchMode。
+# 交互式部署允许 ssh 自己问密码/口令；无人值守（cron、脚本）时用 SSH_OPTS='-o BatchMode=yes'。
 SSH_OPTS ?= -o ConnectTimeout=10
 
 .PHONY: help install build dev server web run preview vet fmt test test-go test-web check check-flow check-ui precommit install-hooks deploy logs stop clean distclean
@@ -86,9 +86,7 @@ install-hooks: ## 安装提交前钩子（.githooks/pre-commit → make precommi
 	git config core.hooksPath .githooks
 	@echo "✔ 已启用 .githooks/pre-commit（提交前跑 make test build）"
 
-deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd64 + rsync + 重启用户服务 + 健康校验（校验失败自动回滚）
-	@command -v npm >/dev/null 2>&1 || { echo "✗ 未找到 npm：需要 Node.js 22.22.2+"; exit 1; }
-	@[ -d node_modules ] || { echo "✗ 依赖未安装，先运行: make install"; exit 1; }
+deploy: precommit ## 部署新版本到远程主机：质量门（make precommit）+ 交叉编译 linux/amd64 + rsync + 重启用户服务 + 健康校验（校验失败自动回滚）
 	@set -euo pipefail; \
 	STAGE=$$(mktemp -d "$(DEPLOY_STAGE).XXXXXX"); \
 	SWAPPED=0; \
@@ -100,8 +98,7 @@ deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd6
 	cleanup() { STATUS=$$?; rollback; rm -rf "$$STAGE"; exit $$STATUS; }; \
 	trap cleanup EXIT; \
 	VERSION=$$(git describe --always --dirty); \
-	echo "▶ 构建 SPA（dist/）与 linux/amd64 二进制（version=$${VERSION}）"; \
-	npm run build; \
+	echo "▶ 交叉编译 linux/amd64 二进制（version=$${VERSION}；SPA 已由 make precommit 构建到 dist/）"; \
 	[ -f dist/index.html ] || { echo "✗ dist/index.html 缺失：SPA 没有构建出来（spaHandler 对任何路径都回 index.html，缺了也不会 404）"; exit 1; }; \
 	ASSET=$$(grep -o 'assets/[^"]*\.js' dist/index.html | head -1); \
 	[ -n "$$ASSET" ] || { echo "✗ dist/index.html 里没有入口 JS 引用"; exit 1; }; \
@@ -134,7 +131,8 @@ deploy: ## 部署新版本到远程主机：构建 SPA + 交叉编译 linux/amd6
 	SERVED=$$(curl -sS --max-time 5 "$(DEPLOY_URL)/" | grep -o 'assets/[^"]*\.js' | head -1); \
 	if [ "$$SERVED" != "$$ASSET" ]; then echo "✗ 首页仍在引用 $${SERVED:-（无）}（期望 $$ASSET）：dist/ 可能没落盘或缓存未清"; exit 1; fi; \
 	ssh $(SSH_OPTS) $(DEPLOY_HOST) 'rm -rf $(DEPLOY_DIR)/bin/growjoy.prev $(DEPLOY_DIR)/dist.prev'; \
-	echo "✔ 已部署并复检通过：$(DEPLOY_URL) version=$${VERSION} asset=$$ASSET"
+	echo "✔ 已部署并复检通过：$(DEPLOY_URL) version=$${VERSION} asset=$$ASSET"; \
+	SWAPPED=0
 
 logs: ## 跟随后端开发日志
 	tail -f $(DEV_LOG)

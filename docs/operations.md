@@ -112,9 +112,9 @@ make deploy
 # 覆盖目标：DEPLOY_HOST / DEPLOY_DIR / DEPLOY_URL / DEPLOY_UNIT / DEPLOY_STAGE
 ```
 
-它本地构建 `dist/`、交叉编译 `linux/amd64`、rsync、重启 systemd 用户服务，最后校验 `/health/ready`、`/health/live` 的版本号以及首页引用的 JS 产物（入口文件从 `dist/index.html` 解析）。任一失败即非零退出；重启之后的校验失败会自动把目标机上的 `bin/growjoy.prev` 与 `dist.prev` 换回去并重启，远端 `data/` 始终不受影响。
+它先跑 `make precommit`（`go vet` + `go test -race` + `npm test` + 构建 `dist/`），再交叉编译 `linux/amd64`、rsync、重启 systemd 用户服务，最后校验 `/health/ready`、`/health/live` 的版本号以及首页引用的 JS 产物（入口文件从 `dist/index.html` 解析）。任一失败即非零退出、不上传；重启之后的校验失败会自动把目标机上的 `bin/growjoy.prev` 与 `dist.prev` 换回去并重启，远端 `data/` 始终不受影响。
 
-推送到 `main` 后 Gitea Actions 会自动执行同样的流程；两条路径不要同时跑（单副本机器上两次 rsync + restart 会混出新的前端和旧的二进制）。
+推送到 `main` 不会触发任何东西：没有 CI，部署只有这一条路径。`make deploy` 会先跑 `make precommit`（`go vet` + `go test -race` + `npm test` + 构建），检查不过就退出、不上传；同一时间只跑一个部署（单副本机器上两次 rsync + restart 会混出新的前端和旧的二进制），应急回滚可用 `make -o precommit deploy` 跳过质量门。
 
 ## 排错
 

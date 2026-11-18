@@ -147,58 +147,22 @@ INFO serving family code=HOME
 INFO GrowJoy listening addr=0.0.0.0:9080
 ```
 
-## 日常升级：自动部署（Gitea Actions）
+## 日常升级：本地部署
 
-推送到 `main` 分支会自动触发部署（`.gitea/workflows/deploy.yml`）：checkout → `npm ci` → **`make precommit`（`go vet` + `go test -race` + `npm test` + `npm run build`，检查不通过就不部署）** → 配置 SSH → `make deploy`（构建 SPA + 交叉编译 linux/amd64 → rsync 传输 → `systemctl --user restart` → 轮询 `/health/ready` → 校验 `/health/live` 的 `version` 与本次 `git describe` 一致 → 校验首页引用的正是本次构建的 `assets/index-*.js`）。也可以在 Gitea 网页上手动触发（Actions → Deploy → Run workflow），但**只接受 `main`**：其它 ref 会在第一步直接退非零。同一个 `concurrency` 组串行执行，不会两个 run 同时 rsync + restart。私钥写在 `$RUNNER_TEMP` 的临时文件里（导出为 `DEPLOY_KEY`、以 `-i` 传给 ssh），结束即删，绝不覆盖持久 runner 用户自己的 `~/.ssh/id_ed25519`。推送即上线，所以这里的 `make precommit` 是唯一的检查门——本地 `.githooks/pre-commit` 只有装过 `make install-hooks` 的机器才有。
+没有 CI：推送不会触发任何东西，部署只有一条路径——在构建机上跑 `make deploy`。它先跑 `make precommit`（`go vet` + `go test -race` + `npm test` + 构建，任何一项失败就退出、不上传），再交叉编译、传输、重启并自检。同一时间只跑一个（单副本机器上两次 rsync + restart 会混出新的 `dist/` 与旧的二进制）；应急回滚可用 `make -o precommit deploy` 跳过质量门。
 
-一次性前置：
-
-1. **跑一个 Gitea Runner**（`act_runner`），注册到 `gitea.homelab.com`，其标签必须包含 `deploy`（对应自建镜像 `localhost/gha-deploy:1`，见下「镜像与缓存」）。Runner 所在机器要能 `ssh` 到部署目标机。
-2. **在仓库 Settings → Actions 里配 Secrets / Variables**：
-
-|类型|名称|内容|
-|---|---|---|
-|Secret|`DEPLOY_SSH_KEY`|能免密登录目标机用户的 SSH 私钥（其公钥已在目标机 `~/.ssh/authorized_keys` 里，见「首次部署」）|
-|Variable|`DEPLOY_HOST`|部署目标主机，如 `192.168.0.208`（留空默认 `localhost`）|
-|Variable|`DEPLOY_DIR`|远端安装根目录（留空默认 `/home/pengchang/growjoy`）|
-|Variable|`DEPLOY_URL`|自检地址（留空默认 `http://192.168.0.208:9080`）|
-|Variable|`DEPLOY_UNIT`|systemd 用户单元名（留空默认 `growjoy`）|
-
-部署与 `make deploy` 一样**不**改远端 `data/`、不建家庭、不动 unit 文件。
-
-### 镜像与缓存
-
-`runs-on: deploy` 指向自建镜像 `localhost/gha-deploy:1`（debian13），已预装 Go、Node、`rsync`、`curl`、`openssh-client`，因此工作流里没有 `setup-go`/`setup-node`，也没有 apt 安装步骤。镜像不在仓库里维护，换机器或升级 Go/Node 时要自己重建并重新打标签，否则 job 会一直排队等不到匹配的 runner。
-
-仓库内开了三层编译缓存（`.gitea/workflows/deploy.yml`）：
-
-|缓存|路径|key|
-|---|---|---|
-|Go 模块 + 编译产物|`~/go/pkg/mod`、`~/.cache/go-build`|`go.sum`|
-|Node 依赖 + tsc 增量信息|`node_modules`、`*.tsbuildinfo`|`package-lock.json`|
-|npm tarball|`~/.npm`|`package-lock.json`|
-
-`node_modules` 命中时直接跳过 `npm ci`（key 精确匹配 lockfile）；未命中则 `npm ci --prefer-offline`，由 tarball 缓存避免走网络。`*.tsbuildinfo` 让 `tsc -b` 只重查改动的文件（内容哈希失效，代码变了不会误跳）。首次运行仍是冷的，且 `actions/cache` 不可用时只告警不阻断部署。
-
-Runner 侧还有三处开关（需在 runner 主机改它的 `config.yaml` 并重启，仓库改不到）：
-
-|配置|作用|
-|---|---|
-|`cache.offline_mode: true`|`uses:` 的 action 仓库不再每个 job 重新拉取。GitHub 访问慢或被限时，这一步往往是最耗时的|
-|`cache.dir:`|缓存落盘位置（默认 `$HOME/.cache/actcache`）。指到有余量的盘；docker 模式下 `actions/cache` 报 `connect ETIMEDOUT` 时另配 `cache.host`/`cache.port` 并发布该端口|
-
-### 手动部署：`make deploy`
+### `make deploy` 做了什么
 
 ```bash
 make deploy
 ```
 
-它按顺序做：`npm run build` → 确认 `dist/index.html` 存在并记下本次的 `assets/index-*.js` 文件名 → `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(git describe --always --dirty)"` 到一次性的 `DEPLOY_STAGE.XXXXXX`（`mktemp -d`，退出即删）→ 校验产物是 `x86-64` ELF → `ssh -o ConnectTimeout=10 mkdir -p` → `rsync -a --delete` 覆盖 `dist/` → `rsync` 二进制 → `chmod +x` → `systemctl --user restart $(DEPLOY_UNIT)` → 轮询 `/health/ready`（最多 30 秒）→ 断言 `/health/live` 的 `version` 等于本地 `git describe` → 断言首页引用的 JS 就是本次构建的那个文件，任何一条不一致即退非零。传输之前它会在目标机把现有的 `bin/growjoy` 与 `dist/` 备份成 `*.prev`；重启后这几条校验只要有一条失败，`trap` 会把两个 `.prev` 换回去并重启服务再退出，所以一次坏的发布不会把线上留在半新半旧的状态。最后那条是必需的：同一个 commit 重复部署时 `version` 字符串一模一样，光看它分不清新进程与旧进程。CI 里通过 `SSH_OPTS` 追加 `-o BatchMode=yes`（没人能回答密码提示），交互式 `make deploy` 用默认的 `-o ConnectTimeout=10`。
+它按顺序做：`make precommit`（`go vet` + `go test -race` + `npm test` + 构建 `dist/`，任一失败即退出、不上传）→ 确认 `dist/index.html` 存在并记下本次的 `assets/index-*.js` 文件名 → `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=$(git describe --always --dirty)"` 到一次性的 `DEPLOY_STAGE.XXXXXX`（`mktemp -d`，退出即删）→ 校验产物是 `x86-64` ELF → `ssh -o ConnectTimeout=10 mkdir -p` → `rsync -a --delete` 覆盖 `dist/` → `rsync` 二进制 → `chmod +x` → `systemctl --user restart $(DEPLOY_UNIT)` → 轮询 `/health/ready`（最多 30 秒）→ 断言 `/health/live` 的 `version` 等于本地 `git describe` → 断言首页引用的 JS 就是本次构建的那个文件，任何一条不一致即退非零。传输之前它会在目标机把现有的 `bin/growjoy` 与 `dist/` 备份成 `*.prev`；重启后这几条校验只要有一条失败，`trap` 会把两个 `.prev` 换回去并重启服务再退出，所以一次坏的发布不会把线上留在半新半旧的状态。最后一个 `version` 校验是必需的：同一个 commit 重复部署时 `version` 字符串一模一样，光看它分不清新进程与旧进程。非交互场景（cron、脚本）用 `SSH_OPTS='-o BatchMode=yes'`，交互式 `make deploy` 用默认的 `-o ConnectTimeout=10`。
 
 成功输出形如：
 
 ```
-▶ 构建 SPA（dist/）与 linux/amd64 二进制（version=1c123d0）
+▶ 交叉编译 linux/amd64 二进制（version=1c123d0；SPA 已由 make precommit 构建到 dist/）
 ▶ 传输 dist/ 与二进制到 localhost:/home/pengchang/growjoy
 ▶ 等待 http://192.168.0.208:9080/health/ready
 {"status":"ok","version":"1c123d0"}
@@ -209,7 +173,7 @@ make deploy
 
 |变量|默认值|说明|
 |---|---|---|
-|`DEPLOY_HOST`|`localhost`|需免密 ssh 的目标；本机自部署即 `localhost`，换成别的机器写 `user@host`|
+|`DEPLOY_HOST`|`192.168.0.208`|需免密 ssh 的目标机；构建机（`dev`，192.168.0.211）与目标机是两台机器，换机器时写 `user@host`|
 |`DEPLOY_DIR`|`/home/pengchang/growjoy`|远端安装根目录|
 |`DEPLOY_URL`|`http://192.168.0.208:9080`|必须是 `GROWJOY_ADDR` 实际监听的地址，用来自检|
 |`DEPLOY_UNIT`|`growjoy`|systemd 用户单元名|
@@ -554,6 +518,7 @@ ssh localhost 'systemctl --user start growjoy'
 |症状|原因与处理|
 |---|---|
 |`exec format error`，或启动即退出|产物架构不匹配。本机重新构建并改正 `GOARCH`；或在目标机上用它的 Go 直接 `CGO_ENABLED=0 go build -o ~/growjoy/bin/growjoy ./cmd/growjoy`（需要源码，前端仍可用本地 `dist/`）|
+|`make deploy` 报 `rsync: 未找到命令` / `Failed to restart growjoy.service: Unit growjoy.service not found`|构建机缺 `rsync`（`sudo apt-get install -y rsync`）；后一条说明 `DEPLOY_HOST` 指错了机器——目标机是 `192.168.0.208` 上的 systemd **用户**单元，`localhost` 上没有它|
 |`journalctl` 出现 `address already in use`|端口被占。改 unit 里的 `GROWJOY_ADDR` **和** `DEPLOY_URL`（先用 `ss -ltn "sport = :<port>"` 确认为空），再 `daemon-reload` + `restart`|
 |`/health/ready` 一直 503，日志无异常|两类原因：数据库打不开（路径/权限），或家庭时区加载不了（`/usr/share/zoneinfo` 缺该时区）。响应体只有 `unavailable`，细节在启动日志里|
 |每个请求都像被登出、反复跳孩子端|`GROWJOY_SECURE_COOKIES=true` 但走的是明文 HTTP。改回 `false`|

@@ -53,7 +53,7 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 | `make precommit` | 提交前快速门：`test` + `build`（等价于 `go vet` + `go test -race` + `npm test` + `npm run build`） |
 | `make check` | 完整门：`test` + 两个 Playwright 门 |
 | `make install-hooks` | 启用 `.githooks/pre-commit`（跑 `make precommit`） |
-| `make deploy` | 构建、交叉编译、rsync、重启远端服务并校验健康与版本，见 [DEPLOY.md](../DEPLOY.md) |
+| `make deploy` | 先跑 `make precommit`（质量门），再交叉编译、rsync、重启远端服务并校验健康与版本，见 [DEPLOY.md](../DEPLOY.md) |
 | `make stop` | 杀掉占用 `:8080` 的残留进程 |
 | `make clean` / `make distclean` | 清理构建产物 / 连 `data/` 一起重置（后者会二次确认） |
 
@@ -106,11 +106,11 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 - `check:ui` 在 375/390/1440 三种视口下遍历路由，检查横向溢出、文本长度与截图；**没有**控制台错误白名单。
 - 两个脚本硬编码演示数据、中文可访问名与 CSS 类名。改界面文案、类名或演示数据时必须同步改脚本。
 
-## 提交与 CI
+## 提交与发布
 
-- 本地钩子：`make install-hooks` 后每次提交跑 `make precommit`。钩子只存在于装过的机器上，不能当流水线。
-- 推送到 `main` 后，Gitea Actions 先跑 `make precommit`，再 `make deploy`。CI 只部署 `main`，并且用 `concurrency` 串行化（单副本机器上两次 rsync + restart 会混出新的 `dist/` 与旧的二进制）。
-- 两个 Playwright 门不进 CI，发布前手动跑 `make check`。
+- 本地钩子：`make install-hooks` 后每次提交跑 `make precommit`。钩子只存在于装过的机器上。
+- 没有 CI：推送不会部署。发布就是在构建机上跑 `make deploy`，它先跑 `make precommit`（检查不过就退出、不上传），再交叉编译、rsync、重启并自检；同一时间只跑一个（单副本机器上两次 rsync + restart 会混出新的 `dist/` 与旧的二进制）。
+- 两个 Playwright 门不进部署流程，发布前按需手动跑 `make check`。
 
 ## 常见坑
 
