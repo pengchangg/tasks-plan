@@ -9,7 +9,11 @@ export interface TaskSubmission { id: string; taskId: string; childId: string; n
 export interface Wish { id: string; title: string; description: string; pointsCost: number; icon: string; color: string; isActive: boolean }
 export interface PointLedger { id: string; childId: string; amount: number; type: 'earned' | 'spent'; referenceType: 'task' | 'redemption' | 'manual' | 'homework' | 'homework_bonus' | 'game'; referenceId: string; description: string; createdAt: string }
 export interface Redemption { id: string; wishId: string; wishTitle: string; wishIcon: string; wishColor: string; childId: string; pointsCost: number; completedAt?: string; completedNote?: string; attachments: Attachment[]; createdAt: string }
-export interface AppState { timezone: string; role: Role; activeChildId: string; children: Child[]; tasks: Task[]; submissions: TaskSubmission[]; wishes: Wish[]; ledger: PointLedger[]; redemptions: Redemption[]; holidays: HolidaySpan[]; makeupWorkdays: string[] }
+export interface AppState { timezone: string; role: Role; activeChildId: string; children: Child[]; tasks: Task[]; submissions: TaskSubmission[]; wishes: Wish[]; ledger: PointLedger[]; redemptions: Redemption[]; holidays: HolidaySpan[]; makeupWorkdays: string[]; gameCosts: GameCosts }
+
+// 家长端设的游戏扣分：每次游玩、每次提示各扣多少积分，0 = 免费。它也是
+// PUT /api/v1/games/costs 的请求体（字段与 Go 的 GameCosts 一一对应）。
+export interface GameCosts { playCost: number; hintCost: number }
 
 // /state 下发的官方放假区间与调休上班日（日历打标用，周末由客户端按星期算）。
 export interface HolidaySpan { name: string; start: string; end: string }

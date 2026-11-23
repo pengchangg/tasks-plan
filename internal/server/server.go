@@ -147,6 +147,8 @@ type State struct {
 	// 日历打标只需要官方的放假区间与调休上班日；周末由客户端按星期自己算。
 	Holidays       []HolidaySpan `json:"holidays"`
 	MakeupWorkdays []string      `json:"makeupWorkdays"`
+	// 家长端设的游戏扣分：每次游玩/每次提示各扣多少，0 = 免费。
+	GameCosts GameCosts `json:"gameCosts"`
 }
 
 func Open(cfg Config, logger *slog.Logger) (*Server, error) {
@@ -416,6 +418,9 @@ func (s *Server) Handler() http.Handler {
 				hw.Post("/{id}/done", s.setHomeworkDone)
 			})
 			a.Route("/games", func(g chi.Router) {
+				g.Put("/costs", s.parentOnly(s.saveGameCosts))
+				g.Post("/play", s.chargePlay)
+				g.Post("/hint", s.chargeHint)
 				g.Get("/klotski", s.getKlotski)
 				g.Post("/klotski/{level}/complete", s.completeKlotski)
 				g.Get("/quizzes", s.getQuizzes)
@@ -896,7 +901,6 @@ func (s *Server) familyLocation(ctx context.Context, family string) (*time.Locat
 	}
 	return loc, nil
 }
-
 
 type childInput struct {
 	Name   string `json:"name"`

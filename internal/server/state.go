@@ -159,6 +159,9 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 	out.Timezone = loc.String()
 	out.Holidays = holidaySpans()
 	out.MakeupWorkdays = append([]string{}, makeupWorkdays...)
+	if out.GameCosts.PlayCost, out.GameCosts.HintCost, err = s.gameCostValues(ctx, x.FamilyID); err != nil {
+		return out, err
+	}
 	streaks, err := s.streaks(ctx, x.FamilyID, loc)
 	if err != nil {
 		return out, err

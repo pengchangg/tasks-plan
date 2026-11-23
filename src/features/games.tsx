@@ -57,7 +57,10 @@ export function ChildGames({ store }: { store: ReturnType<typeof useAppStore> })
     );
   return (
     <div className="content-wrap">
-      <PageHeading title="小游戏" description="华容道每关只奖励第一次通关；口算和找规律每局按本局答对数给积分，不用破纪录。" />
+      <PageHeading
+        title="小游戏"
+        description={`华容道每关只奖励第一次通关；口算和找规律每局按本局答对数给积分，不用破纪录。${store.state.gameCosts.playCost > 0 ? ` 开局扣 ${store.state.gameCosts.playCost} 积分${store.state.gameCosts.hintCost > 0 ? `、提示扣 ${store.state.gameCosts.hintCost} 积分` : ""}，积分可以用任务和作业赚回来。` : ""}`}
+      />
       <h3 className="game-group-title">华容道</h3>
       <div className="game-grid">
         {store.klotski.levels.map((level) => (
@@ -174,7 +177,15 @@ function KlotskiBoard({
   const navigate = useNavigate();
   // 挂载时读一次存档：服务端回带的 JSON 校验过形状才用，否则从这一关的初始盘面开始。
   const saveKey = `klotski:${level.level}`;
+  const { playCost, hintCost } = store.state.gameCosts;
+  const balance = store.activeChild.pointsBalance;
   const [initial] = useState(() => readKlotskiSave(store.gameSaves[saveKey]));
+  // 要收门票时先停在门口：只有「继续上次」或免费局才直接进棋盘。
+  const [started, setStarted] = useState(initial !== null || playCost === 0);
+  // 扣款在飞时禁掉按钮：每次点击都是一次新请求加一个新幂等键，连点就会扣两次。
+  // 用 ref 而不是 state 判重，因为同一帧里的第二次点击读不到刚设的 state。
+  const [paying, setPaying] = useState(false);
+  const payingRef = useRef(false);
   const [rows, setRows] = useState<string[]>(initial?.rows ?? level.rows);
   const [steps, setSteps] = useState(initial?.steps ?? 0);
   const [history, setHistory] = useState<string[][]>(initial?.history ?? []);
@@ -279,6 +290,41 @@ function KlotskiBoard({
     setHint(solveFrom(rows));
     setShowSteps(false);
   };
+  // 一次扣款在飞时挡掉其余点击：连点会各带一个新幂等键，那就各扣一次。付费成功
+  // 才执行 next（开局/重开/现算提示）；失败时 store 自己出错误横幅，这里停住不动。
+  const withCharge = (
+    cost: number,
+    charge: () => Promise<number | undefined>,
+    next?: () => void,
+  ) => {
+    if (cost === 0) {
+      next?.();
+      return;
+    }
+    if (payingRef.current) return;
+    payingRef.current = true;
+    setPaying(true);
+    void charge()
+      .then((result) => {
+        if (result !== undefined) next?.();
+      })
+      .finally(() => {
+        payingRef.current = false;
+        setPaying(false);
+      });
+  };
+  const payThen = (next: () => void) =>
+    withCharge(playCost, () => store.actions.chargePlay(saveKey), next);
+  // 提示一次购买包含「下一步」与「看完整走法」整段提示。
+  const payHint = () =>
+    withCharge(hintCost, () => store.actions.chargeHint(saveKey), askHint);
+  const hintLabel = level.completed
+    ? "提示"
+    : balance < hintCost
+      ? "提示（积分不足）"
+      : hintCost > 0
+        ? `提示（−${hintCost} 积分）`
+        : "提示";
 
   const { pieces } = parseRows(rows);
   const selectedPiece = pieces.find((piece) => piece.char === selected);
@@ -305,6 +351,34 @@ function KlotskiBoard({
       }
     }
   }
+
+  if (!started)
+    return (
+      <div className="content-wrap">
+        <p className="klotski-back">
+          <Link to="/child/games">
+            <ChevronLeft size={14} /> 返回关卡列表
+          </Link>
+        </p>
+        <PageHeading
+          title={`第${level.level}关 · ${level.name}`}
+          description="点一块棋子，再点亮起的空位就能滑动。曹操走进底部出口就通关。"
+        />
+        <div className="klotski-start">
+          <strong>本关开始扣 {playCost} 积分</strong>
+          <span>当前有 {balance} 分。已有断点存档的可以直接继续，不扣分。</span>
+          <button
+            className="wide-primary"
+            disabled={paying || balance < playCost}
+            onClick={() => payThen(() => setStarted(true))}
+          >
+            {balance < playCost
+              ? `积分不足，还差 ${playCost - balance} 分`
+              : `开始本关（−${playCost} 积分）`}
+          </button>
+        </div>
+      </div>
+    );
 
   return (
     <div className="content-wrap">
@@ -377,8 +451,12 @@ function KlotskiBoard({
         <button className="outline-button" onClick={undo} disabled={history.length === 0}>
           撤销
         </button>
-        <button className="outline-button" onClick={askHint} disabled={level.completed}>
-          提示
+        <button
+          className="outline-button"
+          onClick={payHint}
+          disabled={level.completed || paying || balance < hintCost}
+        >
+          {hintLabel}
         </button>
         <span className="klotski-steps">
           第 {steps} 步 / 最少 {level.minMoves} 步
@@ -427,12 +505,12 @@ function KlotskiBoard({
       {restarting && (
         <ConfirmModal
           title="重新开始本关"
-          text={`当前第 ${steps} 步的盘面会清空，回到这一关的初始盘面。`}
-          confirm="重新开始"
+          text={`当前第 ${steps} 步的盘面会清空，回到这一关的初始盘面。${playCost > 0 ? `本局会再扣 ${playCost} 积分。` : ""}`}
+          confirm={playCost > 0 ? `扣 ${playCost} 分重开` : "重新开始"}
           onClose={() => setRestarting(false)}
           onConfirm={() => {
             setRestarting(false);
-            replay();
+            payThen(replay);
           }}
         />
       )}
@@ -440,7 +518,8 @@ function KlotskiBoard({
         <WinModal
           level={level}
           steps={steps}
-          onReplay={replay}
+          playCost={playCost}
+          onReplay={() => payThen(replay)}
           onNavigate={navigate}
         />
       )}
@@ -452,11 +531,13 @@ function KlotskiBoard({
 function WinModal({
   level,
   steps,
+  playCost,
   onReplay,
   onNavigate,
 }: {
   level: KlotskiLevel;
   steps: number;
+  playCost: number;
   onReplay: () => void;
   onNavigate: (to: string) => void;
 }) {
@@ -469,7 +550,7 @@ function WinModal({
         <p>「{level.name}」用了 {steps} 步，奖励 30 积分已经到账。</p>
         <div className="modal-actions">
           <button className="secondary-button" onClick={onReplay}>
-            再玩一次
+            {playCost > 0 ? `再玩一次（−${playCost} 积分）` : "再玩一次"}
           </button>
           {level.level < 5 ? (
             <button
@@ -490,9 +571,64 @@ function WinModal({
 }
 
 export function ParentGames({ store }: { store: ReturnType<typeof useAppStore> }) {
+  const { playCost, hintCost } = store.state.gameCosts;
+  const [playDraft, setPlayDraft] = useState(String(playCost));
+  const [hintDraft, setHintDraft] = useState(String(hintCost));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  // 服务端价格变了（另一台设备改过）就跟着它走：草稿只在编辑期间存在。
+  useEffect(() => {
+    setPlayDraft(String(playCost));
+    setHintDraft(String(hintCost));
+  }, [playCost, hintCost]);
+  const saveCosts = () => {
+    const play = /^\d+$/.test(playDraft.trim()) ? Number(playDraft) : NaN;
+    const hint = /^\d+$/.test(hintDraft.trim()) ? Number(hintDraft) : NaN;
+    if (!(play >= 0 && play <= 500 && hint >= 0 && hint <= 500)) {
+      setError("请输入 0-500 之间的整数");
+      return;
+    }
+    setError("");
+    setSaving(true);
+    void store.actions.saveGameCosts(play, hint).finally(() => setSaving(false));
+  };
   return (
     <div className="parent-content">
       <ParentHeader title="游戏进度" />
+      <div className="game-cost-form">
+        <h3>游戏扣分</h3>
+        <div className="game-cost-fields">
+          <label>
+            每次游玩扣积分
+            <input
+              type="number"
+              min={0}
+              max={500}
+              step={1}
+              value={playDraft}
+              onChange={(event) => setPlayDraft(event.target.value)}
+            />
+          </label>
+          <label>
+            每次提示扣积分
+            <input
+              type="number"
+              min={0}
+              max={500}
+              step={1}
+              value={hintDraft}
+              onChange={(event) => setHintDraft(event.target.value)}
+            />
+          </label>
+          <button className="primary-button" onClick={saveCosts} disabled={saving}>
+            保存扣分设置
+          </button>
+        </div>
+        {error && <p className="form-error">{error}</p>}
+        <p className="game-cost-note">
+          0 表示免费。每次开新局、重新开始一关、点一次提示都会记一条积分明细。
+        </p>
+      </div>
       <p className="game-note">华容道每第一次通关一关自动记 30 积分；口算闯关答对 1 题记 1 分、找规律答对 1 题记 10 分，每局都按本局得分入账——下面是 {store.activeChild.name} 的进度。</p>
       {store.klotski.levels.length === 0 ? (
         <EmptyState icon="🧩" title="还没有进度" text="孩子通关第一关后，这里就会出现记录。" compact />

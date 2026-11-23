@@ -40,7 +40,7 @@ const messages: Record<string, string> = {
   idempotency_required: "请求缺少幂等键，请刷新后重试",
   too_many_requests: "尝试太频繁了，请稍后再试",
   forbidden: "这个操作需要家长密码",
-  insufficient_points: "积分不足，无法兑换",
+  insufficient_points: "积分不足",
   insufficient_balance: "孩子当前积分不足，无法扣除",
   wish_unavailable: "这个愿望暂时无法兑换",
   invalid_request: "提交的内容不合法，请检查后重试",
@@ -308,6 +308,24 @@ export function useAppStore() {
     },
     [refresh],
   );
+
+  // 游戏扣分：开新局、重新开始一关、点一次提示各扣一次（「继续上次」免费）。
+  // 价格由家长端设、服务端按库里的数扣，这里返回它算出的 cost——前端标价只是
+  // 展示，家长中途改价时以服务端为准。提示语在操作内设，否则会被 run 的通用
+  // 空文案盖掉（理由同 saveHomework）。
+  const chargeGame = (
+    kind: "play" | "hint",
+    game: string,
+  ): Promise<number | undefined> =>
+    run(async () => {
+      const response = await request(
+        `/games/${kind}`,
+        json("POST", { game }, true),
+      );
+      const { cost = 0 } = (await response.json()) as { cost?: number };
+      if (cost > 0) setOkMessage(`已扣 ${cost} 积分`);
+      return cost;
+    });
 
   const activeChild =
     state.children.find((child) => child.id === state.activeChildId) ??
@@ -646,6 +664,15 @@ export function useAppStore() {
         }
       })();
     },
+    chargePlay: (game: string) => chargeGame("play", game),
+    chargeHint: (game: string) => chargeGame("hint", game),
+    // 家长端定价：两个数字一起写，0 表示该项免费。
+    saveGameCosts: (playCost: number, hintCost: number): Promise<boolean> =>
+      run(async () => {
+        await request("/games/costs", json("PUT", { playCost, hintCost }));
+        setOkMessage("扣分设置已保存");
+        return true;
+      }).then((result) => result === true),
     // 华容道通关上报：服务端首通记 30 分（重放只刷纪录），返回 awarded 让游戏页
     // 显示 +N 胶囊；到账本身走 /state 刷新，由奖励横幅队列负责庆祝。
     completeKlotskiLevel: (level: number, moves: number): Promise<number | undefined> =>

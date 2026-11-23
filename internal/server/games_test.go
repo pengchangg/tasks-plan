@@ -361,3 +361,146 @@ func TestGameSaveSlotsArePerChildOpaqueAndReplaceable(t *testing.T) {
 		t.Fatalf("after delete: %d", len(list))
 	}
 }
+
+// TestGameCostsAreParentOnlyChargedOnceAndRefuseToOverdraw locks the game
+// billing rules: the two prices default to free and only the parent can set them
+// (0…500), every new round/hint charges exactly once per Idempotency-Key and
+// writes one spent ledger row, a repeat with the same key replays instead of
+// charging twice, and an empty wallet answers 409 without going negative (or
+// leaving a claim behind).
+func TestGameCostsAreParentOnlyChargedOnceAndRefuseToOverdraw(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	cookie := childCookie(t, h, "")
+	state := getStateTest(t, h, cookie)
+	childID := state.Children[0].ID
+	family, _, err := s.resolvedFamily(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spent := func() int {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM point_ledger WHERE family_id=? AND entry_type='spent'`, family).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	balance := func() int {
+		var n int
+		if err := s.db.QueryRow(`SELECT points_balance FROM children WHERE id=?`, childID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	charge := func(path, game string, key string) *httptest.ResponseRecorder {
+		return doJSON(t, h, "POST", "/api/v1/games/"+path, map[string]string{"game": game}, cookie, key)
+	}
+
+	// 默认免费：不写台账、不动余额。
+	if state.GameCosts.PlayCost != 0 || state.GameCosts.HintCost != 0 {
+		t.Fatalf("fresh costs: %+v", state.GameCosts)
+	}
+	before := balance()
+	if w := charge("play", "timed_calc", "free-play"); w.Code != 200 || !strings.Contains(w.Body.String(), `"cost":0`) {
+		t.Fatalf("free play: %d %s", w.Code, w.Body.String())
+	}
+	if balance() != before || spent() != 0 {
+		t.Fatalf("free play moved money: %d %d", balance(), spent())
+	}
+
+	// 只有家长能定价，范围 0…500。
+	parent := parentCookie(t, h)
+	if w := doJSON(t, h, "PUT", "/api/v1/games/costs", map[string]int{"playCost": 5, "hintCost": 2}, parent, ""); w.Code != 200 {
+		t.Fatalf("save costs: %d %s", w.Code, w.Body.String())
+	}
+	if got := getStateTest(t, h, cookie).GameCosts; got.PlayCost != 5 || got.HintCost != 2 {
+		t.Fatalf("state costs: %+v", got)
+	}
+	if w := doJSON(t, h, "PUT", "/api/v1/games/costs", map[string]int{"playCost": 5, "hintCost": 2}, cookie, ""); w.Code != 403 {
+		t.Fatalf("child set costs: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "PUT", "/api/v1/games/costs", map[string]int{"playCost": -1, "hintCost": 2}, parent, ""); w.Code != 400 {
+		t.Fatalf("negative cost: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "PUT", "/api/v1/games/costs", map[string]int{"playCost": 5, "hintCost": 501}, parent, ""); w.Code != 400 {
+		t.Fatalf("oversized cost: %d %s", w.Code, w.Body.String())
+	}
+
+	// 一次游玩扣一次，同键重发只回放、不再扣。
+	if w := charge("play", "timed_calc", "round-1"); w.Code != 200 || !strings.Contains(w.Body.String(), `"cost":5`) {
+		t.Fatalf("play charge: %d %s", w.Code, w.Body.String())
+	}
+	if balance() != before-5 || spent() != 1 {
+		t.Fatalf("play charge: %d %d", balance(), spent())
+	}
+	var reference string
+	if err := s.db.QueryRow(`SELECT reference_type||':'||entry_type FROM point_ledger WHERE family_id=? AND entry_type='spent'`, family).Scan(&reference); err != nil {
+		t.Fatal(err)
+	}
+	if reference != "game:spent" {
+		t.Fatalf("ledger row: %s", reference)
+	}
+	if w := charge("play", "timed_calc", "round-1"); w.Code != 200 || !strings.Contains(w.Body.String(), `"replayed":true`) {
+		t.Fatalf("play replay: %d %s", w.Code, w.Body.String())
+	}
+	if balance() != before-5 || spent() != 1 {
+		t.Fatalf("replay charged twice: %d %d", balance(), spent())
+	}
+
+	// 提示只对华容道有价；槽名必须在存档白名单里；必须带幂等键。
+	if w := charge("hint", "klotski:2", "hint-1"); w.Code != 200 || !strings.Contains(w.Body.String(), `"cost":2`) {
+		t.Fatalf("hint charge: %d %s", w.Code, w.Body.String())
+	}
+	if balance() != before-7 || spent() != 2 {
+		t.Fatalf("hint charge: %d %d", balance(), spent())
+	}
+	if w := charge("hint", "timed_calc", "hint-2"); w.Code != 404 {
+		t.Fatalf("quiz hint: %d %s", w.Code, w.Body.String())
+	}
+	if w := charge("play", "klotski:9", "round-2"); w.Code != 404 {
+		t.Fatalf("unknown slot: %d %s", w.Code, w.Body.String())
+	}
+	if w := charge("play", "timed_calc", ""); w.Code != 400 || !strings.Contains(w.Body.String(), "idempotency_required") {
+		t.Fatalf("missing key: %d %s", w.Code, w.Body.String())
+	}
+
+	// 没有余额就不能开局：409、余额不为负、台账不多、幂等占位随回滚消失。
+	if _, err := s.db.Exec(`UPDATE children SET points_balance=0 WHERE id=?`, childID); err != nil {
+		t.Fatal(err)
+	}
+	if w := charge("play", "timed_calc", "round-poor"); w.Code != 409 || !strings.Contains(w.Body.String(), "insufficient_points") {
+		t.Fatalf("overdraw: %d %s", w.Code, w.Body.String())
+	}
+	if balance() != 0 || spent() != 2 {
+		t.Fatalf("overdraw wrote: %d %d", balance(), spent())
+	}
+	if _, err := s.db.Exec(`UPDATE children SET points_balance=5 WHERE id=?`, childID); err != nil {
+		t.Fatal(err)
+	}
+	if w := charge("play", "timed_calc", "round-poor"); w.Code != 200 {
+		t.Fatalf("retry after topping up: %d %s", w.Code, w.Body.String())
+	}
+
+	// 没选孩子时不能扣（家长端未选档案也会走到这里）。
+	unselected := sessionFor(t, s, family, "child", childID, "")
+	if w := doJSON(t, h, "POST", "/api/v1/games/play", map[string]string{"game": "timed_calc"}, unselected, "round-unselected"); w.Code != 400 {
+		t.Fatalf("unselected charge: %d %s", w.Code, w.Body.String())
+	}
+
+	// 另一个家庭有自己的一套价格与钱包：默认免费，本家的账不受影响。
+	other := otherFamily(t, s, "OTHER", "Asia/Shanghai")
+	if _, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES('child-other-costs',?,'Other child','⭐','#ffb547',1,0,50,?)`, other, nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	foreign := sessionFor(t, s, other, "child", "child-other-costs", "child-other-costs")
+	if w := doJSON(t, h, "POST", "/api/v1/games/play", map[string]string{"game": "timed_calc"}, foreign, "round-foreign"); w.Code != 200 {
+		t.Fatalf("foreign charge: %d %s", w.Code, w.Body.String())
+	}
+	var foreignBalance int
+	if err := s.db.QueryRow(`SELECT points_balance FROM children WHERE id='child-other-costs'`).Scan(&foreignBalance); err != nil {
+		t.Fatal(err)
+	}
+	if foreignBalance != 50 || balance() != 0 || spent() != 3 {
+		t.Fatalf("foreign charge leaked: %d %d %d", foreignBalance, balance(), spent())
+	}
+}

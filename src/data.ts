@@ -9,6 +9,7 @@ export const seedState: AppState = {
   // 演示数据不起日历标，真实假期表由服务端 /state 下发。
   holidays: [],
   makeupWorkdays: [],
+  gameCosts: { playCost: 0, hintCost: 0 },
   role: "child",
   activeChildId: "mia",
   children: [

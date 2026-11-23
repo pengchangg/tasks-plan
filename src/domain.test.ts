@@ -14,6 +14,7 @@ function dayState(): AppState {
     timezone: "Asia/Shanghai",
     holidays: [],
     makeupWorkdays: [],
+    gameCosts: { playCost: 0, hintCost: 0 },
     role: "child",
     activeChildId: "mia",
     children: [

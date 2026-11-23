@@ -1986,6 +1986,113 @@ for (const title of batchTitles) {
 await batchPage.locator(".nav-badge").first().waitFor({ state: "detached" });
 await batchPage.close();
 
+// ── 游戏扣分：家长设两个价，孩子开新局/点提示各扣一次，续玩免费，积分不够就开不了。
+const wallet = (state) =>
+  state.children.find((child) => child.id === state.activeChildId).pointsBalance;
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "游戏进度" }).click();
+await page.waitForURL(/\/parent\/games$/);
+// 默认 0 = 免费，存量家庭升级后不会被莫名扣分，所以这里先确认起点是 0。
+assert.equal(await page.getByLabel("每次游玩扣积分").inputValue(), "0");
+assert.equal(await page.getByLabel("每次提示扣积分").inputValue(), "0");
+await page.getByLabel("每次游玩扣积分").fill("5");
+await page.getByLabel("每次提示扣积分").fill("2");
+const costsSaved = page.waitForResponse(
+  (response) =>
+    response.request().method() === "PUT" &&
+    response.url().endsWith("/api/v1/games/costs"),
+);
+await page.getByRole("button", { name: "保存扣分设置" }).click();
+assert.equal((await costsSaved).status(), 200, "保存扣分设置没有成功");
+await page.getByRole("status").filter({ hasText: "扣分设置已保存" }).waitFor();
+await waitForState((state) => state.gameCosts.playCost === 5 && state.gameCosts.hintCost === 2);
+
+// 第 3 关还没通关（提示按钮可用），也没有断点存档，所以进棋盘前先停在收费门口。
+await enterChild();
+const costBalance = wallet(await getState());
+await page.goto(`${baseUrl}/child/games/klotski?level=3`);
+await page.locator(".klotski-start").waitFor();
+assert.ok(
+  (await page.locator(".klotski-start").innerText()).includes("本关开始扣 5 积分"),
+  "收费局的门口没写清楚要扣多少",
+);
+const paidPlay = page.waitForResponse((response) =>
+  response.url().endsWith("/api/v1/games/play"),
+);
+await page.getByRole("button", { name: /开始本关/ }).click();
+assert.equal((await paidPlay).status(), 200, "开始本关没有扣款成功");
+await page.locator(".klotski-piece").first().waitFor();
+await page.getByRole("status").filter({ hasText: "已扣 5 积分" }).waitFor();
+await waitForState((state) => wallet(state) === costBalance - 5);
+const paidHint = page.waitForResponse((response) =>
+  response.url().endsWith("/api/v1/games/hint"),
+);
+await page.getByRole("button", { name: "提示（−2 积分）" }).click();
+assert.equal((await paidHint).status(), 200, "提示没有扣款成功");
+await page.locator(".klotski-hint").waitFor();
+const charged = await waitForState((state) => wallet(state) === costBalance - 7);
+// 两笔都落在孩子自己的积分明细里（家长端「消费积分」也读同一批 spent 行）。
+assert.deepEqual(
+  charged.ledger
+    .filter((row) => row.childId === charged.activeChildId && row.referenceId.startsWith("klotski:3:"))
+    .map((row) => `${row.amount} ${row.description}`)
+    .sort(),
+  ["-2 华容道第3关：使用提示", "-5 华容道第3关：开始一局"],
+);
+
+// 把余额扣到 0：手动调分单次上限 500，所以按余额循环扣 min(余额, 500)。
+await enterParent(false, "1357");
+for (let guard = 0; guard < 20; guard += 1) {
+  const remaining = wallet(await getState());
+  if (remaining <= 0) break;
+  await page.getByRole("button", { name: "奖励积分" }).click();
+  const pointsModal = page.locator(".form-modal");
+  await pointsModal.waitFor();
+  await pointsModal.getByRole("button", { name: "扣除积分" }).click();
+  await pointsModal.getByLabel("积分数量").fill(String(Math.min(remaining, 500)));
+  const deducted = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      /\/api\/v1\/children\/[^/]+\/points$/.test(response.url()),
+  );
+  await pointsModal.getByRole("button", { name: "确认扣除" }).click();
+  assert.equal((await deducted).status(), 200, "扣除积分失败");
+  await page.locator(".form-modal").waitFor({ state: "detached" });
+}
+assert.equal(wallet(await getState()), 0, "余额没有扣到 0");
+
+// 0 分就不能开新局：按钮置灰 + 写明还差多少，后端另有 409 兜底。
+await enterChild();
+await page.goto(`${baseUrl}/child/games/calc`);
+await page.locator(".quiz-levels").waitFor();
+assert.equal(
+  await page.getByRole("button", { name: /第1档/ }).isDisabled(),
+  true,
+  "积分不足时还能开新局",
+);
+await page.getByText("积分不足，还差 5 分").waitFor();
+
+// 改回免费：不弹确认，点一下就开局。
+await enterParent(false, "1357");
+await page.getByRole("link", { name: "游戏进度" }).click();
+await page.waitForURL(/\/parent\/games$/);
+await page.getByLabel("每次游玩扣积分").fill("0");
+await page.getByLabel("每次提示扣积分").fill("0");
+const costsReset = page.waitForResponse(
+  (response) =>
+    response.request().method() === "PUT" &&
+    response.url().endsWith("/api/v1/games/costs"),
+);
+await page.getByRole("button", { name: "保存扣分设置" }).click();
+assert.equal((await costsReset).status(), 200, "改回免费没保存成功");
+await waitForState((state) => state.gameCosts.playCost === 0 && state.gameCosts.hintCost === 0);
+await enterChild();
+await page.goto(`${baseUrl}/child/games/calc`);
+await page.getByRole("button", { name: /第1档/ }).click();
+await page.locator(".quiz-problem").waitFor();
+assert.equal(await page.locator(".modal").count(), 0, "免费局不该再弹确认");
+
+
 assert.deepEqual(errors, []);
 console.log(
   JSON.stringify({
@@ -2035,6 +2142,9 @@ console.log(
     klotskiSolve: true,
     klotskiGuard: true,
     klotskiParentProgress: true,
+    gameCosts: true,
+    gameCostCharged: true,
+    gameCostInsufficient: true,
     consoleErrors: errors.length,
   }),
 );

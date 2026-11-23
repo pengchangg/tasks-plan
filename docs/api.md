@@ -47,11 +47,12 @@
   "ledger": [{"id":"led_1","childId":"child_ab12","amount":20,"type":"earned","referenceType":"task","referenceId":"task_9f","description":"任务确认完成","createdAt":"2026-10-21T09:31:00Z"}],
   "redemptions": [{"id":"red_1","wishId":"wish_1","wishTitle":"选择一次晚餐","wishIcon":"🍜","wishColor":"coral","childId":"child_ab12","pointsCost":80,"attachments":[],"createdAt":"2026-10-21T09:40:00Z"}],
   "holidays": [{"name":"国庆节","start":"2026-10-01","end":"2026-10-07"}],
-  "makeupWorkdays": ["2026-09-20","2026-10-10"]
+  "makeupWorkdays": ["2026-09-20","2026-10-10"],
+  "gameCosts": {"playCost": 0, "hintCost": 0}
 }
 ```
 
-`tasks` 里的是**任务实例**而不是模板；后续 `/tasks/{id}` 全部指实例。`timezone` 是家庭 IANA 时区，前端用它把 UTC 时间折算成家庭本地日期。`holidays` 与 `makeupWorkdays` 是国办放假表的整张表（见 `internal/server/holidays.go`），日历用它给日期打「休」/「班」角标；周末由客户端按星期自己算，农历由客户端用 `Intl` 中文历法算，服务端不参与。
+`tasks` 里的是**任务实例**而不是模板；后续 `/tasks/{id}` 全部指实例。`timezone` 是家庭 IANA 时区，前端用它把 UTC 时间折算成家庭本地日期。`holidays` 与 `makeupWorkdays` 是国办放假表的整张表（见 `internal/server/holidays.go`），日历用它给日期打「休」/「班」角标；周末由客户端按星期自己算，农历由客户端用 `Intl` 中文历法算，服务端不参与。`gameCosts` 是家长端设的游戏扣分（每次游玩 / 每次提示各扣多少，`0` = 免费），孩子端所有开局与提示按钮的标价都读它。
 
 ### 手动加减分
 
@@ -159,6 +160,18 @@
 
 上报必须带 `Idempotency-Key`（同一局重发不能补两遍），同键重放返回存下的状态码 + `{"replayed": true}`。错误分支：`game` 不在两个之内 → `404 not_found`；缺键 → `400 idempotency_required`；`score`/`level` 越量表、找规律缺 `mistakes` 或越界（0…20）、口算 `seconds` 不是 60 → `400 invalid_request`；没选中孩子 → `400 invalid_request`。成绩按 `(家庭, 孩子, 游戏, 当天)` 一行存进 `game_scores`（迁移 `011_quizzes.sql`，当天最好成绩，只供展示），台账 `reference_id` 挂本局 `game_history` 的 id（`timed_calc:round:hist_…`），所以一局一笔，同一键重发撞不进 `point_ledger`。
 
+## 游戏扣分（家长定价）
+
+游玩和提示都要花积分，两个数字由家长定：每次游玩扣多少、每次提示扣多少，`0` 表示免费（默认，存量家庭升级后不会被莫名扣分）。扣分记进普通 `point_ledger`（`entry_type=spent`、`reference_type=game`），只动余额、不动经验与等级；余额不足直接拒绝，所以玩游戏不会把孩子扣成负分。**只在新开一局 / 重新开始一关 / 用一次提示时收**，「继续上次」的断点存档和刷新页面都免费。
+
+| 接口 | 角色 | 说明 |
+|---|---|---|
+| `PUT /api/v1/games/costs` | 家长 | `{"playCost":5,"hintCost":2}`（都必填，各 0…500）→ `200` 回显两个数字；越界或未知字段 → `400 invalid_request` |
+| `POST /api/v1/games/play` | 任意 | `{"game":"<槽名>"}` → `200 {"cost":5,"balance":15}`：收一次游玩费，槽名沿用断点存档白名单（`timed_calc`、`pattern_quiz`、`klotski:1`…`klotski:5`） |
+| `POST /api/v1/games/hint` | 任意 | `{"game":"klotski:2"}` → `200 {"cost":2,"balance":13}`：收一次提示费，只对华容道有效（题类游戏没有提示） |
+
+两个扣分接口都是钱包写入，**必须带 `Idempotency-Key`**（缺 → `400 idempotency_required`；同键重发回存下的 200 + `{"replayed": true}`，不会扣两遍）。错误分支：槽名不在白名单、提示用了非 `klotski:` 槽名 → `404 not_found`；没选中孩子 → `400 invalid_request`；余额不够 → `409 insufficient_points`（`UPDATE … WHERE points_balance>=?` 守卫，事务与幂等键一起回滚，充值后重试能正常计费）。`cost` 为 0 时不动钱包、不占幂等键，直接回当前余额。台账 `reference_id` 是 `<槽名>:play:<ledgerID>` / `<槽名>:hint:<ledgerID>`，`description` 写成「口算闯关：开始一局」「华容道第3关：使用提示」。
+
 ## 游戏断点存档（华容道 / 口算 / 找规律共用）
 
 孩子离开游戏页再回来要能接着玩，所以每个游戏槽在自己的服务端存档：**槽名**是 `timed_calc`、`pattern_quiz`、`klotski:1`…`klotski:5`，`state` 是写入它的那一端定义的 JSON（华容道 `{rows, steps, history}`、口算 `{tier, score, seconds}`、找规律 `{seed, index, mistakes}`）。服务端**不解释** `state`，只校验大小与 JSON 合法性（信任级别同上报的 `moves`/`score`），形状由前端自己校验，对不上就当没有存档。
@@ -194,7 +207,7 @@
 
 ## 幂等键
 
-`submit`、`review`、`redeem`、`children/{id}/points`、`games/quizzes/{game}/score` 必须带 `Idempotency-Key` 请求头，否则 `400 idempotency_required`。`PUT/DELETE /games/saves/{game}` 是例外：写存档没有副作用，重复调用安全，所以不要求。
+`submit`、`review`、`redeem`、`children/{id}/points`、`games/quizzes/{game}/score`、`games/play`、`games/hint` 必须带 `Idempotency-Key` 请求头，否则 `400 idempotency_required`。`PUT/DELETE /games/saves/{game}` 是例外：写存档没有副作用，重复调用安全，所以不要求。
 
 - 作用域是 `(家庭, 演员, 操作, 键)`；同一个键重复提交返回第一次的状态码和 `{"replayed": true}`，**不会重复副作用**。
 - 并发的同键请求只有一个执行；输家回滚后读到已记录的结果（或 `409 conflict`）。

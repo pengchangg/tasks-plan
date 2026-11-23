@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { ChevronLeft } from "lucide-react";
 import { useAppStore } from "../store";
-import { PageHeading } from "../ui";
+import { ConfirmModal, PageHeading } from "../ui";
 import {
   PATTERN_QUESTIONS,
   makeCalcProblem,
@@ -93,6 +93,11 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
   const [busy, setBusy] = useState(false);
 
   const view = store.quizzes.games.find((game) => game.game === "timed_calc");
+  // 开新局要收一次游玩费：确认后扣款（服务端按库里的价扣），扣成功才发牌。
+  // 「继续上次」不用付费——那一局的钱在开局时已经付过。
+  const playCost = store.state.gameCosts.playCost;
+  const balance = store.activeChild.pointsBalance;
+  const [pendingTier, setPendingTier] = useState<number | null>(null);
 
   // carry 是断点带上来的得分与剩余秒数；三个档位按钮走的就是全新的 60 秒。
   const start = (
@@ -165,6 +170,24 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
     }, FLASH_MS);
   };
 
+  // 免费局直接开，「再来一局」也是一局新的、要再付一次。
+  const askStart = (nextTier: number) => {
+    if (playCost === 0) start(nextTier);
+    else setPendingTier(nextTier);
+  };
+  const confirmStart = () => {
+    const nextTier = pendingTier;
+    setPendingTier(null);
+    if (nextTier === null || busy) return;
+    setBusy(true);
+    void store.actions
+      .chargePlay(calcSave)
+      .then((cost) => {
+        if (cost !== undefined) start(nextTier);
+      })
+      .finally(() => setBusy(false));
+  };
+
   const back = (
     <p className="klotski-back">
       <Link to="/child/games">
@@ -178,25 +201,46 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
       <div className="content-wrap quiz-screen">
         <PageHeading title="口算闯关" description="60 秒内答对越多越好，答对一题记 1 分，每局都计入积分。" />
         {resume ? (
-          <button
-            className="wide-primary"
-            onClick={() => start(resume.tier, { score: resume.score, seconds: resume.seconds })}
-          >
-            继续上次（第 {resume.tier} 档 · 已答对 {resume.score} 题 · 剩 {resume.seconds} 秒）
-          </button>
+          <>
+            <button
+              className="wide-primary"
+              onClick={() => start(resume.tier, { score: resume.score, seconds: resume.seconds })}
+            >
+              继续上次（第 {resume.tier} 档 · 已答对 {resume.score} 题 · 剩 {resume.seconds} 秒）
+            </button>
+            <p className="quiz-best">继续上次不扣积分</p>
+          </>
         ) : null}
         <p className="quiz-level-prompt">选题档重新开一局：</p>
         <div className="quiz-levels">
           {["第1档 · 20 以内加减", "第2档 · 100 以内加减", "第3档 · 表内乘除"].map((label, index) => (
-            <button key={label} className="outline-button" onClick={() => start(index + 1)}>
+            <button
+              key={label}
+              className="outline-button"
+              onClick={() => askStart(index + 1)}
+              disabled={busy || balance < playCost}
+            >
               {label}
+              {playCost > 0 ? `（−${playCost} 积分）` : ""}
             </button>
           ))}
         </div>
+        {balance < playCost ? (
+          <p className="form-error">积分不足，还差 {playCost - balance} 分</p>
+        ) : null}
         {view ? (
           <p className="quiz-best">今天最好 {view.todayBest} 题 · 历史最好 {view.allTimeBest} 题</p>
         ) : null}
         {back}
+        {pendingTier !== null && (
+          <ConfirmModal
+            title="开始一局"
+            text={`本局会扣 ${playCost} 积分，当前有 ${balance} 分。`}
+            confirm={`扣 ${playCost} 分开始`}
+            onClose={() => setPendingTier(null)}
+            onConfirm={confirmStart}
+          />
+        )}
       </div>
     );
 
@@ -258,8 +302,12 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
         <p className="quiz-record">这一局还没答对题，下次加油</p>
       )}
       <div className="quiz-actions">
-        <button className="secondary-button" onClick={() => start(tier)}>
-          再来一局
+        <button
+          className="secondary-button"
+          onClick={() => askStart(tier)}
+          disabled={busy || balance < playCost}
+        >
+          {playCost > 0 ? `再来一局（−${playCost} 积分）` : "再来一局"}
         </button>
         <Link className="wide-primary" to="/child/games">
           返回关卡列表
@@ -287,6 +335,10 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
   const [busy, setBusy] = useState(false);
 
   const view = store.quizzes.games.find((game) => game.game === "pattern_quiz");
+  // 收费规则同口算：只有开新局/再来一局要付，「继续上次」免费。
+  const playCost = store.state.gameCosts.playCost;
+  const balance = store.activeChild.pointsBalance;
+  const [pendingStart, setPendingStart] = useState(false);
 
   const begin = (nextSeed: number, at: number, wrong: number) => {
     setSeed(nextSeed);
@@ -302,6 +354,21 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
   };
 
   const start = () => begin(newSeed(params), 0, 0);
+  const askStart = () => {
+    if (playCost === 0) start();
+    else setPendingStart(true);
+  };
+  const confirmStart = () => {
+    setPendingStart(false);
+    if (busy) return;
+    setBusy(true);
+    void store.actions
+      .chargePlay(patternSave)
+      .then((cost) => {
+        if (cost !== undefined) start();
+      })
+      .finally(() => setBusy(false));
+  };
 
   // 题号、失误数、种子任一变化就覆盖断点。
   useEffect(() => {
@@ -358,22 +425,41 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
       <div className="content-wrap quiz-screen">
         <PageHeading title="找规律" description={`一局 ${PATTERN_QUESTIONS} 题：图形周期、等差数列和两步规律各一段，答对一题 10 分，答错一次记 1 次失误。`} />
         <div className="quiz-levels">
-          <button className="wide-primary" onClick={start}>
-            开始找规律
+          <button
+            className="wide-primary"
+            onClick={askStart}
+            disabled={busy || balance < playCost}
+          >
+            开始找规律{playCost > 0 ? `（−${playCost} 积分）` : ""}
           </button>
           {resume ? (
-            <button
-              className="outline-button"
-              onClick={() => begin(resume.seed, resume.index, resume.mistakes)}
-            >
-              继续上次（第 {resume.index + 1} / {PATTERN_QUESTIONS} 题）
-            </button>
+            <>
+              <button
+                className="outline-button"
+                onClick={() => begin(resume.seed, resume.index, resume.mistakes)}
+              >
+                继续上次（第 {resume.index + 1} / {PATTERN_QUESTIONS} 题）
+              </button>
+              <p className="quiz-best">继续上次不扣积分</p>
+            </>
           ) : null}
         </div>
+        {balance < playCost ? (
+          <p className="form-error">积分不足，还差 {playCost - balance} 分</p>
+        ) : null}
         {view ? (
           <p className="quiz-best">今天最好 {view.todayBest} 分 · 历史最好 {view.allTimeBest} 分</p>
         ) : null}
         {back}
+        {pendingStart && (
+          <ConfirmModal
+            title="开始一局"
+            text={`本局会扣 ${playCost} 积分，当前有 ${balance} 分。`}
+            confirm={`扣 ${playCost} 分开始`}
+            onClose={() => setPendingStart(false)}
+            onConfirm={confirmStart}
+          />
+        )}
       </div>
     );
 
@@ -429,8 +515,12 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
         <p className="quiz-record">这一局还没答对题，下次加油</p>
       )}
       <div className="quiz-actions">
-        <button className="secondary-button" onClick={start}>
-          再来一局
+        <button
+          className="secondary-button"
+          onClick={askStart}
+          disabled={busy || balance < playCost}
+        >
+          {playCost > 0 ? `再来一局（−${playCost} 积分）` : "再来一局"}
         </button>
         <Link className="wide-primary" to="/child/games">
           返回关卡列表

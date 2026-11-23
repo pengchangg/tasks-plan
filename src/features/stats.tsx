@@ -133,7 +133,7 @@ export function ParentStats({ store }: { store: ReturnType<typeof useAppStore> }
           <small>{rangeLabel}</small>
         </div>
         <div>
-          <span>兑换愿望</span>
+          <span>消费积分</span>
           <strong>{spent}</strong>
           <small>分</small>
         </div>
