@@ -569,6 +569,19 @@ approved = await waitForState(
 );
 const weeklyPoints = currentTask(approved, "每周整理书架").points;
 
+// 家长端深链（地址栏直接敲 /parent）只是「门口要密码」：地址先被换到 /child，
+// 密码框挡在前面，这一屏是家长在开门，不是孩子在看在账——既不该弹，更不该把游标
+// 推过去把孩子这两笔吃掉。
+const cursorBeforeGate = cursorOf(await getState());
+await page.goto(`${baseUrl}/parent`, { waitUntil: "networkidle" });
+await page.locator(".pin-modal").waitFor();
+assert.match(page.url(), /\/child$/);
+await page.waitForTimeout(4200);
+assert.equal(await page.locator(".reward-celebration").count(), 0);
+assert.equal(cursorOf(await getState()), cursorBeforeGate);
+await unlockParent();
+assert.equal(cursorOf(await getState()), cursorBeforeGate);
+
 const cursorBeforePreview = cursorOf(await getState());
 await enterChild();
 const celebration = page.locator(".reward-celebration");

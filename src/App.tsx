@@ -259,8 +259,10 @@ function Shell() {
               .map((item) => item.id),
           ),
         );
-    // 家长端不庆祝：这些到账保持「未读」，等孩子端一打开就逐条弹出来。
-    if (isParent) return;
+    // 家长端不庆祝：这些到账保持「未读」，等孩子端一打开就逐条弹出来。密码闸门
+    // 挡在前面时也一样——深链 /parent 会先把地址换到 /child 再弹密码框，那一屏
+    // 是家长在开门，不是孩子在看，弹了会连带把游标推过去、把孩子这份庆祝吃掉。
+    if (isParent || parentGate) return;
     const childId = store.state.activeChildId;
     const seen = seenRewards.current.get(childId) ?? new Set<string>();
     seenRewards.current.set(childId, seen);
@@ -274,10 +276,10 @@ function Shell() {
       const fresh = pending.filter((item) => !queued.has(item.id));
       return fresh.length ? [...queue, ...fresh] : queue;
     });
-  }, [isParent, store.connected, store.state]);
+  }, [isParent, parentGate, store.connected, store.state]);
   useEffect(() => {
-    if (isParent) setRewardQueue([]);
-  }, [isParent]);
+    if (isParent || parentGate) setRewardQueue([]);
+  }, [isParent, parentGate]);
   // 队列走完 = 这一批孩子真的看过了：推进服务端的到账游标，刷新、重进、换设备都
   // 不再重弹。家长端（上面已经清空队列）和预览都不推进——预览看到的那批要留给孩子
   // 自己打开时看，这正是这个游标存在的理由。
@@ -289,9 +291,9 @@ function Shell() {
     }
     if (!unackedDrain.current) return;
     unackedDrain.current = false;
-    if (isParent || store.preview) return;
+    if (isParent || parentGate || store.preview) return;
     store.actions.markRewardsSeen();
-  }, [rewardQueue.length, isParent, store.preview]);
+  }, [rewardQueue.length, isParent, parentGate, store.preview]);
   const dismissReward = () => {
     if (reward) {
       const seen = seenRewards.current.get(reward.childId) ?? new Set<string>();
