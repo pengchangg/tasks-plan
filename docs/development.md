@@ -75,7 +75,7 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 
 - `src/App.tsx` 只放外壳、路由表和任务/愿望/成长/家长管理这几屏；跨模块共用的展示原语放 `src/ui.tsx`，自成一体的功能（带自己的常量与多个组件）放 `src/features/<name>.tsx`（现有 `homework.tsx`、`stats.tsx`、`ledger.tsx`）。**不要继续往 `App.tsx` 里堆新功能**：新功能从 `src/features/` 开始，feature 不要反向 import `App.tsx`（会成环）。
 - 状态只在 `useAppStore()` 里，作为 `store` prop 往下传；没有 Context、Redux、按页面取数或 `localStorage`。
-- 写操作加在 `actions` 上并通过 `run(() => ...)` 执行（它会清空消息、执行、刷新服务端状态）。统计和作业是两处例外，见 `store.ts` 的注释。`run` 会把操作结果透出来（失败是 `undefined`），`toggleHomeworkDone` 就靠它把服务端的 `awarded` 交给那张卡，前端不自己猜数字。
+- 写操作加在 `actions` 上并通过 `run(() => ...)` 执行（它会清空消息、执行、刷新服务端状态）。统计、作业和游戏断点存档是三处例外，见 `store.ts` 的注释——断点存档（`saveGame`/`clearGame`）刻意不走 `run`：它不该刷 `/state`、不该占提示位，写失败也静默，丢一份断点不能打断一局游戏。`run` 会把操作结果透出来（失败是 `undefined`），`toggleHomeworkDone` 就靠它把服务端的 `awarded` 交给那张卡，前端不自己猜数字。
 - `TaskForm` 选 `weekly` 时是一排 `.weekday-chip` 复选（`repeatWeekdays`，加 `工作日`/`周末`/`全选` 快捷），`repeatWeekday` 只是首日；`repeatWeekdays: []` 回到旧的单日语义。
 - 请求都走 `request()`；需要幂等的写操作必须用 `json(method, value, true)`。`idempotencyKey()` 在非 HTTPS 环境会退化到 `crypto.getRandomValues`，不要在请求路径上直接调 `crypto.randomUUID()`。
 - `src/types.ts` 与 Go DTO 一一对应；写请求体只用 `ChildInput` / `TaskInput` / `WishInput`，禁止回传服务端 DTO。
@@ -91,7 +91,7 @@ npm run dev          # 前端，/api 代理到 127.0.0.1:8080
 - 复用现有辅助函数：`testServer`、`doJSON`、`parentCookie`、`childCookie`、`sessionFor`、`getStateTest`、`multipartRequest`、`homeworkRequest` 等。
 - 约定：无子测试、无表驱动、无 `t.Parallel`；失败信息带 HTTP 状态与响应体。
 - 时间敏感的数据要**先**替换 `s.now` 再写入种子（`testServer` 已经按墙上时钟灌过 DEMO 种子，之后再改 `s.now` 会让第二个家庭的时间戳比 DEMO 还早，`resolvedFamily` 就会换人）。
-- 迁移只加新文件 `NNN_name.sql`（版本号 ≥ 2，且下一个必须 ≥ 012——008 写过又整体回滚，跑过它的库会留下一行 `schema_migrations=8`，再发一个 8 会被静默跳过；009、010 与 011 已占用），**不要改 `001_init.sql`**：已应用过的 `ALTER TABLE ADD COLUMN` 重跑会失败，而新库会在 001 之后把 002…NNN 一个个跑一遍。重启测试按 `.sql` 文件数自动计数，无需跟着改。
+- 迁移只加新文件 `NNN_name.sql`（版本号 ≥ 2，且下一个必须 ≥ 012——008 写过又整体回滚，跑过它的库会留下一行 `schema_migrations=8`，再发一个 8 会被静默跳过；009、010、011 与 012 已占用），**不要改 `001_init.sql`**：已应用过的 `ALTER TABLE ADD COLUMN` 重跑会失败，而新库会在 001 之后把 002…NNN 一个个跑一遍。重启测试按 `.sql` 文件数自动计数，无需跟着改。
 - `testServer` 不是万能的：重启测试与 `no_family` 测试会自己构造 `Config`；需要第二个家庭时用 `otherFamily`。
 
 ### 前端（`npm test`）

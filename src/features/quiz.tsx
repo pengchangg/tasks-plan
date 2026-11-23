@@ -22,10 +22,44 @@ interface Settlement {
   failed: boolean;
 }
 
-function newRng(params: URLSearchParams): () => number {
+function newSeed(params: URLSearchParams): number {
   const seed = Number(params.get("seed"));
-  if (Number.isInteger(seed) && seed > 0) return rngFrom(seed);
-  return rngFrom(((Date.now() & 0x7fffffff) ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0);
+  if (Number.isInteger(seed) && seed > 0) return seed;
+  return ((Date.now() & 0x7fffffff) ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
+}
+
+function newRng(params: URLSearchParams): () => number {
+  return rngFrom(newSeed(params));
+}
+
+// 断点存档：服务端原样回带的不透明 JSON，形状在这一端校验，不合就当没有存档。
+// 口算存「档位 + 已答对 + 剩余秒数」，回来接着倒计时；找规律存种子（同种子生成
+// 同一局题）+ 题号 + 失误数。
+const calcSave = "timed_calc";
+const patternSave = "pattern_quiz";
+
+const isCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+type CalcSave = { tier: number; score: number; seconds: number };
+
+function readCalcSave(state: unknown): CalcSave | null {
+  if (!state || typeof state !== "object") return null;
+  const { tier, score, seconds } = state as Record<string, unknown>;
+  if (!isCount(tier) || tier < 1 || tier > 3) return null;
+  if (!isCount(score) || !isCount(seconds) || seconds > 60) return null;
+  return { tier, score, seconds };
+}
+
+type PatternSave = { seed: number; index: number; mistakes: number };
+
+function readPatternSave(state: unknown): PatternSave | null {
+  if (!state || typeof state !== "object") return null;
+  const { seed, index, mistakes } = state as Record<string, unknown>;
+  if (!isCount(seed) || seed <= 0) return null;
+  if (!isCount(index) || index >= PATTERN_QUESTIONS) return null;
+  if (!isCount(mistakes) || mistakes > 20) return null;
+  return { seed, index, mistakes };
 }
 
 // 答题反馈共用：点一下选项，闪 400ms 正确/错误再进下一题。
@@ -38,6 +72,11 @@ const FLASH_MS = 400;
 
 export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> }) {
   const [params] = useSearchParams();
+  // 挂载时读一次断点；剩下的秒数已经是 0 的存档当作无效（那一局其实已经结束了）。
+  const [resume] = useState(() => {
+    const saved = readCalcSave(store.gameSaves[calcSave]);
+    return saved && saved.seconds > 0 ? saved : null;
+  });
   const [phase, setPhase] = useState<"intro" | "play" | "done">("intro");
   const [tier, setTier] = useState(1);
   const [problem, setProblem] = useState<CalcProblem | null>(null);
@@ -49,29 +88,44 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
   const scoreRef = useRef(0);
   const tierRef = useRef(1);
   const endedRef = useRef(false);
+  // 交卷之后不再写断点：否则结算完又冒出一个「继续上次」的局。
+  const savesOff = useRef(false);
   const [busy, setBusy] = useState(false);
 
   const view = store.quizzes.games.find((game) => game.game === "timed_calc");
 
-  const start = (nextTier: number) => {
+  // carry 是断点带上来的得分与剩余秒数；三个档位按钮走的就是全新的 60 秒。
+  const start = (
+    nextTier: number,
+    carry?: { score: number; seconds: number },
+  ) => {
     rngRef.current = newRng(params);
     tierRef.current = nextTier;
-    scoreRef.current = 0;
+    scoreRef.current = carry?.score ?? 0;
     endedRef.current = false;
+    savesOff.current = false;
     setTier(nextTier);
-    setScore(0);
-    setSeconds(60);
+    setScore(scoreRef.current);
+    setSeconds(carry?.seconds ?? 60);
     setFlash(null);
     setResult(null);
     setProblem(makeCalcProblem(rngRef.current, nextTier));
     setPhase("play");
   };
 
+  // 秒数、得分、档位任一变化就覆盖断点（每秒一次，单机单用户，不值得加节流）。
+  useEffect(() => {
+    if (phase !== "play" || savesOff.current) return;
+    store.actions.saveGame(calcSave, { tier, score, seconds });
+  }, [phase, tier, score, seconds]);
+
   const finish = async () => {
     // 不查 phase 也不查 endedRef：交卷按钮、倒计时归零、结算页的失败重试都走
     // 这里；防重复提交由 busy 负责（endedRef 只用来掐掉还在飞的答题回调）。
     if (busy) return;
     endedRef.current = true;
+    savesOff.current = true;
+    store.actions.clearGame(calcSave);
     setBusy(true);
     const finalScore = scoreRef.current;
     const awarded = await store.actions.submitQuizScore({
@@ -123,7 +177,15 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
     return (
       <div className="content-wrap quiz-screen">
         <PageHeading title="口算闯关" description="60 秒内答对越多越好，答对一题记 1 分，每局都计入积分。" />
-        <p className="quiz-level-prompt">选题档开始：</p>
+        {resume ? (
+          <button
+            className="wide-primary"
+            onClick={() => start(resume.tier, { score: resume.score, seconds: resume.seconds })}
+          >
+            继续上次（第 {resume.tier} 档 · 已答对 {resume.score} 题 · 剩 {resume.seconds} 秒）
+          </button>
+        ) : null}
+        <p className="quiz-level-prompt">选题档重新开一局：</p>
         <div className="quiz-levels">
           {["第1档 · 20 以内加减", "第2档 · 100 以内加减", "第3档 · 表内乘除"].map((label, index) => (
             <button key={label} className="outline-button" onClick={() => start(index + 1)}>
@@ -209,7 +271,10 @@ export function CalcSprint({ store }: { store: ReturnType<typeof useAppStore> })
 
 export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }) {
   const [params] = useSearchParams();
+  // 挂载时读一次断点；用存档的种子重新造出同一局题，题号与失误数一并接上。
+  const [resume] = useState(() => readPatternSave(store.gameSaves[patternSave]));
   const [phase, setPhase] = useState<"intro" | "play" | "done">("intro");
+  const [seed, setSeed] = useState(0);
   const [items, setItems] = useState<PatternItem[]>([]);
   const [index, setIndex] = useState(0);
   const [mistakes, setMistakes] = useState(0);
@@ -217,24 +282,38 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
   const [result, setResult] = useState<Settlement | null>(null);
   const mistakesRef = useRef(0);
   const endedRef = useRef(false);
+  // 交卷之后不再写断点（理由同口算）。
+  const savesOff = useRef(false);
   const [busy, setBusy] = useState(false);
 
   const view = store.quizzes.games.find((game) => game.game === "pattern_quiz");
 
-  const start = () => {
-    setItems(makePatternRound(newRng(params)));
-    setIndex(0);
-    setMistakes(0);
-    mistakesRef.current = 0;
+  const begin = (nextSeed: number, at: number, wrong: number) => {
+    setSeed(nextSeed);
+    setItems(makePatternRound(rngFrom(nextSeed)));
+    setIndex(at);
+    setMistakes(wrong);
+    mistakesRef.current = wrong;
     endedRef.current = false;
+    savesOff.current = false;
     setFlash(null);
     setResult(null);
     setPhase("play");
   };
 
+  const start = () => begin(newSeed(params), 0, 0);
+
+  // 题号、失误数、种子任一变化就覆盖断点。
+  useEffect(() => {
+    if (phase !== "play" || savesOff.current) return;
+    store.actions.saveGame(patternSave, { seed, index, mistakes });
+  }, [phase, seed, index, mistakes]);
+
   const finish = async (wrong: number) => {
     if (busy) return;
     endedRef.current = true;
+    savesOff.current = true;
+    store.actions.clearGame(patternSave);
     setBusy(true);
     const score = (PATTERN_QUESTIONS - wrong) * 10;
     const awarded = await store.actions.submitQuizScore({
@@ -278,9 +357,19 @@ export function PatternQuiz({ store }: { store: ReturnType<typeof useAppStore> }
     return (
       <div className="content-wrap quiz-screen">
         <PageHeading title="找规律" description={`一局 ${PATTERN_QUESTIONS} 题：图形周期、等差数列和两步规律各一段，答对一题 10 分，答错一次记 1 次失误。`} />
-        <button className="wide-primary" onClick={start}>
-          开始找规律
-        </button>
+        <div className="quiz-levels">
+          <button className="wide-primary" onClick={start}>
+            开始找规律
+          </button>
+          {resume ? (
+            <button
+              className="outline-button"
+              onClick={() => begin(resume.seed, resume.index, resume.mistakes)}
+            >
+              继续上次（第 {resume.index + 1} / {PATTERN_QUESTIONS} 题）
+            </button>
+          ) : null}
+        </div>
         {view ? (
           <p className="quiz-best">今天最好 {view.todayBest} 分 · 历史最好 {view.allTimeBest} 分</p>
         ) : null}

@@ -229,6 +229,8 @@
 .klotski-award{padding:1px 9px;border-radius:999px;background:var(--mint);color:#fff;font-size:13px;font-weight:800;line-height:19px;animation:awardPop .3s ease-out}
 .klotski-record{margin:10px 0 0;text-align:center;font-size:12.5px;color:var(--mint-ink)}
 .klotski-retry{display:block;margin:12px auto 0;border:1px solid var(--coral);background:#fdeae4;color:var(--coral-ink);border-radius:7px;padding:8px 14px;font-weight:700}
+.klotski-restored{margin:0 auto 12px;max-width:340px;text-align:center;font-size:12.5px;font-weight:700;color:var(--mint-ink)}
+.klotski-restart{display:block;margin:18px auto 0;border:0;background:none;color:var(--muted);font-size:12.5px;font-weight:700;text-decoration:underline;padding:6px 4px}
 .klotski-hint{margin:12px auto 0;max-width:340px;padding:9px 12px;border:1px solid #e6cf8f;border-radius:8px;background:#fdf6dd;color:#7a5c14;font-size:13px;font-weight:700;line-height:1.5}
 .klotski-hint mark{background:#f7e3a1;color:inherit;border-radius:4px;padding:0 4px}
 .klotski-hint-more{display:block;margin:6px auto 0;border:0;background:none;color:var(--mint-ink);font-size:12.5px;font-weight:700;text-decoration:underline;padding:2px 4px}

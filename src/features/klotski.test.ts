@@ -68,8 +68,9 @@ describe("klotski sliding", () => {
   });
 
   it("labels every piece with its Chinese face", () => {
-    expect(pieceLabels.C).toBe("曹");
-    expect(pieceLabels.G).toBe("羽");
+    expect(pieceLabels.C).toBe("曹操");
+    expect(pieceLabels.G).toBe("关羽");
+    expect(pieceLabels.A).toBe("张飞");
     expect(pieceLabels.s).toBe("卒");
   });
 

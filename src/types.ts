@@ -56,3 +56,9 @@ export interface QuizzesPayload { games: QuizGameView[]; history: QuizHistoryEnt
 export type QuizScoreReport =
   | { game: "timed_calc"; score: number; level: number; seconds: number }
   | { game: "pattern_quiz"; score: number; level: number; mistakes: number };
+
+// GET /api/v1/games/saves 的载荷：当前孩子在玩的断点。game 是槽名（口算/找规律各
+// 一个，华容道每关一个 klotski:<level>），state 是写入它的那端定义的 JSON，服务端
+// 原样存下再原样回带——所以这里是 unknown，由各自的游戏屏自己校验形状。
+export interface GameSaveEntry { game: string; state: unknown; updatedAt: string }
+export interface GameSavesPayload { saves: GameSaveEntry[] }

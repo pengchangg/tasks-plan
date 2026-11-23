@@ -1022,7 +1022,7 @@ await page.getByRole("button", { name: "看完整走法" }).click();
 assert.equal(await page.locator(".klotski-steps-list li").count(), 118, "完整走法不是 118 条");
 await page.getByRole("button", { name: "收起走法" }).click();
 assert.equal(await page.locator(".klotski-steps-list").count(), 0, "走法列表没有收起");
-// 走一步就作废：手动走脚本的第一步，提示条必须跟着消失，随后脚本走完剩下的 117 步。
+// 走到一步就作废：手动走脚本的第一步，提示条必须跟着消失，随后脚本走完剩下的 117 步。
 await page.locator('[data-piece="q"]').click();
 await page.locator('.movable-target[data-anchor="3,1"]').first().click();
 await page.locator(".klotski-hint").waitFor({ state: "detached" });
@@ -1032,7 +1032,64 @@ assert.match(
   /最少还需 117 步/,
   "走一步后提示没有重算剩余步数",
 );
-klotskiLevel1.shift();
+// 断点存档：走一步就自动存下盘面，重新载入这一屏必须接着上一手，而不是从头。
+const saveFor = async (slot) => {
+  const payload = await page.evaluate(async () =>
+    (await fetch("/api/v1/games/saves", { credentials: "same-origin" })).json(),
+  );
+  return payload.saves.find((save) => save.game === slot) ?? null;
+};
+// 存盘是异步的：离开页面前等它真的落地，否则续玩断言会读到上一手的状态。
+const waitForSave = async (slot, ok) => {
+  for (let i = 0; i < 100; i++) {
+    const save = await saveFor(slot);
+    if (save && ok(save.state)) return save;
+    await page.waitForTimeout(50);
+  }
+  throw new Error(`断点没有在 5 秒内写入：${slot}`);
+};
+const savedLevel1 = await saveFor("klotski:1");
+assert.ok(savedLevel1, "走了一步却没有留下断点");
+assert.equal(savedLevel1.state.steps, 1, "断点没有记下这一步");
+assert.equal(savedLevel1.state.history.length, 1, "断点没有带上撤销栈");
+await page.reload();
+await page.locator(".klotski-piece").first().waitFor();
+await page.locator(".klotski-restored").waitFor();
+assert.ok(
+  (await page.locator(".klotski-restored").innerText()).includes("第 1 步"),
+  "恢复提示没有报出恢复到的步数",
+);
+assert.ok(
+  (await page.locator(".klotski-steps").innerText()).includes("第 1 步"),
+  "恢复后的盘面不在第 1 步",
+);
+// 重置已经离开工具栏（不再紧贴「提示」），改到页面底部且先弹确认。
+assert.equal(
+  await page.getByRole("button", { name: "重置", exact: true }).count(),
+  0,
+  "工具栏里还留着重置按钮",
+);
+const restartButton = page.getByRole("button", { name: "重新开始本关", exact: true });
+await restartButton.click();
+const restartModal = page.getByRole("dialog", { name: "重新开始本关" });
+await restartModal.waitFor();
+await restartModal.getByRole("button", { name: "再想想" }).click();
+await restartModal.waitFor({ state: "detached" });
+assert.ok(
+  (await page.locator(".klotski-steps").innerText()).includes("第 1 步"),
+  "取消了确认却把盘面清了",
+);
+await restartButton.click();
+await page
+  .getByRole("dialog", { name: "重新开始本关" })
+  .getByRole("button", { name: "重新开始" })
+  .click();
+await page.locator(".klotski-restored").waitFor({ state: "detached" });
+assert.ok(
+  (await page.locator(".klotski-steps").innerText()).includes("第 0 步"),
+  "确认重新开始后盘面没有回到初始",
+);
+assert.equal(await saveFor("klotski:1"), null, "重新开始后断点还留着");
 // 真通关之前先撞三堵墙：步数低于第 1 关最短解 118 → 400；第 2 关还没解锁就报通关
 // → 409；不存在的关卡 → 404。探针窗口内放行这三个 URL 的 console 噪声。
 expectKlotskiProbe = true;
@@ -1088,6 +1145,8 @@ const gameFirst = await waitForState(
   (s) =>
     s.children.find((c) => c.id === s.activeChildId).pointsBalance === gameBalance + 30,
 );
+// 通关的那一手就把断点清了：再进这一关不该恢复成一个已经赢了的盘面。
+assert.equal(await saveFor("klotski:1"), null, "通关后断点还留着");
 assert.ok(
   gameFirst.ledger.some(
     (item) =>
@@ -1193,6 +1252,32 @@ await page.getByRole("link", { name: "进入游戏" }).click();
 await page.waitForURL(/\/child\/games$/);
 await page.getByRole("button", { name: /^口算闯关/ }).click();
 await page.waitForURL(/\/child\/games\/calc$/);
+// 断点续玩：先开一局答对 1 题，离开这一屏再回来，必须能从第 1 档的 1 题接着。
+await page.goto(baseUrl + "/child/games/calc?seed=777");
+await page.getByRole("button", { name: "第1档 · 20 以内加减" }).click();
+await page.locator(".quiz-problem").waitFor();
+await clickChoice(await calcAnswer());
+await page.waitForTimeout(500);
+// 等一次倒计时滴答：剩 60 秒和剩 59 秒在界面上分不出「接上」还是「重开」。
+await waitForSave("timed_calc", (state) => state.score === 1 && state.seconds < 60);
+await page.goto(baseUrl + "/child/games");
+await page.getByRole("button", { name: /^口算闯关/ }).click();
+await page.waitForURL(/\/child\/games\/calc$/);
+const resumeCalc = page.getByRole("button", {
+  name: /^继续上次（第 1 档 · 已答对 1 题 · 剩 \d+ 秒）/,
+});
+await resumeCalc.waitFor();
+await resumeCalc.click();
+await page.locator(".quiz-problem").waitFor();
+assert.ok(
+  (await page.locator(".quiz-meta").innerText()).includes("答对 1 题"),
+  "续玩没有接上已答对的题数",
+);
+const resumedSeconds = Number((await page.locator(".quiz-timer").innerText()).replace(/\D/g, ""));
+assert.ok(
+  resumedSeconds > 0 && resumedSeconds < 60,
+  `续玩没有接上剩余秒数：${resumedSeconds}`,
+);
 await page.goto(baseUrl + "/child/games/calc?seed=777");
 await page.getByRole("button", { name: "第1档 · 20 以内加减" }).click();
 await page.locator(".quiz-problem").waitFor();
@@ -1290,6 +1375,30 @@ async function answerPatternRound({ firstWrong }) {
   }
   await page.locator(".quiz-result").waitFor();
 }
+// 断点续玩（找规律）：存的是种子 + 题号 + 失误数，所以答完第 1 题离开、再回来
+// 必须接在第 2 题上，而不是从头。这一局不交卷，只验证存档。
+const firstPatternAnswer = await patternAnswer();
+await page
+  .locator(".pattern-choices .quiz-choice")
+  .filter({ hasText: new RegExp(`^\\s*${firstPatternAnswer}\\s*$`) })
+  .click();
+await page.waitForTimeout(500);
+await waitForSave("pattern_quiz", (state) => state.index === 1);
+await page.goto(baseUrl + "/child/games");
+await page.getByRole("button", { name: /^找规律/ }).click();
+await page.waitForURL(/\/child\/games\/pattern$/);
+const resumePattern = page.getByRole("button", { name: "继续上次（第 2 / 10 题）" });
+await resumePattern.waitFor();
+await resumePattern.click();
+await page.locator(".pattern-seq").waitFor();
+assert.ok(
+  (await page.locator(".quiz-meta").innerText()).includes("第 2 / 10 题"),
+  "续玩没有接上题号",
+);
+// 续玩验证完就重新开一局，让下面那轮从第 1 题开始（故意错一题）。
+await page.goto(baseUrl + "/child/games/pattern?seed=4242");
+await page.getByRole("button", { name: "开始找规律" }).click();
+await page.locator(".pattern-seq").waitFor();
 const patternReport1 = page.waitForResponse((response) =>
   response.url().endsWith("/api/v1/games/quizzes/pattern_quiz/score"),
 );

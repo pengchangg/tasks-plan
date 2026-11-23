@@ -12,14 +12,14 @@ export interface Piece {
 
 export type Cell = [number, number];
 
-// pieceLabels 是棋子字符到汉字面的映射：竖将用固定人名首字，关羽简称「羽」，四个卒同字。
+// pieceLabels 是棋子字符到汉字面的映射：武将写全名，四个卒同字。
 export const pieceLabels: Record<string, string> = {
-  C: "曹",
-  A: "飞",
-  B: "云",
-  D: "超",
-  E: "忠",
-  G: "羽",
+  C: "曹操",
+  A: "张飞",
+  B: "赵云",
+  D: "马超",
+  E: "黄忠",
+  G: "关羽",
   p: "卒",
   q: "卒",
   r: "卒",

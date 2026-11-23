@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useAppStore } from "../store";
-import { EmptyState, PageHeading, ParentHeader, useDialog } from "../ui";
+import { EmptyState, ConfirmModal, PageHeading, ParentHeader, useDialog } from "../ui";
 import { applyMove, isSolved, parseRows, pieceIcons, pieceLabels, solveFrom, stepToMove, targetsFor } from "./klotski";
 import type { Cell, Hint, Piece } from "./klotski";
 import type { KlotskiLevel } from "../types";
@@ -121,6 +121,26 @@ function quizCards(store: ReturnType<typeof useAppStore>) {
   ];
 }
 
+// 断点存档的形状校验：存档是服务端原样回带的不透明 JSON，只有这一端写它，但
+// 仍当外部输入校验一遍——形状不对就当没有存档，而不是让棋盘炸掉。
+type KlotskiSave = { rows: string[]; steps: number; history: string[][] };
+
+const isBoard = (value: unknown): value is string[] =>
+  Array.isArray(value) &&
+  value.length === 5 &&
+  value.every((row) => typeof row === "string" && row.length === 4);
+
+function readKlotskiSave(state: unknown): KlotskiSave | null {
+  if (!state || typeof state !== "object") return null;
+  const { rows, steps, history } = state as Record<string, unknown>;
+  if (!isBoard(rows)) return null;
+  if (typeof steps !== "number" || !Number.isInteger(steps) || steps < 0) return null;
+  if (!Array.isArray(history) || !history.every(isBoard)) return null;
+  // 撤销栈长度就是步数：对不上说明这份存档来自别的版本，不认它。
+  if (history.length !== steps) return null;
+  return { rows, steps, history };
+}
+
 export function KlotskiGame({ store }: { store: ReturnType<typeof useAppStore> }) {
   const [params] = useSearchParams();
   const levelNumber = Number(params.get("level"));
@@ -152,9 +172,16 @@ function KlotskiBoard({
   store: ReturnType<typeof useAppStore>;
 }) {
   const navigate = useNavigate();
-  const [rows, setRows] = useState<string[]>(level.rows);
-  const [steps, setSteps] = useState(0);
-  const [history, setHistory] = useState<string[][]>([]);
+  // 挂载时读一次存档：服务端回带的 JSON 校验过形状才用，否则从这一关的初始盘面开始。
+  const saveKey = `klotski:${level.level}`;
+  const [initial] = useState(() => readKlotskiSave(store.gameSaves[saveKey]));
+  const [rows, setRows] = useState<string[]>(initial?.rows ?? level.rows);
+  const [steps, setSteps] = useState(initial?.steps ?? 0);
+  const [history, setHistory] = useState<string[][]>(initial?.history ?? []);
+  // restored 只是那句「已恢复上次的盘面」的话术，走一步就不再成立。
+  const [restored, setRestored] = useState(initial?.steps ?? null);
+  // 重置会清掉盘面，必须先问一句：它是工具栏里唯一会丢进度的操作。
+  const [restarting, setRestarting] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   // 通关上报只发一次；上报失败时放开，让孩子能按「重试领取」再试。
   const claimed = useRef(false);
@@ -210,26 +237,42 @@ function KlotskiBoard({
     setRows(next);
     setSteps(0);
     setHistory([]);
+    setRestored(null);
+    store.actions.clearGame(saveKey);
   };
   const replay = () => reset(level.rows);
 
   const move = (to: Cell) => {
     if (!selected) return;
-    setHistory((prev) => [...prev, rows]);
-    setRows(applyMove(rows, selected, to));
-    setSteps((prev) => prev + 1);
+    const next = applyMove(rows, selected, to);
+    const nextHistory = [...history, rows];
+    const nextSteps = steps + 1;
+    setHistory(nextHistory);
+    setRows(next);
+    setSteps(nextSteps);
     setSelected(null);
     setHint(null);
     setShowSteps(false);
+    setRestored(null);
+    // 走到通关就不再存断点：这一关重新开始时不该恢复成一个赢了的盘面。
+    if (isSolved(next)) store.actions.clearGame(saveKey);
+    else store.actions.saveGame(saveKey, { rows: next, steps: nextSteps, history: nextHistory });
   };
   const undo = () => {
     if (history.length === 0) return;
-    setRows(history[history.length - 1]);
-    setHistory((prev) => prev.slice(0, -1));
-    setSteps((prev) => prev - 1);
+    const nextRows = history[history.length - 1];
+    const nextHistory = history.slice(0, -1);
+    const nextSteps = steps - 1;
+    setRows(nextRows);
+    setHistory(nextHistory);
+    setSteps(nextSteps);
     setSelected(null);
     setHint(null);
     setShowSteps(false);
+    setRestored(null);
+    // 退回到第 0 步就等于没动过，不值得留一份断点。
+    if (nextSteps === 0) store.actions.clearGame(saveKey);
+    else store.actions.saveGame(saveKey, { rows: nextRows, steps: nextSteps, history: nextHistory });
   };
   // 提示永远贴着孩子当下的棋盘：现算，不缓存，走一步就作废。
   const askHint = () => {
@@ -271,6 +314,11 @@ function KlotskiBoard({
         </Link>
       </p>
       <PageHeading title={`第${level.level}关 · ${level.name}`} description="点一块棋子，再点亮起的空位就能滑动。曹操走进底部出口就通关。" />
+      {restored !== null && (
+        <p className="klotski-restored" role="status">
+          已恢复上次的盘面（第 {restored} 步）
+        </p>
+      )}
       <div className="klotski-board">
         {/* 出口在底行正中：曹操 2×2 走进虚线落区、从底边缺口出去就通关。落区画在
             棋子底层（曹操一到就被盖住，「堵住出口」看得见），缺口压在棋盘底边上。 */}
@@ -329,9 +377,6 @@ function KlotskiBoard({
         <button className="outline-button" onClick={undo} disabled={history.length === 0}>
           撤销
         </button>
-        <button className="outline-button" onClick={replay}>
-          重置
-        </button>
         <button className="outline-button" onClick={askHint} disabled={level.completed}>
           提示
         </button>
@@ -373,6 +418,23 @@ function KlotskiBoard({
         <button className="klotski-retry" onClick={claim}>
           通关奖励领取失败，点击重试
         </button>
+      )}
+      {/* 重新开始是唯一会丢进度的操作，所以它离开工具栏（不再紧贴「提示」），
+          放到页面最下方，并且先弹一次确认。 */}
+      <button className="klotski-restart" onClick={() => setRestarting(true)}>
+        重新开始本关
+      </button>
+      {restarting && (
+        <ConfirmModal
+          title="重新开始本关"
+          text={`当前第 ${steps} 步的盘面会清空，回到这一关的初始盘面。`}
+          confirm="重新开始"
+          onClose={() => setRestarting(false)}
+          onConfirm={() => {
+            setRestarting(false);
+            replay();
+          }}
+        />
       )}
       {won && (
         <WinModal

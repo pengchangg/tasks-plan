@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -178,5 +181,183 @@ func TestKlotskiProgressIsPerChildRewardsOnceAndGatesTheNextLevel(t *testing.T) 
 	}
 	if secondPayload.Completed != 0 || !secondPayload.Levels[0].Unlocked || secondPayload.Levels[0].Completed {
 		t.Fatalf("second child progress: %s", w.Body.String())
+	}
+}
+
+// TestGameSaveSlotsArePerChildOpaqueAndReplaceable drives the断点存档 resource: the
+// slot whitelist, the opaque state round trip, last-write-wins replace, the size
+// and shape 400s, the per-child and per-family isolation, and the idempotent
+// DELETE. The points/games endpoints above are untouched by any of it — a save is
+// never a ledger row.
+func TestGameSaveSlotsArePerChildOpaqueAndReplaceable(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	cookie := childCookie(t, h, "")
+
+	type saveView struct {
+		Game      string          `json:"game"`
+		State     json.RawMessage `json:"state"`
+		UpdatedAt string          `json:"updatedAt"`
+	}
+	saves := func(c *http.Cookie) []saveView {
+		w := doJSON(t, h, "GET", "/api/v1/games/saves", nil, c, "")
+		if w.Code != 200 {
+			t.Fatalf("get saves: %d %s", w.Code, w.Body.String())
+		}
+		var payload struct {
+			Saves []saveView `json:"saves"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload.Saves
+	}
+
+	// 空存档是 []（服务端把切片初始化为空数组），不是 null。
+	if list := saves(cookie); len(list) != 0 {
+		t.Fatalf("initial saves: %v", list)
+	}
+
+	board := []string{"曹张张赵", "曹张张赵", "兵卒卒兵", "兵空空兵", "孙马冯岳"}
+	put := func(slot string, state any) *httptest.ResponseRecorder {
+		return doJSON(t, h, "PUT", "/api/v1/games/saves/"+slot, map[string]any{"state": state}, cookie, "")
+	}
+	if w := put("klotski:1", map[string]any{"rows": board, "steps": 3, "history": []any{}}); w.Code != 200 {
+		t.Fatalf("save klotski:1: %d %s", w.Code, w.Body.String())
+	}
+	// 找规律与口算各一个槽，槽名白名单里都认。
+	if w := put("pattern_quiz", map[string]any{"seed": 42, "index": 4, "mistakes": 1}); w.Code != 200 {
+		t.Fatalf("save pattern: %d %s", w.Code, w.Body.String())
+	}
+	if w := put("timed_calc", map[string]any{"tier": 2, "score": 7, "seconds": 33}); w.Code != 200 {
+		t.Fatalf("save calc: %d %s", w.Code, w.Body.String())
+	}
+	if list := saves(cookie); len(list) != 3 {
+		t.Fatalf("three slots: %d", len(list))
+	}
+	// state 原样回带（服务端不解释它），updatedAt 是服务端盖的。
+	var restored struct {
+		Rows  []string `json:"rows"`
+		Steps int      `json:"steps"`
+	}
+	found := false
+	for _, save := range saves(cookie) {
+		if save.Game != "klotski:1" {
+			continue
+		}
+		found = true
+		if save.UpdatedAt == "" {
+			t.Fatalf("missing updatedAt: %+v", save)
+		}
+		if err := json.Unmarshal(save.State, &restored); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !found || restored.Steps != 3 || len(restored.Rows) != 5 || restored.Rows[0] != board[0] {
+		t.Fatalf("round trip: %+v", restored)
+	}
+
+	// PUT 是 last-write-wins：同一个槽再写一次就覆盖，不新增行。
+	if w := put("klotski:1", map[string]any{"rows": board, "steps": 9, "history": []any{}}); w.Code != 200 {
+		t.Fatalf("replace: %d %s", w.Code, w.Body.String())
+	}
+	list := saves(cookie)
+	if len(list) != 3 {
+		t.Fatalf("replace added a row: %d", len(list))
+	}
+	restored.Steps = 0
+	for _, save := range list {
+		if save.Game == "klotski:1" {
+			if err := json.Unmarshal(save.State, &restored); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if restored.Steps != 9 {
+		t.Fatalf("last write wins: %d", restored.Steps)
+	}
+
+	// 非法槽名（不存在的关卡、白名单外的游戏）一律 404，读也不认。
+	for _, slot := range []string{"klotski:6", "klotski:0", "klotski:x", "chess"} {
+		if w := put(slot, map[string]any{}); w.Code != 404 {
+			t.Fatalf("bad slot %s: %d %s", slot, w.Code, w.Body.String())
+		}
+		if w := doJSON(t, h, "DELETE", "/api/v1/games/saves/"+slot, nil, cookie, ""); w.Code != 404 {
+			t.Fatalf("delete bad slot %s: %d %s", slot, w.Code, w.Body.String())
+		}
+	}
+
+	// state 缺失或超过 32 KiB 都是 400：服务端不解释它，但不会替它兜底大小。
+	if w := doJSON(t, h, "PUT", "/api/v1/games/saves/klotski:1", map[string]any{}, cookie, ""); w.Code != 400 {
+		t.Fatalf("missing state: %d %s", w.Code, w.Body.String())
+	}
+	if w := put("klotski:1", strings.Repeat("x", gameSaveMaxState+1)); w.Code != 400 {
+		t.Fatalf("oversize state: %d %s", w.Code, w.Body.String())
+	}
+	// 未知字段是硬 400（decode 的 DisallowUnknownFields）。
+	if w := doJSON(t, h, "PUT", "/api/v1/games/saves/klotski:1", map[string]any{"state": 1, "extra": 1}, cookie, ""); w.Code != 400 {
+		t.Fatalf("unknown field: %d %s", w.Code, w.Body.String())
+	}
+
+	// 没选孩子就没有槽可写（家长端未选档案时也会走到这里）。
+	family, _, err := s.resolvedFamily(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := getStateTest(t, h, cookie)
+	unselected := sessionFor(t, s, family, "child", state.Children[0].ID, "")
+	if w := doJSON(t, h, "GET", "/api/v1/games/saves", nil, unselected, ""); w.Code != 400 {
+		t.Fatalf("unselected get: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "PUT", "/api/v1/games/saves/klotski:1", map[string]any{"state": 1}, unselected, ""); w.Code != 400 {
+		t.Fatalf("unselected put: %d %s", w.Code, w.Body.String())
+	}
+
+	// 进度按孩子隔离：第二个孩子看到的是自己的空进度。
+	w := doJSON(t, h, "POST", "/api/v1/children/", map[string]any{"name": "二娃", "avatar": "🧒", "color": "蓝"}, parentCookie(t, h), "")
+	if w.Code != 200 {
+		t.Fatalf("create child: %d %s", w.Code, w.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	second := childCookie(t, h, created.ID)
+	if list := saves(second); len(list) != 0 {
+		t.Fatalf("second child sees saves: %d", len(list))
+	}
+	if w := doJSON(t, h, "PUT", "/api/v1/games/saves/klotski:1", map[string]any{"state": map[string]any{"steps": 1}}, second, ""); w.Code != 200 {
+		t.Fatalf("second child save: %d %s", w.Code, w.Body.String())
+	}
+	// 另一个家庭看得见的是另一套：既读不到本家的槽，也动不了它。
+	other := otherFamily(t, s, "OTHER", "Asia/Shanghai")
+	if _, err := s.db.Exec(`INSERT INTO children(id,family_id,name,avatar,color,level,experience,points_balance,created_at) VALUES('child-other-saves',?,'Other child','⭐','#ffb547',1,0,0,?)`, other, nowText(s.now())); err != nil {
+		t.Fatal(err)
+	}
+	foreign := sessionFor(t, s, other, "child", "child-other-saves", "child-other-saves")
+	if list := saves(foreign); len(list) != 0 {
+		t.Fatalf("foreign family sees saves: %d", len(list))
+	}
+	if w := doJSON(t, h, "PUT", "/api/v1/games/saves/klotski:1", map[string]any{"state": map[string]any{"steps": 7}}, foreign, ""); w.Code != 200 {
+		t.Fatalf("foreign save: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "DELETE", "/api/v1/games/saves/klotski:1", nil, foreign, ""); w.Code != 204 {
+		t.Fatalf("foreign delete: %d %s", w.Code, w.Body.String())
+	}
+	if list := saves(cookie); len(list) != 3 {
+		t.Fatalf("foreign writes touched the served family: %d", len(list))
+	}
+
+	// DELETE 没有行也回 204，重复调用安全。
+	if w := doJSON(t, h, "DELETE", "/api/v1/games/saves/klotski:1", nil, cookie, ""); w.Code != 204 {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "DELETE", "/api/v1/games/saves/klotski:1", nil, cookie, ""); w.Code != 204 {
+		t.Fatalf("second delete: %d %s", w.Code, w.Body.String())
+	}
+	if list := saves(cookie); len(list) != 2 {
+		t.Fatalf("after delete: %d", len(list))
 	}
 }
