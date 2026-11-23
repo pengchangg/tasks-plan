@@ -71,6 +71,8 @@ type Child struct {
 	Experience    float64 `json:"experience"`
 	PointsBalance int     `json:"pointsBalance"`
 	StreakDays    int     `json:"streakDays"`
+	// 到账庆祝游标：孩子端已经弹过的 earned 台账截止到这里（空串表示还没有过到账）。
+	RewardsSeenAt string `json:"rewardsSeenAt"`
 }
 type Task struct {
 	ID             string `json:"id"`
@@ -395,6 +397,7 @@ func (s *Server) Handler() http.Handler {
 				c.Put("/{id}", s.parentOnly(s.saveChild))
 				c.Delete("/{id}", s.parentOnly(s.deleteChild))
 				c.Post("/{id}/points", s.parentOnly(s.awardPoints))
+				c.Post("/{id}/rewards/seen", s.markRewardsSeen)
 			})
 			a.Route("/tasks", func(t chi.Router) {
 				t.Post("/", s.parentOnly(s.saveTask))
@@ -1710,6 +1713,34 @@ func (s *Server) awardPoints(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"id": lid})
+}
+
+// markRewardsSeenSQL 把孩子的到账游标推到当前最新一笔 earned 记录。两参 MAX()
+// 让游标只会前进：取消作业完成会删掉台账行，退回的 MAX 不该把庆祝过的再弹一遍。
+// 这里的文字比较和客户端 createdAt <= rewardsSeenAt 是同一套，MAX 保证游标不小于
+// 该孩子的每一行（同秒多笔只会让顺序模糊，不会漏）。
+const markRewardsSeenSQL = `UPDATE children SET rewards_seen_at=MAX(rewards_seen_at,COALESCE((SELECT MAX(created_at) FROM point_ledger WHERE family_id=? AND child_id=? AND entry_type='earned'),'')) WHERE family_id=? AND id=?`
+
+// markRewardsSeen 推进到账庆祝游标。只有孩子端正常打开时才会调它（家长预览不调），
+// 所以游标只会被孩子自己推着走；不写台账、不动余额，重放结果相同，因此不要
+// Idempotency-Key。
+func (s *Server) markRewardsSeen(w http.ResponseWriter, r *http.Request) {
+	x := sess(r)
+	if x.ActorType != "child" {
+		problem(w, 403, "forbidden", "child access required")
+		return
+	}
+	cid := chi.URLParam(r, "id")
+	// 子端会话的 actor 已经镜像选中孩子，替别人标记没有任何合法场景。
+	if cid == "" || cid != x.SelectedChildID {
+		problem(w, 404, "not_found", "child not found")
+		return
+	}
+	if _, err := s.db.ExecContext(r.Context(), markRewardsSeenSQL, x.FamilyID, cid, x.FamilyID, cid); err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	w.WriteHeader(204)
 }
 
 // IsActive 用指针：decode 关了 DisallowUnknownFields 也只能拒未知字段名，

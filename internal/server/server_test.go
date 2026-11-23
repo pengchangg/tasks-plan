@@ -1499,6 +1499,83 @@ func TestParentPointsAdjustmentIsIdempotentScopedAndCreditsGrowth(t *testing.T) 
 	}
 }
 
+// 到账庆祝游标：孩子端正常打开时把已经弹过的那批记下来，刷新/换设备不再重弹；
+// 家长预览不推进，所以孩子之后照样能看到。游标只认 earned，花分不动它。
+func TestRewardSeenCursorAdvancesOnlyForTheChildAndNeverCoversSpentRows(t *testing.T) {
+	s := testServer(t)
+	h := s.Handler()
+	parent := parentCookie(t, h)
+	newest := func(child string) string {
+		var v string
+		if err := s.db.QueryRow(`SELECT COALESCE(MAX(created_at),'') FROM point_ledger WHERE child_id=? AND entry_type='earned'`, child).Scan(&v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	state := getStateTest(t, h, parent)
+	mia := state.Children[0]
+	// SeedDemo 种了十天历史：游标必须已经在它们之后，第一次打开不该补发旧账。
+	if mia.RewardsSeenAt == "" || newest(mia.ID) > mia.RewardsSeenAt {
+		t.Fatalf("seeded cursor %q is behind %q", mia.RewardsSeenAt, newest(mia.ID))
+	}
+	var pending Task
+	for _, v := range state.Tasks {
+		if v.Status == "pending_review" {
+			pending = v
+			break
+		}
+	}
+	if pending.ID == "" {
+		t.Fatal("missing pending task")
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/tasks/"+pending.ID+"/review", map[string]any{"approved": true}, parent, "reward-seen-review"); w.Code != 200 {
+		t.Fatalf("review: %d %s", w.Code, w.Body.String())
+	}
+	state = getStateTest(t, h, parent)
+	if state.Children[0].RewardsSeenAt != mia.RewardsSeenAt {
+		t.Fatalf("a new reward moved the cursor to %q", state.Children[0].RewardsSeenAt)
+	}
+	awarded := newest(mia.ID)
+	if awarded <= mia.RewardsSeenAt {
+		t.Fatalf("new reward %q did not pass the cursor %q", awarded, mia.RewardsSeenAt)
+	}
+	// 花分只写 spent 行，推不动游标。
+	if w := doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/points", map[string]any{"amount": -5, "note": "扣分"}, parent, "reward-seen-spend"); w.Code != 200 {
+		t.Fatalf("deduct: %d %s", w.Code, w.Body.String())
+	}
+	// 只有子端能推进自己的游标：家长 403，兄弟孩子 404。
+	if w := doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/rewards/seen", nil, parent, ""); w.Code != 403 || !strings.Contains(w.Body.String(), "child access required") {
+		t.Fatalf("parent actor: %d %s", w.Code, w.Body.String())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/children/", map[string]string{"name": "弟弟", "avatar": "🦊", "color": "#9bd8c8"}, parent, ""); w.Code != 200 {
+		t.Fatalf("create sibling: %d %s", w.Code, w.Body.String())
+	}
+	var siblingID string
+	if err := s.db.QueryRow(`SELECT id FROM children WHERE name='弟弟'`).Scan(&siblingID); err != nil {
+		t.Fatal(err)
+	}
+	mieCookie := childCookie(t, h, mia.ID)
+	if w := doJSON(t, h, "POST", "/api/v1/children/"+siblingID+"/rewards/seen", nil, mieCookie, ""); w.Code != 404 {
+		t.Fatalf("sibling cursor: %d %s", w.Code, w.Body.String())
+	}
+	seen := func() string {
+		return getStateTest(t, h, parent).Children[0].RewardsSeenAt
+	}
+	if seen() != mia.RewardsSeenAt {
+		t.Fatalf("403/404 moved the cursor to %q", seen())
+	}
+	if w := doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/rewards/seen", nil, mieCookie, ""); w.Code != 204 {
+		t.Fatalf("mark seen: %d %s", w.Code, w.Body.String())
+	}
+	if got := seen(); got != awarded {
+		t.Fatalf("cursor %q, want %q", got, awarded)
+	}
+	// 重放不写新东西，也不会把游标弄回旧值。
+	if w := doJSON(t, h, "POST", "/api/v1/children/"+mia.ID+"/rewards/seen", nil, mieCookie, ""); w.Code != 204 || seen() != awarded {
+		t.Fatalf("replay: %d %q", w.Code, seen())
+	}
+}
+
 // homeworkFile keeps the upload order deterministic: multipartRequest takes a
 // map, and the order the parts arrive in is the order the media renders in.
 type homeworkFile struct {

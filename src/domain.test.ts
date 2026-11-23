@@ -27,6 +27,7 @@ function dayState(): AppState {
         experience: 0,
         pointsBalance: 10,
         streakDays: 0,
+        rewardsSeenAt: "",
       },
       {
         id: "leo",
@@ -37,6 +38,7 @@ function dayState(): AppState {
         experience: 0,
         pointsBalance: 40,
         streakDays: 0,
+        rewardsSeenAt: "",
       },
     ],
     tasks: [

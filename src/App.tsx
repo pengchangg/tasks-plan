@@ -239,26 +239,26 @@ function Shell() {
   const reward = rewardQueue[0] ?? null;
   // childId -> 本次页面加载里已经庆祝过的到账台账 id，同一笔到账不会弹第二次。
   const seenRewards = useRef(new Map<string, Set<string>>());
-  const rewardsBaselined = useRef(false);
   useEffect(() => {
     // store 启动时用的是 src/data.ts 的演示状态，必须等第一份服务端状态落地，
-    // 才能判断哪些到账属于「打开页面前就已经存在」的历史记录。
+    // 才能判断哪些到账属于「打开页面前就已经存在」的历史记录。这条历史的边界
+    // 现在由服务端的游标 children.rewardsSeenAt 给：谁先打开不再算谁看过。
     if (!store.connected) return;
-    if (!rewardsBaselined.current) {
-      rewardsBaselined.current = true;
-      for (const child of store.state.children)
+    for (const child of store.state.children)
+      if (!seenRewards.current.has(child.id))
         seenRewards.current.set(
           child.id,
           new Set(
             store.state.ledger
               .filter(
-                (item) => item.childId === child.id && item.type === "earned",
+                (item) =>
+                  item.childId === child.id &&
+                  item.type === "earned" &&
+                  item.createdAt <= child.rewardsSeenAt,
               )
               .map((item) => item.id),
           ),
         );
-      return;
-    }
     // 家长端不庆祝：这些到账保持「未读」，等孩子端一打开就逐条弹出来。
     if (isParent) return;
     const childId = store.state.activeChildId;
@@ -278,6 +278,20 @@ function Shell() {
   useEffect(() => {
     if (isParent) setRewardQueue([]);
   }, [isParent]);
+  // 队列走完 = 这一批孩子真的看过了：推进服务端的到账游标，刷新、重进、换设备都
+  // 不再重弹。家长端（上面已经清空队列）和预览都不推进——预览看到的那批要留给孩子
+  // 自己打开时看，这正是这个游标存在的理由。
+  const unackedDrain = useRef(false);
+  useEffect(() => {
+    if (rewardQueue.length) {
+      unackedDrain.current = true;
+      return;
+    }
+    if (!unackedDrain.current) return;
+    unackedDrain.current = false;
+    if (isParent || store.preview) return;
+    store.actions.markRewardsSeen();
+  }, [rewardQueue.length, isParent, store.preview]);
   const dismissReward = () => {
     if (reward) {
       const seen = seenRewards.current.get(reward.childId) ?? new Set<string>();

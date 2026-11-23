@@ -32,6 +32,7 @@
 | `PUT /api/v1/children/{id}` | 同上，`200 {id}` / `404` |
 | `DELETE /api/v1/children/{id}` | `204`；最后一个孩子 `409 last_child` |
 | `POST /api/v1/children/{id}/points` | 家长手动加减分，见下 |
+| `POST /api/v1/children/{id}/rewards/seen` | 孩子端推进「到账庆祝游标」，见下；`204` |
 
 `State` 的形状（也是 `src/types.ts` 的 `AppState`）：
 
@@ -40,7 +41,7 @@
   "timezone": "Asia/Shanghai",
   "role": "child",
   "activeChildId": "child_ab12",
-  "children": [{"id":"child_ab12","name":"米娅","avatar":"🦊","color":"mint","level":2,"experience":34,"pointsBalance":20,"streakDays":3}],
+  "children": [{"id":"child_ab12","name":"米娅","avatar":"🦊","color":"mint","level":2,"experience":34,"pointsBalance":20,"streakDays":3,"rewardsSeenAt":"2026-10-20T11:05:00Z"}],
   "tasks": [{"id":"task_9f","childId":"child_ab12","title":"阅读 20 分钟","description":"","category":"学习成长","points":20,"repeatRule":"daily","repeatWeekday":0,"repeatWeekdays":[],"dueDate":"2026-10-21","status":"todo","createdAt":"2026-10-01T02:00:00Z"}],
   "submissions": [{"id":"sub_1","taskId":"task_9f","childId":"child_ab12","note":"读完了","attachments":[],"submittedAt":"2026-10-21T09:30:00Z"}],
   "wishes": [{"id":"wish_1","title":"选择一次晚餐","description":"","pointsCost":80,"icon":"🍜","color":"coral","isActive":true}],
@@ -63,6 +64,20 @@
 ```
 
 `amount` 取值 `-500..-1` / `1..500`，`note` ≤30 字。`200 {id}`；余额不足 `409 insufficient_balance`。正数同时按 `max(amount/5, 1)` 增加经验，负数只扣余额。
+
+### 到账庆祝游标
+
+`children.rewardsSeenAt` 是「孩子端已经弹过哪一批积分到账」的服务端记录（该孩子最后一笔已庆祝的
+`earned` 台账的 `createdAt`，空串表示还没有过到账）。孩子端只用它判断哪些到账还没弹过，所以刷新、
+重进、换设备都不会把旧账重弹一遍，也不会因为别人先打开过就被吞掉。
+
+`POST /api/v1/children/{id}/rewards/seen` 把它推到当前最新一笔 `earned` 台账：
+
+- 只有**子端会话**能调，家长会话 `403 forbidden`；`{id}` 必须是当前选中的孩子，否则 `404 not_found`。
+- 一句话 `UPDATE`，本身幂等：不写台账、不动余额，重放结果相同，所以**不要** `Idempotency-Key`。
+- 游标只会前进（`MAX`）：取消作业完成会删掉台账行，不该把已经庆祝过的到账再放回去。
+- 家长从菜单切到孩子端只是**预览**：横幅照弹，但不调这个接口，所以孩子之后打开照样能看到这一批。
+
 
 ## 任务
 

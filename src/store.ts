@@ -27,6 +27,7 @@ const emptyChild: Child = {
   experience: 0,
   pointsBalance: 0,
   streakDays: 0,
+  rewardsSeenAt: "",
 };
 
 type APIError = { error?: { code?: string; message?: string } };
@@ -136,6 +137,10 @@ export function useAppStore() {
   const [state, setState] = useState<AppState>({ ...seedState, role: "child" });
   const [ready, setReady] = useState(false);
   const [connected, setConnected] = useState(false);
+  // 家长端切到孩子端只是「预览」：到账横幅照弹（家长也想看看孩子会看到什么），
+  // 但不推进服务端的到账游标，孩子之后打开自己的应用还能看到这一批。boot/reload
+  // 是孩子正常打开，不算预览。
+  const [preview, setPreview] = useState(false);
   // 成功和失败共用一条横幅，但样式必须不同：保存成功不该长得像报错。
   const [notice, setNotice] = useState<{ text: string; ok: boolean } | null>(
     null,
@@ -409,6 +414,7 @@ export function useAppStore() {
       }
       // 密码已经对、会话已经建好：之后的重拉失败不能再报「密码不正确」，否则家长
       // 会一遍遍重输一个正确的密码。只是这一屏的数字是旧的。
+      setPreview(false);
       try {
         await refresh();
         setMessage("");
@@ -438,8 +444,18 @@ export function useAppStore() {
         return false;
       }
     },
-    enterChild: () =>
-      void run(() => request("/auth/child", { method: "POST" })),
+    // 三个调用点（角色菜单、家长侧栏与顶栏的「回到孩子端」）都是家长在预览孩子端。
+    enterChild: () => {
+      setPreview(true);
+      void run(() => request("/auth/child", { method: "POST" }));
+    },
+    // 到账庆祝游标：孩子端把自己已经弹完的这一批记下来，刷新、重进、换设备都不再
+    // 重弹。走 run 会顺手刷新 /state 并抢提示条，而丢一次标记最多让这批到账下次
+    // 再弹一遍——庆祝本身不该被一句报错打断，所以失败就吞掉。
+    markRewardsSeen: () =>
+      void request(`/children/${activeChild.id}/rewards/seen`, {
+        method: "POST",
+      }).catch(() => {}),
     setActiveChild: (childId: string) =>
       void run(async () => {
         await request("/session/child", json("PATCH", { childId }));
@@ -708,6 +724,7 @@ export function useAppStore() {
     actions,
     ready,
     connected,
+    preview,
     message: notice?.text ?? "",
     messageOk: notice?.ok ?? false,
     stats,

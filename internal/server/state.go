@@ -166,7 +166,7 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 	if err != nil {
 		return out, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,avatar,color,experience,points_balance FROM children WHERE family_id=? ORDER BY created_at`, x.FamilyID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,avatar,color,experience,points_balance,rewards_seen_at FROM children WHERE family_id=? ORDER BY created_at`, x.FamilyID)
 	if err != nil {
 		return out, err
 	}
@@ -176,7 +176,7 @@ func (s *Server) state(ctx context.Context, x session) (State, error) {
 		// 一个非整数值就让 /state 整体 500。按 REAL 扫、显式取整，坏数据只影响这一行
 		// 的等级显示。
 		var totalExperience float64
-		if err = rows.Scan(&c.ID, &c.Name, &c.Avatar, &c.Color, &totalExperience, &c.PointsBalance); err != nil {
+		if err = rows.Scan(&c.ID, &c.Name, &c.Avatar, &c.Color, &totalExperience, &c.PointsBalance, &c.RewardsSeenAt); err != nil {
 			rows.Close()
 			return out, err
 		}

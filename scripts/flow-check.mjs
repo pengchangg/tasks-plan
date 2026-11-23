@@ -87,6 +87,25 @@ async function waitForState(predicate) {
   }
   throw new Error("Timed out waiting for server state");
 }
+// 到账游标落在服务端（children.rewardsSeenAt）：每次文档加载都会把「还没庆祝过」
+// 的到账按顺序补发一遍，所以除了专门断言那批横幅的场景，每处 goto/reload 之后都先
+// 把它弹完再说，免得飘到后面的断言上。加载后先给 500ms 安静时间，再逐条关。
+async function settleRewards() {
+  const banner = page.locator(".reward-celebration");
+  let quiet = 0;
+  for (let attempt = 0; attempt < 80 && quiet < 20; attempt += 1) {
+    if (await banner.count()) {
+      quiet = 0;
+      await banner.getByRole("button", { name: "关闭积分到账提示" }).click();
+      await banner.waitFor({ state: "detached" });
+      continue;
+    }
+    quiet += 1;
+    await page.waitForTimeout(50);
+  }
+}
+const cursorOf = (state, name = "米娅") =>
+  state.children.find((child) => child.name === name).rewardsSeenAt;
 // 同一标题在状态里可能有多个实例：种子带十天历史，真实部署也会按天累计。断言要的
 // 始终是「当前这一个」——日任务的今天、周任务的本周那天——所以按 due_date 取最新的。
 function currentTask(state, title) {
@@ -141,6 +160,7 @@ async function enterChild() {
 }
 
 await page.goto(`${baseUrl}/child/tasks`, { waitUntil: "networkidle" });
+await settleRewards();
 await openChildEnd();
 await page.getByText("整理自己的书桌").waitFor();
 let state = await getState();
@@ -199,6 +219,7 @@ await page.screenshot({
 });
 
 await page.goto(`${baseUrl}/parent/tasks`, { waitUntil: "networkidle" });
+await settleRewards();
 await page.waitForURL(/\/child$/);
 await unlockParent(true, /\/parent\/tasks$/);
 await page.getByRole("link", { name: "任务管理" }).click();
@@ -268,6 +289,7 @@ await waitForState(
     initialBalance - 60,
 );
 await page.reload({ waitUntil: "networkidle" });
+await settleRewards();
 state = await getState();
 assert.equal(
   state.children.find((c) => c.name === "米娅").pointsBalance,
@@ -296,6 +318,7 @@ state = await waitForState((s) => Boolean(s.redemptions.at(-1)?.completedAt));
 assert.equal(state.redemptions.at(-1).completedNote, wishNote);
 assert.equal(state.redemptions.at(-1).attachments.length, 2);
 await page.reload({ waitUntil: "networkidle" });
+await settleRewards();
 await starRow.getByText("已完成").waitFor();
 await starRow.getByText(wishNote).waitFor();
 await assertRealImage(starRow.locator(".media-thumb img"), proofSize);
@@ -546,6 +569,7 @@ approved = await waitForState(
 );
 const weeklyPoints = currentTask(approved, "每周整理书架").points;
 
+const cursorBeforePreview = cursorOf(await getState());
 await enterChild();
 const celebration = page.locator(".reward-celebration");
 await celebration.getByText("完成「阅读 20 分钟」").waitFor();
@@ -570,6 +594,40 @@ await page
   .getByRole("button", { name: "关闭积分到账提示" })
   .click();
 await page.locator(".reward-celebration").waitFor({ state: "detached" });
+// 预览不算看过：家长从菜单切过来这一趟弹完的两笔，游标必须原地不动，孩子自己打开
+// （刷新就是正常打开）时还得再弹一遍。游标落在服务端，换设备、重装也一样。
+assert.equal(cursorOf(await getState()), cursorBeforePreview);
+const earnedCursor = (await getState()).ledger
+  .filter((item) => item.type === "earned")
+  .map((item) => item.createdAt)
+  .sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+  .at(-1);
+assert.ok(
+  cursorBeforePreview < earnedCursor,
+  `cursor ${cursorBeforePreview} already covers ${earnedCursor}`,
+);
+await page.reload({ waitUntil: "networkidle" });
+const replayed = page.locator(".reward-celebration");
+await replayed.getByText("完成「阅读 20 分钟」").waitFor();
+assert.equal(await replayed.locator("strong").innerText(), `+${readingPoints} 积分到账！`);
+assert.equal(await replayed.count(), 1);
+assert.ok(!(await replayed.innerText()).includes("每周整理书架"));
+await replayed.getByRole("button", { name: "关闭积分到账提示" }).click();
+await page.getByText("完成「每周整理书架」").waitFor();
+assert.equal(
+  await page.locator(".reward-celebration strong").innerText(),
+  `+${weeklyPoints} 积分到账！`,
+);
+await page
+  .locator(".reward-celebration")
+  .getByRole("button", { name: "关闭积分到账提示" })
+  .click();
+await page.locator(".reward-celebration").waitFor({ state: "detached" });
+// 队列走完才推进游标，之后刷新不再重弹。
+assert.equal(cursorOf(await waitForState((s) => cursorOf(s) === earnedCursor)), earnedCursor);
+await page.reload({ waitUntil: "networkidle" });
+await page.waitForTimeout(1200);
+assert.equal(await page.locator(".reward-celebration").count(), 0);
 // 成长统计：区间由服务端 from/to 决定，卡片和柱状图随区间变化，不再是写死的 7 天。
 await enterParent();
 await page.getByRole("link", { name: "成长统计" }).click();
@@ -1053,6 +1111,7 @@ assert.ok(savedLevel1, "走了一步却没有留下断点");
 assert.equal(savedLevel1.state.steps, 1, "断点没有记下这一步");
 assert.equal(savedLevel1.state.history.length, 1, "断点没有带上撤销栈");
 await page.reload();
+await settleRewards();
 await page.locator(".klotski-piece").first().waitFor();
 await page.locator(".klotski-restored").waitFor();
 assert.ok(
@@ -1254,6 +1313,7 @@ await page.getByRole("button", { name: /^口算闯关/ }).click();
 await page.waitForURL(/\/child\/games\/calc$/);
 // 断点续玩：先开一局答对 1 题，离开这一屏再回来，必须能从第 1 档的 1 题接着。
 await page.goto(baseUrl + "/child/games/calc?seed=777");
+await settleRewards();
 await page.getByRole("button", { name: "第1档 · 20 以内加减" }).click();
 await page.locator(".quiz-problem").waitFor();
 await clickChoice(await calcAnswer());
@@ -1261,6 +1321,7 @@ await page.waitForTimeout(500);
 // 等一次倒计时滴答：剩 60 秒和剩 59 秒在界面上分不出「接上」还是「重开」。
 await waitForSave("timed_calc", (state) => state.score === 1 && state.seconds < 60);
 await page.goto(baseUrl + "/child/games");
+await settleRewards();
 await page.getByRole("button", { name: /^口算闯关/ }).click();
 await page.waitForURL(/\/child\/games\/calc$/);
 const resumeCalc = page.getByRole("button", {
@@ -1279,6 +1340,7 @@ assert.ok(
   `续玩没有接上剩余秒数：${resumedSeconds}`,
 );
 await page.goto(baseUrl + "/child/games/calc?seed=777");
+await settleRewards();
 await page.getByRole("button", { name: "第1档 · 20 以内加减" }).click();
 await page.locator(".quiz-problem").waitFor();
 // 第 1 局：答对 3 题就交卷 → +3 与横幅。
@@ -1325,6 +1387,7 @@ await page.waitForURL(/\/child\/games$/);
 await page.getByRole("button", { name: /^找规律/ }).click();
 await page.waitForURL(/\/child\/games\/pattern$/);
 await page.goto(baseUrl + "/child/games/pattern?seed=4242");
+await settleRewards();
 await page.getByRole("button", { name: "开始找规律" }).click();
 await page.locator(".pattern-seq").waitFor();
 const patternAnswer = () =>
@@ -1385,6 +1448,7 @@ await page
 await page.waitForTimeout(500);
 await waitForSave("pattern_quiz", (state) => state.index === 1);
 await page.goto(baseUrl + "/child/games");
+await settleRewards();
 await page.getByRole("button", { name: /^找规律/ }).click();
 await page.waitForURL(/\/child\/games\/pattern$/);
 const resumePattern = page.getByRole("button", { name: "继续上次（第 2 / 10 题）" });
@@ -1397,6 +1461,7 @@ assert.ok(
 );
 // 续玩验证完就重新开一局，让下面那轮从第 1 题开始（故意错一题）。
 await page.goto(baseUrl + "/child/games/pattern?seed=4242");
+await settleRewards();
 await page.getByRole("button", { name: "开始找规律" }).click();
 await page.locator(".pattern-seq").waitFor();
 const patternReport1 = page.waitForResponse((response) =>
@@ -2011,6 +2076,7 @@ await waitForState((state) => state.gameCosts.playCost === 5 && state.gameCosts.
 await enterChild();
 const costBalance = wallet(await getState());
 await page.goto(`${baseUrl}/child/games/klotski?level=3`);
+await settleRewards();
 await page.locator(".klotski-start").waitFor();
 assert.ok(
   (await page.locator(".klotski-start").innerText()).includes("本关开始扣 5 积分"),
@@ -2064,6 +2130,7 @@ assert.equal(wallet(await getState()), 0, "余额没有扣到 0");
 // 0 分就不能开新局：按钮置灰 + 写明还差多少，后端另有 409 兜底。
 await enterChild();
 await page.goto(`${baseUrl}/child/games/calc`);
+await settleRewards();
 await page.locator(".quiz-levels").waitFor();
 assert.equal(
   await page.getByRole("button", { name: /第1档/ }).isDisabled(),
@@ -2088,6 +2155,7 @@ assert.equal((await costsReset).status(), 200, "改回免费没保存成功");
 await waitForState((state) => state.gameCosts.playCost === 0 && state.gameCosts.hintCost === 0);
 await enterChild();
 await page.goto(`${baseUrl}/child/games/calc`);
+await settleRewards();
 await page.getByRole("button", { name: /第1档/ }).click();
 await page.locator(".quiz-problem").waitFor();
 assert.equal(await page.locator(".modal").count(), 0, "免费局不该再弹确认");
@@ -2145,6 +2213,7 @@ console.log(
     gameCosts: true,
     gameCostCharged: true,
     gameCostInsufficient: true,
+    rewardSeenCursor: true,
     consoleErrors: errors.length,
   }),
 );

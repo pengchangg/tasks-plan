@@ -22,6 +22,7 @@ export const seedState: AppState = {
       experience: 72,
       pointsBalance: 185,
       streakDays: 6,
+      rewardsSeenAt: "",
     },
   ],
   tasks: [

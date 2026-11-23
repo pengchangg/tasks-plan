@@ -196,6 +196,11 @@ func (s *Server) SeedDemo(ctx context.Context, code string) error {
 			}
 		}
 	}
+	// 种下去的十天历史对 /state 来说就是「打开页面前就有的到账」：游标一起推过去，
+	// 否则演示库第一次打开会把七笔旧账全弹一遍。
+	if _, err = tx.ExecContext(ctx, markRewardsSeenSQL, family, mia, family, mia); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
